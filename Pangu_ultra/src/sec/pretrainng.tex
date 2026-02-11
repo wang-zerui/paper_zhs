@@ -1,0 +1,143 @@
+\section{Model Training}
+In this section, we present our training pipeline, which is similar to training state-of-the-art language models, e.g., DeepSeek-V3~\cite{deepseekv3} and Llama 3~\cite{dubey2024llama}. The training process consists of three main stages: pre-training, long context extension, and post-training. Each stage has specific training strategies and data construction methods to gradually enhance the model capabilities.
+
+
+\subsection{Pre-training Stage}
+
+
+We first introduce the data construction in the pre-training of \modelname, followed by the details of data verification. Then we elaborate the practical approach for the long context extension. The detailed pre-training hyper-parameters are finally presented.
+
+\subsubsection{Data Construction}
+The pre-training corpus of \modelname~contains high-quality and diverse 13.2T tokens produced by our tokenizer, as stated in Section~\ref{section:tokenizer}.
+Table~\ref{tab:data_recipe} shows the pre-training process is structured into three sequential phases: the \textit{general} phase, the \textit{reasoning} phase, and the \textit{annealing} phase. 
+These phases are designed to progressively develop general knowledge and linguistic capabilities, enhance reasoning skills, and further refine knowledge and behavior, respectively.
+The amount of data used in each phase is 12T, including 7.4T and 4.6T data in two distinct subphases, 0.8T, and 0.4T tokens.
+
+
+
+
+\begin{table}[h!]
+    \centering
+        \caption{Data recipe of \modelname~pre-training.}
+        \small
+        \begin{tabular}{l|c|c|c} 
+        \toprule
+        \textbf{Dataset} & \textbf{General} & \textbf{Reasoning} & \textbf{Annealing} \\ 
+        \midrule
+        % \hline
+        General English & 54\% & 14\% & 21\% \\ 
+        % \hline
+        General Chinese & 13\% & 6\% & 20\% \\ 
+        % \hline
+        Multi-lingual & 8\% & 4\% & 3\% \\ 
+        % \hline
+        Instruction & 2\% & 11\% & 20\% \\ 
+        % \hline
+        Math & 6\% & 28\% & 18\% \\ 
+        % \hline
+        Code & 17\% & 37\% & 18\% \\ 
+        \bottomrule
+        \end{tabular}
+    \label{tab:data_recipe}
+\end{table}
+
+
+In the initial general training phase, we utilize a corpus focused on developing broad linguistic capabilities and general knowledge. 
+This stage primarily consists of English and Chinese data collected from a diverse range of sources, including web pages, books, encyclopedias, \textit{etc}.
+Data from the multilingual and various industrial domains is also incorporated. Based on our data quality assessment in Section~\ref{sec:data_quality}, we perfer to use higher-quality data in the second sub-phrase than the first.
+
+In the second reasoning phase, we increase the proportion of high-quality and diverse mathematical and coding data---raising it to over 60\% of the corpus to enhance the reasoning capabilities of \modelname. 
+The coding data includes both pure code and mixed text-code samples. The math data also involves a lot of English and Chinese texts.
+Moreover, LLM-generated synthetic data is widely incorporated to enrich the corpus.
+
+
+The third annealing phrase is designed to help the model consolidate and effectively apply the knowledge and reasoning skills acquired in the previous stages. 
+Therefore, we place greater emphasis on instruction data, which accounts for approximately 20\% of the corpus. 
+We curate in-house question banks covering a wide range of topics and construct both short and long chain-of-thought (CoT) responses. 
+These reasoning paths are carefully refined to ensure clarity and logical coherence.
+
+Overall, the pre-training data for \modelname~is carefully designed to ensure high quality, diversity, and minimal redundancy. 
+We assign quality and difficulty labels to the data and adopt a curriculum-based sampling strategy for the reasoning data across all three phases---progressing from simpler examples to more complex ones throughout the training cycle.
+
+
+
+\subsubsection{Data Quality Assessment}
+\label{sec:data_quality}
+
+Data quality assessment plays a crucial role in enhancing the overall quality of the data. 
+Training \modelname~employs both rule-based heuristics and model-based evaluation to enhance data quality.
+
+For model-based quality assessment, we leverage the Pangu series as the base model. To better align quality evaluation with human value judgments, we fine-tune the model using a manually annotated dataset. The fine-tuned evaluator is then applied to a large-scale pre-training corpus exceeding 10T tokens. Data samples are scored across multiple dimensions, including cleanliness, fluency, educational value, and richness. These annotated scores are then used in a prioritized sampling strategy, where higher-quality samples are assigned higher sampling probabilities.
+
+
+To validate the effectiveness of our data quality assessment, we conducted an ablation study using a proxy model with 2.6 billion parameters. Empirical results show that, to achieve comparable performance, the model trained on low-scoring data required 1.6× more tokens than the one trained on high-quality high-scoring data. Therefore, high data quality is important for improving training efficiency.
+
+
+
+\subsubsection{Pre-training Parameters} \label{sec:hyper_params}
+\modelname~is trained using AdamW optimizer~\cite{loshchilov2017decoupled} with a weight decay of 0.1 and epsilon is set to $1 \times 10^{-8}$. 
+The momentum parameters are set to $\beta_1 = 0.9$ and $\beta_2 = 0.95$. The gradient clipping norm is set to 1.0.
+To improve the training stability and overall performance, the pre-training of \modelname~is organized into the following phases:
+
+
+\textbf{0T--7.4T tokens} The sequence length is set to 4K (RoPE base = $1 \times 10^4$). The batch size increase from 1,024 to 1,536 (at 1.2T) and 2,048 (at 1.9T). The increased batch size improves training efficiency and throughput. The learning rate follows a cosine decay from $1 \times 10^{-4}$ to $1 \times 10^{-5}$ with 4,000 warmup steps to ensure stable early training.
+
+
+
+\textbf{7.4T--12.0T tokens} The sequence length remains at 4K with a batch size of 2,048. The learning rate is fixed at $1 \times 10^{-5}$ in this phase.
+
+\textbf{12.0T--12.8T tokens} The sequence length increases to 8K (RoPE base = $1 \times 10^5$). The batch size is reduced to 1,536. The learning rate decays from $1 \times 10^{-5}$ to $7.5 \times 10^{-6}$ using cosine scheduling.
+
+
+
+
+\subsection{Long Context Extension}
+The ability of LLMs to understand long context inputs is critical in long-thinking process and practical applications.
+In the final stages of pre-training, \modelname~is trained on long sequence data to support a maximum context length of 128K.
+The training consists of two progressive phases: the first phase expands the context length to 32K, and the second phase further expands it to 128K.
+
+
+Rotary Position Embedding (RoPE)~\cite{su2023roformerenhancedtransformerrotary} is the core module for supporting ultra-long input sequences. 
+Existing open-source LLMs typically extend context length by either increasing the base frequency in RoPE~\cite{su2023roformerenhancedtransformerrotary,qwen-2.5-coder} or by adopting methods such as YaRN~\cite{peng2023yarnefficientcontextwindow,dubey2024llama,deepseekv3}.
+Our findings show that both methods perform similarly well if the hyper-parameters are correctly chosen, and we adopt the increased base frequency method in \modelname.
+To determine the base frequency in RoPE for long-context extension, we evaluate the offline performance of ``Needle In A Haystack'' (NIAH) with different base frequencies at the target sequence length, and select the one with the best result.
+This ensures a relatively low initial loss in long-context training.
+In practice, the selected base frequency for 32K is $1.6\times 10^6$, and for 128K is $2.56\times 10^{7}$.
+Detailed hyper-parameters of \modelname~long context training are summarized below:
+
+\textbf{8K to 32K phase} The sequence length is expanded to 32K (RoPE base = $1.6\times 10^6$). The batch size is 384 with a learning rate of $7.5\times 10^{-6}$, matching the final learning rate from the previous post-training stage.
+
+\textbf{32K to 128K phase} The sequence length is further expanded to 128K (RoPE base = $2.56\times 10^{7}$). The batch size is reduced to 96. The learning rate remains $7.5\times 10^{-6}$.
+
+
+
+\subsection{Post-training Alignment} 
+In the post-training stage, \modelname~is aligned with human preferences through Supervised Fine-Tuning (SFT) and Reinforcement Learning (RL). This stage focuses on constructing high-quality, diverse instruction data and designing scalable, efficient training strategies.
+
+
+\subsubsection{Post-training Data}
+In constructing post-training data, we emphasize the data quality, diversity, and complexity. 
+The data pool is curated from a wide range of domains and task types, including general question answering, AI-generated content (AIGC), text classification and analysis, programming, mathematics, logical reasoning, and tool usage.  
+These tasks cover application areas such as finance, healthcare, and public services. 
+Data sources span open-source instruction datasets, real-world industrial queries, and synthetic problems derived from the pre-training corpus. 
+
+To promote data diversity, data samples are selected along two orthogonal dimensions, guided by the entropy law~\cite{yin2024entropy}: domain and task type. 
+Hierarchical tagging models with varying levels of granularity are used to support balanced data sampling. 
+Data quality is managed through a combination of rule-based validation and model-based validation, which helps eliminate low-quality or ambiguous samples.
+
+To better stimulate the reasoning capabilities of \modelname, a large portion of the post-training data, approximately six-sevenths, consists of reasoning tasks such as mathematics, coding, and logic. 
+The post-training data covers a range of complexities, with a focus on moderately to highly challenging tasks.
+
+
+
+\subsubsection{Post-training Strategy}
+In the post-training stage, \modelname~was first trained with SFT to establish preliminary instruction-following capabilities.
+Following SFT, we apply RL with outcome-based reward signals to further enhance reasoning, alignment, and instruction-following abilities of \modelname.
+
+
+We implement a latency-tolerant reinforcement learning framework optimized for the Ascend infrastructure, which will be detailed in a future report.
+The framework enables efficient large-scale policy optimization on Ascend.
+To guide the RL process, we implement a hybrid reward system that provides task-specific feedback for mathematics, coding, and general problem-solving. 
+This hybrid reward system combines deterministic reward signals and model-based evaluations to facilitate stable and efficient policy optimization.
+
+

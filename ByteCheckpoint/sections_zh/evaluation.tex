@@ -1,0 +1,198 @@
+\begin{table*}[!t]
+\caption{模型与并行配置。}
+\label{tab:model_parallel_config}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{ccccccccc}
+    \toprule
+    \textbf{Model} & \textbf{Hidden Size} & \textbf{\#Heads} & \textbf{\#Layers} & \textbf{\#Parameters} & \textbf{Source \#GPUs} & \textbf{Source Parallelism} & \textbf{Target \#GPUs} & \textbf{Target Parallelism}\\
+    \midrule
+     \multirow{2}{*}{vDiT} &  \multirow{2}{*}{1664} &  \multirow{2}{*}{16} & \multirow{2}{*}{48} & \multirow{2}{*}{4B} & 32 & ZeRO-2 & 64 & ZeRO-2 \\
+      & & & & & 128 & ZeRO-2 & 64 & ZeRO-2 \\
+      \midrule
+     \multirow{2}{*}{tGPT} &  \multirow{2}{*}{8192} & \multirow{2}{*}{64} & \multirow{2}{*}{80} &  \multirow{2}{*}{70B} & 2400 & TP=4, DP=75, PP=8 & 4800 & TP=4, DP=150, PP=8 \\
+     & & & & & 4800 & TP=4, DP=150, PP=8 & 2400 & TP=4, DP=75, PP=8 \\
+    \bottomrule
+\end{tabular}}
+\end{table*}
+
+\begin{table*}[!t]
+\caption{\sys{}、DCP 与 MCP 的 I/O 性能对比。}
+\label{tab:io_compare}
+\begin{small}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|cc|ccccccc}
+    \toprule
+    \textbf{Model and Framework} & \textbf{Source \#GPUs} & \textbf{Method} & $\mathbf{T_{Block}}$ \textbf{(s)} & $\mathbf{T_{Save}}$ \textbf{(s)} & $\mathbf{T_{Load}}$ \textbf{(s)} & $\mathbf{T_{Reshard}}$ \textbf{(s)} & \textbf{ETTR (\%)}\\
+    \midrule
+     \multirow{2}{*}{vDiT 4B} & \multirow{2}{*}{32} & DCP & 16.25 & 86.82 & 50.12 & 74.89 & 38.60\\
+     & & \sys{} (GPU states) & 0.54 (\textbf{30.09$\times$}) & 27.47 (\textbf{3.16$\times$}) & 11.69 (\textbf{4.29$\times$}) & 16.01 (\textbf{4.68$\times$}) & 46.22 (\textbf{1.20$\times$})\\
+     \cline{2-8}
+     \multirow{2}{*}{FSDP} & \multirow{2}{*}{128} & DCP & 61.37 & 236.34 & 105.74 & 91.01 & 41.62\\
+     & & \sys{} (GPU states) & 0.38 (\textbf{161.50$\times$}) & 23.74 (\textbf{9.96$\times$}) & 12.01 (\textbf{8.80$\times$}) & 13.64 (\textbf{6.67$\times$}) & 48.92 (\textbf{1.18$\times$})\\
+     \midrule
+     \multirow{3}{*}{tGPT 70B} & \multirow{3}{*}{2400} & MCP & 4.73 & 28.97 & 69.87 & 126.30 & 34.61\\
+     & & \sys{} (GPU states) & 0.39 (\textbf{12.13$\times$}) & 13.11 (\textbf{2.21$\times$}) & 49.48 (\textbf{1.41$\times$}) & 62.10 (\textbf{2.03$\times$}) & 40.18 (\textbf{1.16$\times$})\\
+     & & \sys{} (full states) & 0.50 & 20.55 & 72.35 & 401.21 & 28.80\\
+     \cline{2-8}
+     \multirow{3}{*}{Megatron-LM} & \multirow{3}{*}{4800}  & MCP & 4.70 & 76.21 & 123.80 & 64.62 & 31.28\\
+     &  & \sys{} (GPU states) & 0.36 (\textbf{13.06$\times$}) & 8.59 (\textbf{8.87$\times$}) & 64.39 (\textbf{2.00$\times$}) & 54.31 (\textbf{1.19$\times$}) & 40.29 (\textbf{1.29$\times$})\\
+     &  & \sys{} (full states) & 0.43 & 25.04 & 83.56 & 115.95 & 34.70\\
+    \bottomrule
+\end{tabular}}
+\end{small}
+\end{table*}
+
+\section{评估}
+
+在本节中，我们介绍 \sys{} 的部署与运行经验。
+\sys{} 构建于 DCP~\cite{torch-dcp}（commit hash: 80c07df）之上，该系统支持 FSDP~\cite{fsdp} 的 checkpoint resharding。
+\sys{} 的实现约 20,000 行 Python 代码。
+
+\subsection{Checkpointing 效率}
+\label{sec:exp_main}
+
+我们在不同 workload 下比较 \sys{} 与基线~\cite{torch-dcp, megatron-dcp} 的 checkpointing 性能。
+
+\noindent \textbf{Workloads}。
+我们采用两类 transformer~\cite{attention} 结构：DiT~\cite{dit} 与 GPT-3~\cite{gpt3}，分别实现两个模型 \textit{vDiT} 与 \textit{tGPT}。
+vDiT 使用 FSDP 在 NVIDIA A100 80GB GPU 集群上进行视频生成 fine-tuning；tGPT 使用 Megatron-LM~\cite{megatron} 在 NVIDIA H800 80GB GPU 上进行文本生成训练。
+模型与并行配置见表~\ref{tab:model_parallel_config}：source GPU 数与 parallelism 对应用于保存与加载评估，target GPU 数与 parallelism 用于 load-time resharding 评估。
+所有训练机器通过 InfiniBand 互联，实验统一使用 HDFS 作为持久化存储。
+我们在 LFM 训练试验中集成测试模型，训练 500 步，每 100 步保存一次 checkpoint。
+随后在两种场景下恢复训练：GPU 数与 parallelism 不变、以及发生变化，以评估 load-time resharding 与常规加载性能。
+保存性能以平均额外开销衡量，包括 checkpoint stall（训练阻塞时间）与端到端保存时间（从 save API 调用到完成完整性检查）。
+加载性能以端到端加载时间（load API 的阻塞时长）衡量，覆盖 load-time resharding 与常规加载。
+我们使用平均 ETTR 衡量端到端系统性能。
+遵循 GEMINI~\cite{gemini-sys} 的假设：故障在每个 checkpoint 间隔（100 步）内均匀发生，据此计算平均浪费时间并得到 ETTR。
+计算细节见附录~\ref{sec:ettr_cal}。
+
+\noindent \textbf{Baselines}。
+在 FSDP 实验中，我们使用 DCP（commit hash: c7338f4）作为基线；在 Megatron-LM 实验中使用 MCP~\cite{megatron-dcp}（commit hash: 3fb5c51）。
+为公平对比，所有系统保持相同的超参数（如 batch size、context length）。
+两种基线均支持模型与优化器的异步 checkpointing 与 load-time resharding，但不支持 dataloader 状态。
+因此，GPU 状态的 I/O 性能与基线对比，同时评估 \sys{} 的完整训练状态性能。
+由于 DCP/MCP 原生不支持 HDFS，我们为其实现 HDFS 访问逻辑，并与 \sys{} 使用相同配置（如线程数、文件分块大小等）。
+
+\noindent \textbf{保存性能}。
+如表~\ref{tab:io_compare} 所示，\sys{} 在运行时显著降低 checkpoint stall，降幅在 13.06$\times$ 到 161.50$\times$ 之间，使平均 stall 时间从分钟/秒级降至亚秒级，优于 DCP 与 MCP。
+在端到端保存时间方面，\sys{} 平均加速 6.05$\times$，主要源于细粒度性能优化。
+加速幅度随训练规模增大而提升：从 2400 GPUs 的 2.21$\times$ 增长到 4800 GPUs 的 8.87$\times$。
+这主要归因于负载均衡机制在更大的 DP 规模下更有效。
+我们还观察到 FSDP workload 的阻塞时间显著降低，这是因为 DCP 在处理 FSDP irregular tensor shards 时存在较高通信与同步开销，且规模越大开销越高，使 DCP 难以胜任大规模训练。
+相比之下，\sys{} 的分解表示在生成 metadata 时不引入通信开销，因而效率更高。
+附录~\ref{sec:save_breakdown} 提供了更详细的开销分解。
+对于 Megatron-LM 训练，我们报告了完整训练状态的 I/O 性能。
+
+\noindent \textbf{加载与 resharding 性能}。
+在 parallelism 不变的加载实验中，\sys{} 相比基线提升 1.41$\times$ 到 8.80$\times$。
+异步加载 pipeline 能重叠 tensor 读取与传输，显著减少训练开始前的阻塞。
+对于模型与优化器状态的 resharding，\sys{} 平均加速 3.64$\times$。
+通过避免昂贵的离线 resharding 作业，\sys{} 支持不同场景下灵活高效的 checkpoint 转换。
+但当包含 CPU 状态（主要是 dataloader）时，端到端 load-time resharding 时间会增加，这是因为 dataloader 独有组件（如 token buffer）处理耗时较长，在 text-to-video LFM 训练中可达 20GB。
+此外，只有部分 worker 持有这些 dataloader 状态，导致其在保存与加载（resharding）过程中成为 straggler。
+我们将更高效的 dataloader 设计留作未来工作。
+
+\noindent \textbf{端到端性能}。
+\sys{} 在平均 ETTR 上优于 DCP 与 MCP，提升幅度为 1.16$\times$ 到 1.29$\times$。
+借助 full-stack 优化，\sys{} 提升了每个 checkpoint 相关操作的执行效率，从而有效减少训练停顿。
+
+\begin{table}[!t]
+\caption{
+保存优化 microbenchmark。
+}
+\label{tab:save_bench}
+\begin{small}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|c|ccc}
+    \toprule
+    \textbf{Workload} & \textbf{Parallel Config.} & \textbf{Optimization} & \textbf{Saving Time (s)} \\
+    \midrule
+     \multirow{4}{*}{tGPT 13B } & \multirow{4}{*}{TP=2, DP=8, PP=2} & No Optim. & 50.26\\
+     &  & Async. & 34.68 (\textbf{1.45$\times$})\\
+     &  & Async. + WB. & 20.28 (\textbf{2.48$\times$})\\
+     &  & Async. + WB. + Cache.  & 19.97 (\textbf{2.52$\times$})\\
+     \midrule
+     \multirow{4}{*}{tGPT 30B } & \multirow{4}{*}{TP=2, DP=8, PP=4} & No Optim. & 46.34\\
+     &  & Async. & 25.56 (\textbf{1.81$\times$})\\
+     & & Async. + W.B. & 18.83 (\textbf{2.46$\times$})\\
+     &  & Async. + W.B. + Cache. & 18.56 (\textbf{2.50$\times$})\\
+    \bottomrule
+\end{tabular}}
+\end{small}
+\end{table}
+
+\begin{table}[!t]
+\caption{
+加载优化 microbenchmark。
+}
+\label{tab:load_bench}
+\begin{small}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|c|ccc}
+    \toprule
+    \textbf{Model} & \textbf{Parallel Config.} & \textbf{Optimization} & \textbf{Loading Time (s)} \\
+    \midrule
+     \multirow{3}{*}{tGPT 13B } & \multirow{3}{*}{TP=2, DP=8, PP=2} & No Optim. & 63.48\\
+     &  & Async. & 48.43 (\textbf{1.31$\times$})\\
+     &  & Async. + Overlap. & 41.38 (\textbf{1.53$\times$})\\
+     \midrule
+     \multirow{3}{*}{tGPT 30B } & \multirow{3}{*}{TP=2, DP=8, PP=4} & No Optim. & 77.02\\
+     &  & Async. & 74.54 (\textbf{1.03$\times$})\\
+     & & Async. + Overlap. & 48.73 (\textbf{1.58$\times$})\\
+    \bottomrule
+\end{tabular}}
+\end{small}
+\end{table}
+
+\label{sec:reshard_optim}
+\begin{table}[!t]
+\caption{
+Resharding 优化 microbenchmark。
+}
+\label{tab:reshard_bench}
+\begin{small}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|c|ccc}
+    \toprule
+    \textbf{Model} & \textbf{Parallel Config.} & \textbf{Optimization} & \textbf{Processing Time (s)} \\
+    \midrule
+     \multirow{2}{*}{tGPT 13B} & \multirow{2}{*}{ZeRO-2 32 GPUs} & All-gather + D2H. & 4.12\\
+     & & Decompose. & 0.21 (\textbf{19.80$\times$})\\
+     \midrule
+     \multirow{2}{*}{tGPT 30B} &  \multirow{2}{*}{ZeRO-2 64 GPUs} & All-gather + D2H. & 5.84\\
+     & & Decompose. & 0.19 (\textbf{30.50$\times$})\\
+    \bottomrule
+\end{tabular}}
+\end{small}
+\end{table}
+
+\begin{table*}[!t]
+\caption{\sys{} 在大规模 LFM 训练中的 I/O 性能。}
+\label{tab:io_product}
+\begin{small}
+\resizebox{\linewidth}{!}{
+\begin{tabular}{c|cc|cccc}
+    \toprule
+    \textbf{Model and Framework} & \textbf{\#GPUs} & \textbf{Parallelism} & $\mathbf{T_{Block}}$ \textbf{(s)} & $\mathbf{T_{Save}}$ \textbf{(s)} & $\mathbf{T_{Load}}$ \textbf{(s)} \\
+    \midrule
+     Vision Transformer 7B FSDP & 1488 & ZeRO-2 & 0.34 & 20.13 & 265.73 \\
+     Text Transformer 405B Megatron-LM & 8960 & TP=8, DP=70, PP=16 & 0.59 & 51.06 & 129.49 \\
+    \bottomrule
+\end{tabular}}
+\end{small}
+\end{table*}
+
+\subsection{Microbenchmarks}
+我们进行了多组 microbenchmark（表~\ref{tab:save_bench}、表~\ref{tab:load_bench} 与表~\ref{tab:reshard_bench}）以展示性能提升。
+为评估不同模型规模，我们将 tGPT 70B 修改为 tGPT 13B 与 tGPT 30B。
+保存与加载 microbenchmark 使用 Megatron-LM 训练框架，resharding 使用 FSDP。
+
+在表~\ref{tab:save_bench} 中，我们比较了在启用与未启用 \sys{} 功能（Sec.~\ref{sec:io_optimization}）时的端到端保存时间。
+结果表明，异步保存 pipeline 相比未优化设置显著降低保存时间，tGPT 13B 与 tGPT 30B 的加速分别为 1.45$\times$ 与 1.81$\times$。
+进一步启用负载均衡与 plan 缓存后，可继续提升。
+当对模型与优化器状态应用全部 I/O 优化时，平均保存时间从 48.3 秒降至 19.27 秒。
+在表~\ref{tab:load_bench} 中，我们展示了异步加载 pipeline 与读-通信重叠技术带来的收益。
+对于 tGPT 13B 与 tGPT 30B，基线加载时间分别比 \sys{} 慢 1.53$\times$ 与 1.58$\times$。
+
+对于 load-time resharding，我们对比了 FSDP 与 \sys{} 的 irregular tensor 处理时间。
+如表~\ref{tab:reshard_bench} 所示，\sys{} 的平均阻塞时间仅 0.20s，较 FSDP 缩短 25.15$\times$。

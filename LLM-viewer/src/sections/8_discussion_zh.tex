@@ -1,0 +1,112 @@
+\section{讨论}
+
+\subsection{可靠性}
+
+前文方法可显著提升 LLM 在实践中的训练与推理效率，但压缩与加速也会带来模型可靠性的微妙变化。
+整体上，Sec.~\ref{sec:compression} 中讨论的压缩方法都会影响可靠性。
+因此本节聚焦三类关键维度：幻觉（hallucination）、安全对齐（safety alignment）与分布外泛化（OOD generalization）。
+
+幻觉指模型输出与真实知识不一致，产生事实错误或无意义内容~\cite{huang2023survey}。
+安全对齐关注模型是否能主动识别并拒绝有害请求，避免输出危险内容~\cite{ouyang2022training}。
+OOD 可靠性关注模型在长尾或非常规输入（如对抗样本、捷径干扰）下的稳定性~\cite{geirhos2020shortcut}。
+
+\subsubsection{幻觉}
+
+抑制幻觉能力对参数改动高度敏感。
+已有研究显示，事实知识常存储在 Transformer 的 FFN 中。
+因此在量化或结构压缩中，应重点关注 FFN 输出校准。
+
+可行做法是先识别关键 FFN 层，例如利用神经元级解释方法~\cite{DBLP:conf/nips/MengBAB22} 找到对知识存储最关键的层。
+对这些层在量化时应提高精度配额，即采用“选择性高精度”策略。
+这样可在整体压缩的同时尽量保持事实知识表示完整，降低幻觉风险。
+
+在剪枝场景，也应尽量保留这些关键 FFN 结构，以维持模型调用事实知识的核心能力。
+
+\subsection{安全对齐}
+
+根据既有研究~\cite{yuan2023rptq}，中等强度压缩（如 8-bit 量化）通常不会明显削弱模型安全能力。
+但模型可能对某些 jailbreak 攻击更敏感，而这在既有研究中关注不足~\cite{deng2023jailbreaker}。
+因此建议在部署压缩模型前进行系统化 red teaming。
+此外，基于知识迁移的方案可能显著削弱安全性，建议在迁移后进行额外安全微调。
+
+\subsection{OOD 泛化}
+
+LLM 在真实部署中常受“决策捷径”影响，导致在长尾子群体上错误率升高~\cite{geirhos2020shortcut}。
+已有研究~\cite{yuan2023benchmarking} 指出，量化后的网络在同一任务不同子群体间性能差异会显著放大，尤其在依赖上下文捷径的长尾子群体上更明显。
+此外，实践中常用的 KV-cache 压缩常通过随机丢弃注意力矩阵中的 token 来提效，这可能进一步强化模型捷径依赖。
+因此建议在下游场景引入对应鲁棒性增强方法，如不变性测试时优化~\cite{ma2024invariant}。
+
+\subsection{高效大规模多模态模型}
+
+\subsubsection{大规模多模态模型（LMM）}
+
+大规模多模态模型（LMM），尤其视觉语言模型（VLM），正成为构建通用智能助手的重要方向，在感知与推理上持续增强。
+这类模型通常以 LLM 为“认知核心”，并结合多模态基础模型提供高质量表征，实现零样本迁移与上下文学习。
+其关键挑战在于：如何让 LLM 与其它模态模型高效协同推理。
+目前主流范式是“多模态预训练 + 多模态指令微调”。
+更完整讨论可见~\citep{yin2023survey,zhang2024mm}。
+
+\subsubsection{高效 LMM}
+
+在资源受限场景中，多模态能力需求日益明显。
+尽管 LMM 能力强，但其训练与部署成本高，亟需高效实现。
+Gemini~\citep{team2023gemini} 在高效 LMM 方面表现突出，并提出适配低内存设备的移动级模型，但仍为闭源。
+开源方向中，LLaVA-v1.5 等已采用 4/8 bit 量化（bitsandbytes~\citep{dettmers2022llm}，详见 Sec.~\ref{sec:compression}）。
+
+其它代表工作包括：
+MobileVLM~\citep{chu2023mobilevlm} 与 MobileVLM-v2~\citep{chu2024mobilevlm}，
+TinyGPT-V~\citep{yuan2023tinygpt}，
+LLaVA-Phi~\citep{zhu2024llava}，
+Vary-toy~\citep{wei2024small}，
+TinyLLaVA~\citep{zhou2024tinyllava}，
+MoE-LLaVA~\citep{lin2024moe} 等。
+这些工作表明在合适架构、数据与训练策略下，小模型多模态能力可逼近大模型。
+
+\subsection{长上下文建模}
+
+在 Chatbot、文档摘要等任务中，LLM 长上下文理解与推理能力常成为瓶颈。
+预训练语料多为短片段文本，难以充分覆盖超长依赖学习。
+为弥补这一缺口，研究从多个角度推进：本节重点讨论替代注意力（Sec.~\ref{efficient_attention}）、缓存压缩与检索、位置编码改造。
+更全面综述可见~\cite{huang2023advancing}。
+
+\subsubsection{替代注意力设计}
+\label{efficient_attention}
+
+自注意力是 Transformer 核心。
+在 decoder-only + KV cache 推理下，若历史上下文很长，对全部历史 key/value 做注意力会带来高计算与高访存开销。
+因此大量工作探索“并非所有历史 token 都需被完整关注”。
+
+Landmark Attention~\cite{mohtashami2023landmark} 通过 landmark token 先判断块内信息是否必要；
+Funnel-Transformer~\cite{dai2020funnel} 通过编码侧下采样与解码侧上采样降低 FLOPs；
+Longformer~\cite{beltagy2020longformer}、ETC~\cite{ainslie2020etc}、LongT5~\cite{guo2022longt5} 则结合局部窗口与全局摘要机制。
+
+在 LLM 时代，StreamingLLM~\cite{xiao2023efficient} 与 LM Infinite~\cite{han2023lm} 提出 sink+sliding window 注意力模式，无需额外微调即可改善长上下文建模。
+$H_{2}O$~\cite{zhang2024h2o} 则通过 token 选择减少自注意力复杂度。
+
+\subsubsection{递归与检索}
+
+Transformer-XL~\cite{dai2019transformer} 提出段级递归，将历史段输出引入当前段，显著延长依赖范围。
+后续 Segatron~\cite{bai2021segatron} 与 Compressive Transformer~\cite{rae2019compressive} 分别在分段建模与压缩记忆方面扩展。
+LLM 场景中，Dynamic Memory Compression~\cite{nawrot2024dynamic} 继续推进动态压缩历史上下文；
+Memorizing Transformer~\cite{wu2022memorizing}、Memformer~\cite{wu2020memformer} 将检索与局部缓存结合。
+
+另一条路径是 Retrieval-Augmented Generation（RAG）：
+把远距离历史信息放在二级存储，仅在需要时检索相关 KV/文本片段。
+RAG 本身体系庞大，综述可见~\cite{gao2023retrieval,zhao2024retrieval}。
+在长上下文实践中，LangChain~\cite{pandya2023automating} 是常见方案，通过 embedding 检索缓解长对话记忆问题。
+其它相关工作还包括~\cite{borgeaud2021improving,bertsch2024unlimiformer,zhong2023memorybank,zhou2023recurrentgpt,kynoch2023recallm,modarressi2023retllm,guu2020retrieval,wang2024augmenting}。
+
+\subsubsection{位置编码改造}
+
+预训练期间位置编码通常只见过有限长度。
+且经典三角函数式位置编码对更长序列外推能力有限。
+早期方法多在 softmax 前加入注意力偏置：
+ALiBi~\cite{press2021train}、Kerple~\cite{chi2022kerple} 等在长上下文外推中取得效果。
+
+另一条主线聚焦 RoPE 改造：
+NTK-aware Scaled RoPE~\cite{xiong2023effective} 调整 RoPE 基参数；
+LEX~\cite{sun2022lengthextrapolatable}、PermuteFormer~\cite{chen2021permuteformer} 引入指数衰减；
+Positional Interpolation 使用线性缩放；
+Dynamic-NTK~\cite{huang2019dynamics} 动态提高缩放比；
+YaRN~\cite{peng2023yarn} 对 query/key 线性温度缩放；
+Giraffe~\cite{pal2023giraffe} 用幂律机制保护高频有效信息。

@@ -1,0 +1,62 @@
+\section{引言}
+\label{sec:intro}
+
+% 1. LFM background.
+语言~\cite{gpt4,llama3.1, gemini1.5, deepseek-v3}、视觉~\cite{diffusion, dit}、音频~\cite{bark}等模态的 Large Foundation Models（LFMs）正在重塑当今 AI 生态，催生了诸如下游应用：对话式代理~\cite{chatgpt, character-ai}、编码助手~\cite{github-copilot}、绘画工具~\cite{midjourney}以及视频~\cite{sora}生成器。
+
+% 2. LFM training background.
+与传统深度学习模型训练不同，LFM 训练显著更为复杂。
+其包含多个训练阶段，包括 pre-training~\cite{gpt3, megascale} 与 post-training~\cite{wei2021sft,rlhf, hybridflow, ppo-framework}。
+此外，这些阶段还会集成 evaluation 任务以有效评估模型质量。
+除了流程复杂，LFM 的开发还极其资源密集且耗时，主要源于巨大的模型规模与训练数据量（例如，DeepSeek-V3 拥有 6710 亿总参数，并在 14.8 万亿 tokens 上完成 pre-training）~\cite{llama3.1, deepseek-v3}。
+LFM 训练规模甚至可达到 12,288 GPUs~\cite{megascale}。
+
+%3. The role of checkpointing systems.
+作为保存训练状态的基础技术，checkpointing 会对这些状态进行快照并存入持久化存储，以便训练恢复。
+此外，在 LFM 训练过程中，checkpoints 还会被用于并行的 evaluation 任务以持续评估模型质量。
+另一类应用是将这些快照从 pre-training 分发到下游 post-training 任务，例如 Supervised Fine-Tuning（SFT）或强化学习。
+复杂的开发流水线、巨大的训练规模与漫长的训练周期，使得设计一个高效的 checkpointing 系统面临显著挑战。
+
+% 4. Post two challenges.
+% challenge 1: unified checkpoint management 
+\textit{第一}，真实世界的 LFM 开发生命周期内需要高效且统一的 checkpoint 管理。
+训练过程中经常需要进行 checkpoint resharding。
+该过程会将已保存的分布式 checkpoints 转换到与保存时不同的新 parallelism 配置，以便正确加载。
+在 pre-training 中，parallelism 的变化可能来自故障机器下线、可用 GPU 配额波动~\cite{qsync,lyra}，或训练配置（如 context length）与系统优化技术~\cite{megascale}（如 kernel fusion、计算与通信重叠）调整。
+跨训练阶段与任务时，parallelism 会随资源规模与数据集规模而变化。
+高效的 checkpoint resharding 可最小化额外开销并最大化端到端 Effective Training Time Ratio（ETTR，定义为有效训练时间与作业 wallclock 时间之比）~\cite{meta-cluster}。
+此外，在工业 AI 平台上，不同内部用户或云客户发起的 LFM 训练会选择不同训练框架（如 Megatron-LM~\cite{megatron}、PyTorch FSDP~\cite{fsdp}、DDP~\cite{ddp} 以及其他~\cite{vescale}）并按任务特性与偏好选择 storage backend（如本地磁盘、HDFS、NAS）保存 checkpoints。
+为适配这些临时组合而定制 checkpoint 模块与流程，会显著增加系统开发与维护成本。
+因此，为不同训练框架与 storage backend 提供通用 workflow 至关重要。
+
+% challenge 2: efficient and scalable I/O performance.
+\textit{第二}，需要高效且可扩展的 I/O 性能。
+checkpointing 系统在将分布式 checkpoints 写入持久化存储、以及在不同场景下加载回训练时，都涉及大量 I/O 操作。
+为了缩短 I/O 阻塞时间并快速持久化训练状态，必须加速这些 I/O 工作负载。
+同时，现代 LFM 训练常在大规模运行，因此 checkpointing 系统的可扩展性同样关键。
+
+现有 checkpointing 系统~\cite{checkfreq, check-n-run, gemini-sys, jit-check} 假设保存与加载时 parallelism 一致，无法满足 checkpoint resharding 的需求。
+尽管开源社区已有一些支持 resharding 的系统，但仍存在诸多限制。
+有的采用低效的离线 resharding~\cite{deepspeed-ucp}，有的仅支持特定训练框架与 storage backend~\cite{torch-dcp, megatron-dcp}。
+此外，缺乏定制化优化与工业级部署经验，它们通常 I/O 性能不足，且难以在真实生产中支撑大规模 LFM 训练。
+
+本文介绍 \sys{} 的设计、实现与部署经验，这是一套为 LFM 开发打造的 checkpointing 系统。
+\sys{} 采用统一架构（Sec.~\ref{sec:arch}），提供自动 \textit{resharding-on-loading} 的分布式 checkpoint 机制（即 load-time checkpoint resharding），并支持多种训练框架与 storage backend。
+同时，系统集成了 full-stack I/O 性能与可扩展性优化。
+
+$\triangleright$ \sys{} 的 checkpoint 表示与训练时采用的具体 parallelism 解耦（Sec.~\ref{sec:represent}），从而支持高效的 load-time checkpoint resharding。
+在模型与优化器状态表示上，我们将每个 tensor shard 的 metadata 与数值数据分离，并将全部 metadata 汇总到一个全局文件。
+单个 tensor shard 的 metadata 包含其运行时、位置与存储相关信息。
+对于 dataloader 状态表示，我们将其划分为 \textit{replicated} 与 \textit{sharded} 两类：sharded 状态保存为独立文件，而 replicated 状态仅由 global rank 0 的训练 worker 保存。
+
+$\triangleright$ \sys{} 提供面向不同训练框架与多种 storage backend 的通用 workflow（Sec.~\ref{sec:workflow}）。
+它为每个框架定制 planner 生成统一的保存/加载 plan，并将这些 plan 交由与框架、storage backend 无关的 engine 执行 I/O。
+利用架构层面的隔离，\sys{} 能为不同框架与 storage backend 的用户执行相同的保存/加载流程。
+
+$\triangleright$ \sys{} 实现了多项优化（Sec.~\ref{sec:io_optimization}）以提升 I/O 性能，包括负载均衡与零冗余 plan 生成、全异步执行 pipeline 以及高效的 irregular tensor 处理。
+我们还分享了在优化 storage system 以支持海量 I/O 请求、优化集体通信以保证稳定性、以及设计监控与可视化工具以进行性能分析与瓶颈定位方面的工程经验（Sec.~\ref{sec:industrial_scale}）。
+该 full-stack 方法使 \sys{} 能在 8,960 GPUs 上训练 405B 规模的 LFM 仍保持高效。
+
+\sys{} 已部署在拥有数万 GPU 的工业 AI 平台上，用于多种 LFM 训练任务，包括语言模型的 pre-training 与 post-training、多模态理解，以及生成类模型（\eg 用于视频生成）。
+\sys{} 相较现有开源 checkpointing 系统（如 PyTorch DCP~\cite{torch-dcp} 和 Megatron Distributed Checkpoint~\cite{megatron-dcp}）具有显著优势：checkpoint stall 减少 12.13$\times$ 到 161.50$\times$，端到端保存与加载流程平均分别快 6.05$\times$ 与 3.88$\times$。
+

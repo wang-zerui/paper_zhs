@@ -1,0 +1,145 @@
+  \documentclass{article}
+\usepackage{arxiv}
+\usepackage{graphicx}
+\usepackage[numbers]{natbib}
+\usepackage{doi}
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage[table]{xcolor}         % colors
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+% \usepackage{subfigure}
+\usepackage{pifont}
+\usepackage{threeparttable}
+\usepackage{graphicx} % for \scalebox
+% \usepackage{subcaption}
+\usepackage{array} % for \tabcolsep
+\usepackage{makecell}
+% \usepackage{algorithm} 
+\usepackage{algpseudocode} 
+\usepackage{multirow}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{subfig}
+\usepackage{hyperref}
+% \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+\usepackage{todonotes}
+% \usepackage{wrapfig}
+
+% \usepackage{ulem}
+\usepackage{float}
+\usepackage[ruled,vlined]{algorithm2e}
+
+\newcommand{\etal}{\textit{et al}. }
+\newcommand{\etc}{\textit{etc}.}
+\newcommand{\eg}{\textit{e.g.}}
+\newcommand{\aka}{\textit{a.k.a}}
+\newcommand{\ie}{\emph{i.e.}}
+\newcommand{\trm}[1]{\textcolor{blue}{(Ruiming: #1)}}
+\newcommand{\xj}[1]{\textcolor{red}{#1}}
+\newcommand{\fy}[1]{\textcolor{cyan}{[FY: #1]}}
+\newcommand{\qjr}[1]{\textcolor{green}{(qjr: #1)}}
+\newcommand{\ww}[1]{\textcolor{orange}{(ww: #1)}}
+
+\usepackage{authblk}
+\newcommand{\equalcontrib}{\textsuperscript{\textdagger}}
+\newcommand{\correspondauthor}{\textsuperscript{*}}
+
+\newcommand{\pangu}{Pangu}
+\newcommand{\modelname}{\pangu~Ultra}
+
+\title{\modelname: Pushing the Limits of Dense Large Language Models on Ascend NPUs}
+
+\author{\pangu~Team, Huawei\\
+PanguTech@huawei.com}
+%\date{September 9, 1985}	% Here you can change the date presented in the paper title
+
+
+% Uncomment to override  the `A preprint' in the header
+\renewcommand{\headeright}{Technical Report}
+%\renewcommand{\undertitle}{Technical Report}
+% \renewcommand{\shorttitle}{\textit{arXiv} Template}
+
+\pagestyle{plain}
+\begin{document}
+
+\maketitle
+
+\thispagestyle{fancy}
+
+
+\begin{abstract}
+
+We present \modelname, a Large Language Model (LLM) with 135 billion parameters and dense Transformer modules trained on Ascend Neural Processing Units (NPUs). Although the field of LLM has been witnessing unprecedented advances in pushing the scale and capability of LLM in recent years, training such a large-scale model still involves significant optimization and system challenges. To stabilize the training process, we propose depth-scaled sandwich normalization, which effectively eliminates loss spikes during the training process of deep models. We pre-train our model on 13.2 trillion diverse and high-quality tokens and further enhance its reasoning capabilities during post-training. To perform such large-scale training efficiently, we utilize 8,192 Ascend NPUs with a series of system optimizations. Evaluations on multiple diverse benchmarks indicate that \modelname~significantly advances the state-of-the-art capabilities of dense LLMs such as Llama 405B and Mistral Large
+2, and even achieves competitive results with DeepSeek-R1, whose sparse model structure contains much more parameters. Our exploration demonstrates that Ascend NPUs are capable of efficiently and effectively training dense models with more than 100 billion parameters. 
+Our model and system will be available for our commercial customers.
+\end{abstract}
+
+
+
+\section{Introduction}
+
+Large Language Models (LLMs) have transformed the landscape and our understanding of Artificial Intelligence. Their remarkable capabilities are enabling more and more AI applications, bringing numerous commercial opportunities. Unsurprisingly, teams are racing to push the scaling law to create models with more and more parameters. Although the Transformer~\cite{vaswani2017attention} structure is a popular choice for large models, it is still debatable whether the models should be sparse or dense. With more than 100 billion parameters, sparse architectures powered by Mixture of Experts (MoE), such as DeepSeek \cite{liu2024deepseek,deepseekv3}, have demonstrated surreal human-like language and thinking abilities~\cite{jones2025large}, which makes sparse models a pupular choice when pushing the limit of LLMs.
+
+At the same time, dense models, such as the Qwen~\cite{bai2023qwen,yang2024qwen2}, Llama~\cite{grattafiori2024llama}, and Gemma \cite{team2024gemma} series, are currently popular among models with fewer than 100 billion parameters thanks to their strong performance in specific skills and ease of deployment. The parameters in dense models are usually easier to optimize, while the dynamic components in sparse models usually need to turn to additional heuristics for stable training.
+In addition, the dense model structures at inference time make it easier to optimize system performance due to deterministic parameter usage. In this study, we aim to further explore the potential of dense models at large scales and show the performance of dense models can be on par with state-of-the-art MoE models on diverse tasks.
+
+The numbers of model parameters and layers are two crucial dimensions to release the full potential of dense models. While model parameter count is critical for model performance and plays a central role in scaling laws~\cite{kaplan2020scaling}, recent studies~\cite{ye2024physics,merrill2025littledepth} suggest that model depth has a significant impact on reasoning capabilities. However, our exploration in those two aspects poses significant challenges in exploring the limits of those two aspects. Deeper models usually introduce unstable training, manifested as spikes in training loss curves. Experimental observations suggest that those spikes can knock our model out of the ideal parameter landscape and cause irreparable damage to the training process. Meanwhile, training hundreds of billions of parameters in dense models requires orchestrating thousands of AI processors, which poses significant system efficiency challenges.
+
+
+For our exploration, we introduce \modelname, a dense Transformer architecture with 135 billion parameters and 94 layers. The model setup is at the forefront scale of the top performing dense models~\cite{bai2023qwen,yang2024qwen2,grattafiori2024llama,team2024gemma}. Regarding challenges of training deep models, we hypothesize that the loss spikes are due to gradient fluctuations, which in turn hinder convergence rates and may lead to training divergence. Therefore, we propose two techniques, the depth-scaled sandwich norm and tiny initialization, both of which are designed to maintain stable gradient norms. Specifically, we first replace pre-layer norm \cite{DBLP:conf/emnlp/LiuLGCH20} with the sandwich norm \cite{NEURIPS2021_CogView} and scaled initialization values in the post-layer normalization based on the model's depth. This depth-based adjustment helps control the range of gradient fluctuations effectively. In addition, we scale the standard deviation of weight initialization according to the model's width and depth, leading to tiny initialization. These two techniques lead to more stable gradients throughout the training process, eliminating loss spikes during the training of \modelname, and improving overall model performance.
+
+In practice, we pre-train \modelname~on 13.2 trillion tokens of our built corpus. In the pre-training stage, we use three phrases of data corpus each with a distinct data recipe. The design principles behind three phrases are first to help the model develop knowledge and linguistics, and then to directly equip it with reasoning ability, and finally to boost it on actively learning to reason. The model context window is gradually extended from 4K to 128K. In the post-training stage, we begin with applying efficient supervised fine-tuning (SFT) for a cold start, utilizing a carefully curated set of instruction data. Following this, \modelname~undergoes further optimization through Reinforcement Learning (RL). The overall training of \modelname~is stable in this process.
+
+To handle large-scale model training of more than 100 billion parameters, we utilize a large-scale computing cluster consisting of 8,192 Ascend NPUs and employ a series of system optimization to improve the system efficiency.
+The primary challenge is minimizing pipeline bubbles~\cite{huang2019gpipe} at large scales, which arise due to batch size constraints~\cite{megascale}. 
+We take advantage of the typical 4 types of parallelism on our Ascend cluster, that is, Data Parallelism (DP), Tensor Parallelism (TP)~\cite{megatron-lm}, Sequence Parallelsim \cite{megatron-sp} and Pipeline Parallelism (PP)~\cite{gpipe,pipedream}. 
+As the training cluster scales up, the mini-batch size allocated to each DP decreases, leading to an increased pipeline bubble ratio. To mitigate this issue, we employ additional virtual pipeline (VPP) scheduling \cite{interleaved-pp} with fine-grained tuning to ensure load balancing and reduce the PP bubble ratio from 30.45\% to 6.8\%.
+The second challenge is to achieve high training efficiency for long sequences. 
+Both attention mask generation and self-attention computation are time- and memory-intensive, particularly for long contexts.
+We utilize a NPU Fusion Attention (NFA) operator \cite{fa-github, flash_attention, flash_attention2} tailored for the Ascend NPUs, which supports reset attention mask scenarios and eliminates the need to construct the attention mask before calling the NFA, thus improving computational efficiency and reducing memory cost.
+Under the implementation of several fine-grained system optimization, we achieve a Model FLOPs Utilization (MFU) \cite{palm} of over 50\% when training \modelname~on 8,192 Ascend NPUs.
+
+On public evaluation benchmarks, \modelname~outperforms existing dense LLMs including Llama 405B and Mistral Large 2 123B on almost all major language tasks, and achieves competitive results with sparse models consisting of more than 500 billion parameters. These results indicate the potential of dense model capabilities is still promising to explore. \modelname~also demonstrates that the Ascend NPUs are suitable for exploring the full capabilities of large-scale dense language models. 
+
+
+\input{sec/architecture}
+\input{sec/pretrainng}
+\input{sec/infrastructures}
+\input{sec/results}
+
+
+\section{Conclusion}
+
+We present \modelname{}, a dense language foundation model with 135 billion parameters trained on Ascend NPUs. To address challenges in training large-scale deep models, we propose depth-scaled sandwich-norm, enabling \modelname{} to achieve remarkable training stability without significant loss spikes. After being pre-trained on 13.2 trillion tokens and long context extension on 8,192 Ascend NPUs, our model further enhances its reasoning capabilities through Supervised Fine-Tuning and Reinforcement Learning. Extensive experiments lead to the observation that \modelname{} not only surpasses state-of-the-art dense LLMs like Llama 405B and Mistral Large 2 but also delivers competitive performance against larger sparse models such as DeepSeek-R1. These results highlight the efficacy of our architectural and systemic optimizations, paving the way for future advancements in scalable and efficient LLM training. In addition, our experience demonstrates that the Ascend NPUs are capable of training dense models with hundreds of billions of parameters.
+
+
+\bibliographystyle{plain}
+\bibliography{ref}  %%% Uncomment this line and comment out the ``thebibliography'' section below to use the external .bib file (using bibtex) .
+
+\newpage
+\appendix
+\section{Contributions and Acknowledgments}
+
+
+
+\noindent
+\textbf{Core Contributors}
+Yichun Yin, Wenyong Huang, Kaikai Song, Yehui Tang, Xueyu Wu, Wei Guo, Peng Guo, Yaoyuan Wang, Xiaojun Meng, Yasheng Wang, Dong Li, Can Chen, Dandan Tu, Yin Li, Fisher Yu, Ruiming Tang, Yunhe Wang
+
+\textbf{Contributors}
+Baojun Wang, Bin Wang, Bo Wang, Boxiao Liu, Changzheng Zhang, Duyu Tang, Fei Mi, Hui Jin, Jiansheng Wei, Jiarui Qin, Jinpeng Li, Jun Zhao, Liqun Deng, Lin Li, Minghui Xu, Naifu Zhang, Nianzu Zheng, Qiang Li, Rongju Ruan, Shengjun Cheng, Tianyu Guo, Wei He, Wei Li, Weiwen Liu, Wulong Liu, Xinyi Dai, Yonghan Dong, Yu Pan, Yue Li, Yufei Wang, Yujun Li, Yunsheng Ni, Zhe Liu, Zhenhe Zhang, Zhicheng Liu
+
+
+
+% \end{thebibliography}
+
+
+\end{document}

@@ -1,0 +1,132 @@
+\section{模型训练}
+本节介绍我们的训练流水线，其整体思路与当前领先语言模型（如 DeepSeek-V3~\cite{deepseekv3} 与 Llama 3~\cite{dubey2024llama}）相似。训练过程包含三个主要阶段：预训练、长上下文扩展和后训练。每个阶段均配套特定的训练策略与数据构建方法，以逐步提升模型能力。
+
+
+\subsection{预训练阶段}
+
+
+我们首先介绍 \modelname 预训练的数据构建方案及其质量验证方法，然后阐述长上下文扩展的实践方式，最后给出预训练超参数细节。
+
+\subsubsection{数据构建}
+\modelname~的预训练语料由 tokenizer（见第~\ref{section:tokenizer} 节）产生，共计 13.2T 高质量、多样化 token。
+表~\ref{tab:data_recipe} 展示了预训练的三阶段流程：\textit{general} 阶段、\textit{reasoning} 阶段与 \textit{annealing} 阶段。
+这三个阶段分别用于逐步建立通用知识与语言能力、强化推理能力，并进一步精炼知识与行为表现。
+各阶段数据量分别为：12T（其中由两个子阶段构成，分别为 7.4T 与 4.6T）、0.8T 与 0.4T token。
+
+
+
+
+\begin{table}[h!]
+    \centering
+        \caption{\modelname~预训练数据配比。}
+        \small
+        \begin{tabular}{l|c|c|c} 
+        \toprule
+        \textbf{数据集} & \textbf{General} & \textbf{Reasoning} & \textbf{Annealing} \\ 
+        \midrule
+        General English & 54\% & 14\% & 21\% \\ 
+        General Chinese & 13\% & 6\% & 20\% \\ 
+        Multi-lingual & 8\% & 4\% & 3\% \\ 
+        Instruction & 2\% & 11\% & 20\% \\ 
+        Math & 6\% & 28\% & 18\% \\ 
+        Code & 17\% & 37\% & 18\% \\ 
+        \bottomrule
+        \end{tabular}
+    \label{tab:data_recipe}
+\end{table}
+
+
+在初始的 general 阶段，我们使用以通用语言能力和常识知识构建为目标的语料。
+该阶段主要包含英文与中文数据，来源覆盖网页、图书、百科等多种渠道，同时也纳入多语种与工业领域数据。基于第~\ref{sec:data_quality} 节的数据质量评估结果，我们在第二个子阶段相较第一个子阶段使用了更高质量的数据。
+
+在第二个 reasoning 阶段，我们显著提高高质量数学与代码数据的占比，使其超过语料总量的 60\%，以强化 \modelname 的推理能力。
+代码数据包含纯代码样本与文码混合样本；数学数据也包含大量中英文文本。
+此外，我们还大规模引入由 LLM 生成的合成数据，以进一步丰富语料分布。
+
+
+第三个 annealing 阶段用于帮助模型巩固并高效应用前两个阶段获得的知识和推理能力。
+因此我们进一步提升 instruction 数据占比，约占语料的 20\%。
+我们构建了覆盖广泛主题的内部题库，并生成短链与长链推理（CoT）答案。
+这些推理路径经过精细化打磨，以保证表达清晰和逻辑连贯。
+
+总体来看，\modelname~预训练数据经过精心设计，兼顾高质量、多样性和低冗余。
+我们为数据打上质量与难度标签，并在三个阶段中对推理数据采用课程式采样策略，使训练样本从简单逐步过渡到复杂。
+
+
+
+\subsubsection{数据质量评估}
+\label{sec:data_quality}
+
+数据质量评估是提升整体数据质量的关键环节。
+在 \modelname 训练中，我们结合基于规则的启发式方法与基于模型的评估方法进行质量提升。
+
+在基于模型的质量评估中，我们使用 Pangu 系列模型作为基础评估器。为使质量评估更贴近人工价值判断，我们基于人工标注数据集对评估器进行微调。微调后的评估器应用于超过 10T token 的大规模预训练语料，对样本在清洁度、流畅度、教育价值和信息丰富度等多个维度打分，并据此进行优先级采样：高质量样本获得更高采样概率。
+
+
+为验证数据质量评估的有效性，我们使用 26 亿参数代理模型开展消融实验。实证结果显示：在达到相近性能时，使用低评分数据训练所需 token 数量是高评分高质量数据的 1.6 倍。因此，高质量数据对提升训练效率至关重要。
+
+
+
+\subsubsection{预训练参数} \label{sec:hyper_params}
+\modelname~采用 AdamW 优化器~\cite{loshchilov2017decoupled}，weight decay 设为 0.1，epsilon 设为 $1 \times 10^{-8}$。
+动量参数设为 $\beta_1 = 0.9$、$\beta_2 = 0.95$，梯度裁剪阈值设为 1.0。
+为提升训练稳定性和整体性能，\modelname 的预训练按照以下阶段进行：
+
+
+\textbf{0T--7.4T tokens} 序列长度设为 4K（RoPE base = $1 \times 10^4$）。batch size 从 1,024 增至 1,536（在 1.2T 时）和 2,048（在 1.9T 时）。增大 batch size 可提升训练效率与吞吐。学习率采用余弦衰减，从 $1 \times 10^{-4}$ 降至 $1 \times 10^{-5}$，并设置 4,000 个 warmup steps 以保证早期训练稳定。
+
+
+
+\textbf{7.4T--12.0T tokens} 序列长度保持 4K，batch size 保持 2,048。该阶段学习率固定为 $1 \times 10^{-5}$。
+
+\textbf{12.0T--12.8T tokens} 序列长度提升到 8K（RoPE base = $1 \times 10^5$），batch size 降为 1,536。学习率采用余弦调度，从 $1 \times 10^{-5}$ 衰减到 $7.5 \times 10^{-6}$。
+
+
+
+
+\subsection{长上下文扩展}
+LLM 对长上下文输入的理解能力对于长链思考与实际应用都至关重要。
+在预训练后期，我们通过长序列数据训练使 \modelname 支持最大 128K 上下文窗口。
+训练分两步渐进进行：先扩展到 32K，再进一步扩展到 128K。
+
+
+Rotary Position Embedding（RoPE）~\cite{su2023roformerenhancedtransformerrotary} 是支持超长输入序列的核心模块。
+现有开源 LLM 通常通过两类方法扩展上下文长度：一是增大 RoPE base frequency~\cite{su2023roformerenhancedtransformerrotary,qwen-2.5-coder}，二是采用 YaRN 等方法~\cite{peng2023yarnefficientcontextwindow,dubey2024llama,deepseekv3}。
+我们的实验发现，只要超参数设置合理，这两类方法表现相近；\modelname 最终采用增大 base frequency 的方案。
+为确定长上下文扩展时 RoPE 的 base frequency，我们在目标序列长度下评估不同 base frequency 的 ``Needle In A Haystack''（NIAH）离线表现，选择效果最佳者，以获得较低的长上下文训练初始 loss。
+在实践中，32K 阶段选择 $1.6\times 10^6$，128K 阶段选择 $2.56\times 10^{7}$。\modelname 长上下文训练超参数如下：
+
+\textbf{8K 到 32K 阶段} 序列长度扩展至 32K（RoPE base = $1.6\times 10^6$），batch size 为 384，学习率为 $7.5\times 10^{-6}$，与前一阶段末端学习率保持一致。
+
+\textbf{32K 到 128K 阶段} 序列长度进一步扩展到 128K（RoPE base = $2.56\times 10^{7}$），batch size 降至 96，学习率保持 $7.5\times 10^{-6}$。
+
+
+
+\subsection{后训练对齐} 
+在后训练阶段，\modelname~通过监督微调（SFT）与强化学习（RL）对齐人类偏好。该阶段重点在于构建高质量、多样化 instruction 数据，并设计可扩展且高效的训练策略。
+
+
+\subsubsection{后训练数据}
+在后训练数据构建中，我们重点关注数据质量、多样性和复杂度。
+数据池覆盖广泛领域与任务类型，包括通用问答、AIGC、文本分类与分析、编程、数学、逻辑推理与工具调用等。
+这些任务覆盖金融、医疗与公共服务等应用场景。
+数据来源包括开源 instruction 数据集、真实工业查询以及由预训练语料派生的合成问题。
+
+为提升多样性，我们依据熵规律~\cite{yin2024entropy}，沿两个正交维度进行采样：领域与任务类型。
+我们使用不同粒度的分层标签模型来支持均衡采样。
+数据质量通过规则校验与模型校验联合控制，以过滤低质量或歧义样本。
+
+为更好激发 \modelname 的推理能力，后训练数据中约六分之五为推理类任务（数学、代码、逻辑）。
+数据覆盖不同复杂度区间，并重点强调中高难度样本。
+
+
+
+\subsubsection{后训练策略}
+在后训练阶段，我们首先通过 SFT 让 \modelname~建立基础的指令跟随能力。
+随后采用基于结果反馈的 RL，进一步提升 \modelname 在推理、对齐和指令遵循方面的能力。
+
+
+我们实现了一个面向 Ascend 基础设施优化、具备时延容忍能力的强化学习框架，详细内容将在后续报告中给出。
+该框架支持在 Ascend 上进行高效大规模策略优化。
+为引导 RL 过程，我们构建了混合奖励系统，为数学、代码和通用问题求解提供任务特定反馈。
+该系统结合确定性奖励信号与基于模型的评估，从而实现稳定且高效的策略优化。

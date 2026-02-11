@@ -1,0 +1,84 @@
+\section{大规模 Checkpointing}
+\label{sec:industrial_scale}
+本节深入介绍在大规模 LFM 训练中优化 checkpointing 的方法。
+
+\subsection{存储支持}\label{sec:scale_storage}
+
+\noindent \textbf{高吞吐、可扩展的存储系统}。
+HDFS 是 \sys{} 的主要 storage backend，我们针对大规模 checkpointing 实现了多项吞吐与可扩展性优化。
+我们将 HDFS 的全部组件（NameNode、DataNode 与 SDK~\cite{hdfs}）重写为 C++ 版本，相较原 Java 实现性能翻倍。
+此外，我们在架构中引入新组件 NNProxy~\cite{nnproxy}。
+NNProxy 是 HDFS NameNode 的无状态 RPC 代理，可支持大规模 NameNode 联邦部署并保持低查询延迟。
+其设计缓解了 NameNode 元数据请求的 QPS 瓶颈，该问题在分布式 checkpoints 大量产生时尤为突出。
+NNProxy 还提供认证、限流与元数据查询缓存等能力，使得生产环境中 checkpoints 的管理更细粒度。
+经过优化的 HDFS 可提供数百 PB 容量、10 TB/s 读写带宽以及约 100,000 的元数据 QPS。
+
+\noindent \textbf{Checkpoint 冷却策略}。
+我们构建了 SSD+HDD 的双层冷热存储架构。
+关键观察是：新生成的 checkpoint 文件通常会在短时间内被 evaluation 任务读取；若训练过程未出现 loss spike 等异常，其访问频率会显著下降。
+但出于可追溯性考虑，所有 checkpoint 文件仍需保留。
+为在保证可用性的同时高效利用存储空间，我们设计了数据冷却（cool-down）机制，将数据从 SSD 迁移至 HDD，使高性能热存储始终有足够空间。
+具体做法是：根据文件最近修改时间，将超过保留阈值的文件进行冷却，并通过纯元数据操作将原路径映射到 HDD 新位置。
+该策略在 HDFS 目录级别生效，并保持原访问路径不变，用户体验无缝。
+
+\subsection{集体通信}
+\label{sec:opt_cc}
+
+在 \sys{} 的工作流（Sec.~\ref{sec:workflow}）中，集体通信（如 scatter、gather、barrier）是规划与 checkpoint 完整性保障的关键环节。
+我们最初使用 NCCL~\cite{nccl} 作为通信后端执行协调者的 gather/scatter。
+但在将 pre-training 扩展到 8960 GPUs 时发现：NCCL 在规划阶段需要耗费较长时间惰性创建通信通道与分配 GPU 内存；在某些情况下甚至会无响应或触发 CUDA OOM（因为 scatter/gather 需要与每个 GPU 建立 P2P 连接）。
+这些 GPU OOM 与长初始化时间在小规模测试中并不明显，但在大规模下成为显著问题。
+
+为提升规划阶段通信稳定性，我们使用 gRPC~\cite{grpc} 重写该流程，避免规划期间占用 GPU 内存。
+然而，当训练规模扩展到数万 GPUs 时，集中式 gather/scatter 仍对协调者造成巨大负载，引发通信失败。
+因此我们进一步采用树形分层通信拓扑提升稳定性。
+同一台机器上的训练 workers 组成一级子树，以本地 rank 0 作为根；跨机器通信时，将多台机器迭代分组，每组内全局 rank 最小的 worker 为根，直至形成汇聚到全局根（协调者）的层级结构。
+在大规模 3D 并行训练中，TP-DP-PP 通信树可自然形成，避免额外连接。
+
+\subsection{监控与分析}\label{sec:visualization}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/heat_map.pdf}
+  \caption{
+  采用 Megatron-LM 的 32-GPU 3D 并行训练任务中，端到端 checkpoint 保存时间热力图。
+  颜色表示某一 rank 在选定阶段的耗时。
+  }
+  \vspace{-4mm}
+  \label{fig:heatmap}
+\end{figure}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/checkpoint_breakdown.pdf}
+  \caption{
+    rank 0 上 checkpoint 保存的时间分解。
+  }
+  \vspace{-5mm}
+  \label{fig:breakdown}
+\end{figure}
+
+训练过程中，\sys{} 持续收集关键性能指标并进行可视化，用于实时性能监控与分析。
+这使我们能够快速检测 checkpointing 问题，例如低读写吞吐、straggler，以及上传失败与重试等。
+
+\noindent \textbf{数据采集}。
+我们基于 Python 的 context manager 与 decorator 语法设计了易用的指标系统，可灵活监控关键流程。
+系统自动采集每个操作的耗时与 I/O 大小，并记录 worker rank、文件路径与当前 step 等元数据。
+所有指标通过后台消息队列传输至远端数据库。
+
+\noindent \textbf{可视化}。
+\sys{} 提供两类视图：一是不同 checkpoint 阶段、不同 rank 的整体拓扑性能概览；二是任意单个 rank 的详细耗时分解。
+图~\ref{fig:heatmap} 展示了 3D 并行拓扑上的 checkpoint 保存时间热力图，其中 rank 0、4、8、12 由于包含 dataloader 状态，保存时间最长。
+用户还能选择其他细粒度阶段（如 planning 或 D2H）进行分析。
+这些可视化有助于快速定位系统开发与生产环境中的 straggler 节点或性能瓶颈。
+例如，当某些节点出现网络问题时，HDFS 传输阶段的上传/下载时间增长会清晰可见。
+同时，用户可从热力图入口查看每个 rank 的时间线分解，以全面评估系统内各项优化。
+图~\ref{fig:breakdown} 则展示了某一 rank 的各阶段执行细节。
+
+\noindent \textbf{存储侧监控}。
+在存储客户端侧，我们监控每个原子读写操作的延迟与 I/O 大小（以 I/O chunk 为粒度）。
+所有指标会周期性通过消息队列发送至 ClickHouse 服务进行聚合分析。
+当出现异常高延迟或低带宽时会触发告警，便于工程师进一步排查。
+在存储集群侧，我们关注整体性能指标，如元数据请求 QPS、集群级读写吞吐与容量利用率。
+该监控体系可有效定位慢读/慢写甚至因存储容量耗尽导致的系统不可用问题，从而提前采取措施提升系统可靠性与效率。
+

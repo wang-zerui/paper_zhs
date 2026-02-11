@@ -1,0 +1,212 @@
+\section{Introduction}
+\label{sec:intro}
+
+% 1. LFM background.
+Large Foundation Models (LFMs) in language~\cite{gpt4,llama3.1, gemini1.5, deepseek-v3}, vision~\cite{diffusion, dit}, audio~\cite{bark} and other modalities are revolutionizing today's AI landscape, spawning a variety of downstream applications such as conversational agents~\cite{chatgpt, character-ai}, coding assistants~\cite{github-copilot}, painting tools~\cite{midjourney}, and video~\cite{sora} generators.
+
+% 2. LFM training background.
+Unlike traditional deep learning model training, LFM training is significantly more complex.
+It has multiple training stages, including pre-training~\cite{gpt3, megascale} and post-training~\cite{wei2021sft,rlhf, hybridflow, ppo-framework}.
+Furthermore, evaluation tasks are integrated into these stages to effectively assess model quality. Beyond the complexity, the development of LFMs is notably resource-intensive and time-consuming, largely due to immense model sizes and massive training datasets (e.g., DeepSeek-V3 comprises 671 billion total parameters, and is pre-trained on 14.8 trillion tokens)~\cite{llama3.1, deepseek-v3}.
+The scale of LFM training can even be up to running on 12,288 GPUs~\cite{megascale}.
+% and over several months~\cite{characterization}. 
+% Therefore it is a crucial need for the underlying deep learning training systems to be both efficient and scalable.
+% Unlike traditional deep learning systems, modern training systems of LFMs are more complex, including more stages and evaluation tasks.
+
+%\yhpeng{"accompanying tasks" is not accurate, maybe we just use evaluation tasks}
+% \cwu{do sentences like the following appear in industry experience paper? Suggest removing it in the submission version} 
+% As contributors to the AI research and application ecosystem, we are committed to advancing algorithmic and systemic techniques for the development of various LFMs, leveraging them to empower our products.
+
+%3. The role of checkpointing systems.
+As a fundamental technique for preserving training states,
+% (e.g., model, optimizer, dataloader, and extra CPU states), 
+checkpointing captures snapshots of these states and stores them in persistent storage to facilitate training resuming.
+Additionally, during LFM training, checkpoints are required for concurrent evaluation tasks that continually assess model quality.
+Another use-case of checkpoints is dispatching those snapshots from pre-training to downstream post-training tasks, such as Supervised Fine-Tuning (SFT) or reinforcement learning.
+% Within the same training stage, running jobs can be stopped and then resumed from checkpoints multiple times due to factors such as failure recovery~\cite{bloom-failure, opt}, fluctuations in GPU allocation, and updates of training configurations (e.g. increased context length in the continual pre-training of language models).
+% Additionally, checkpoints produced during pre-training need to be dispatched to concurrent evaluation tasks and post-training tasks, such as the Supervised Fine-Tuning~\cite{wei2021sft, wang2022sft} (SFT), reward modeling, and Proximal Policy Optimization~\cite{ppo} (PPO) in the reinforcement learning from human feedback~\cite{rlhf} (RLHF) pipeline.
+% For instance, checkpoints from the pre-training stage are required by the reinforcement learning from human feedback~\cite{rlhf} (RLHF) pipeline in the post-training stage which includes
+% Moreover, intermediate checkpoints are imperative for automatically triggered evaluation tasks that span across both pre-training and post-training stages.
+The complex development pipeline, enormous scale, and prolonged duration of LFM training present significant challenges to designing a highly efficient checkpointing system.
+
+% \cwu{not clear so far why checkpoint is relevant to model evaluation}.
+% During the lifecycle of LFM training, %the checkpointing system must efficiently manage the transfer of 
+% checkpoints produced during pre-training need to be transferred 
+% \cwu{`transfer' usually means `network communication', if you actually mean checkpoints used by evaluation and post-training tasks which may not involve network transfer, then do not use `transfer' and `dispatch' can be a better word}
+% to concurrent %accompanying 
+% evaluation tasks and to various %downstream 
+% post-training tasks \cwu{not clear what the post-training tasks are referring to}.
+% The complex development pipeline, enormous scale, and prolonged duration of LFM training bring significant challenges to a highly-efficient checkpoint management system.、
+% \yhpeng{instead of describing as "challenge", maybe it is better to describe three "problems/limitations" if using previous deep learning ckpt system in LFM development.}
+
+% \yhpeng{I think the above description of pretraining/post-training can be removed in this section. Basically we need to emphasize why previous deep learning ckpt system does not work and why LFM needs a new checkpointing systems. My thoughts are that we discuss two challenges: (1) LFM training parallism may change within or cross training stages, so there is resharding requirement. You can briefly mention pretraining/posttraining/autoeval when talking about this challange. More details can be moved to the Section 2. Besides different stages may use different frameworks. this is not only for our company but also a requirement for open-source community. Typically pretraining would use a 3D parallel framework for best performance, but for SFT or RL, a FSDP framework is acceptable. see how open-source commnutiy does finetuning on Llama models. Section 3 is the solution of the first challenge. (2) performance and scalability. Section 4 and Section 5 are the solution of the second challenge.}
+
+% 4. Post two challenges.
+% challenge 1: unified checkpoint management 
+%\textit{First}, %challenge is enabling efficient checkpoint resharding.
+\textit{First}, efficient and unified checkpoint management is necessary throughout the life cycle of real-world LFM development.
+During training, checkpoint resharding is commonly required. 
+This procedure transforms saved distributed checkpoints so they can be correctly loaded into a new parallelism configuration that differs from the one used for their creation.
+% Changes in parallelism arise from multiple factors. 
+In pre-training, variations in parallelism occur when problematic machines are removed, the available GPU quota fluctuates~\cite{qsync,lyra}, or training configurations (e.g., context length) and system optimization techniques~\cite{megascale} (e.g., kernel fusion, computation and communication overlapping
+) are adjusted.
+% All these cases require resuming from saved checkpoints into new parallelism.
+Across different stages and tasks, parallelism varies according to the scales of resources and datasets in use.
+Highly efficient checkpoint resharding is needed to minimize extra overhead and maximize the end-to-end Effective Training Time Ratio (ETTR, calculated as the ratio between the productive training time and the wallclock time of a job)~\cite{meta-cluster}.
+Moreover, on an industrial AI platform, LFM training jobs are initiated by various internal users or cloud customers who may choose different training frameworks (e.g., Megatron-LM~\cite{megatron}, PyTorch FSDP~\cite{fsdp}, DDP~\cite{ddp}, and others~\cite{vescale}) and select storage backends such as local disk, Hadoop Distributed File System (HDFS), or Network-Attached Storage (NAS) for storing checkpoints according to job characteristics and personal preferences.
+% \cwu{for the checkpoints?}
+% (\yhpeng{list some examples of storage backends}) 
+% Describe existing checkpointing systems.
+% \cwu{does the existing checkpointing system handle checkpoint resharding? If so, how is their handling inefficient?}
+% Highly efficient checkpoint resharding is needed to minimize the extra overhead and maximize the end-to-end Effective Training Time Ratio (ETTR, calculated as the ratio between the actual training time and the total job running time).
+% \textit{Second}, %challenge is unifying the interfaces of the checkpointing system.
+%in an industry AI platform, LFM training jobs are initiated by various users who may choose different training frameworks (e.g., Megatron-LM~\cite{megatron}, PyTorch FSDP~\cite{fsdp}, DDP~\cite{ddp}, and others~\cite{vescale}) and select persistent storage backends \cwu{for the checkpoints?} (\yhpeng{list some examples of storage backends}) according to job characteristics and personal preferences.
+Crafting customized checkpointing modules and workflows to accommodate these ad-hoc implementations complicates system development and substantially increases maintenance costs. It is vital to provide generic workflows for different training frameworks and storage backends.
+
+% challenge 2: efficient and scalable I/O performance.
+\textit{Second},
+%challenge is achieving efficient and scalable I/O performance.
+Substantial I/O operations are involved in the checkpointing system for saving distributed checkpoints into persistent storage and loading them back for model training under various scenarios.
+% \cwu{for saving training states into distributed checkpoints and loading them for model training?}.
+To minimize I/O blocking time and promptly save training states to persistent storage, it is crucial to expedite the I/O workloads.
+In addition, ensuring the scalability of the checkpointing system is also essential since modern LFM training typically operates at large scales.
+% during massive checkpoint data transfer between training clusters and storage systems. %to maintain the integrity of distributed checkpoints.
+
+% Discrible exisitng checkpointing systems.
+Existing checkpointing systems~\cite{checkfreq, check-n-run, gemini-sys, jit-check} assume consistent parallelism, 
+%during the saving and loading of checkpoints,
+and fail to address the demands for checkpoint resharding.
+Although some efforts from the open-source community are devoted to developing checkpointing systems capable of resharding, they have several limitations. 
+Some perform resharding in an inefficient offline manner~\cite{deepspeed-ucp}, while others only support specific training frameworks and storage backends~\cite{torch-dcp, megatron-dcp}.
+Moreover, without customized optimizations and deployment experience, they suffer from sub-optimal I/O performance and lack the scalability to support large-scale LFM training in real-world production.
+
+% 4. Post our three main parts (representation, workflow, I/O optimization, and industry experience for large-scale deployment.)
+This paper presents the design, implementation, and deployment experience of \sys{}, a checkpointing system crafted for LFM development.
+\sys{} incorporates a unified architecture (Sec.~\ref{sec:arch}) featuring an automatic \textit{resharding-on-loading} mechanism for distributed checkpoints (load-time checkpoint resharding) and supports multiple training frameworks and storage backends.
+It integrates full-stack I/O performance and scalability optimization techniques.
+
+
+$\triangleright$ \sys{}'s checkpoint 
+% storage
+representation is decoupled from the specific parallelism adopted during training 
+% and the implementation details of LFM modules
+(Sec.~\ref{sec:represent}), enabling efficient load-time checkpoint resharding.
+For model and optimizer state representation, 
+%we draw inspirations from the PyTorch Distributed Checkpoint~\cite{torch-dcp} (DCP), %which supports load-time resharding for FSDP.
+we separate each tensor shard's metadata from its numerical values and consolidate all the metadata into one global file.
+The metadata of a tensor shard includes its basic runtime, position, and storage information. 
+% We unify the position information of the tensor shard into the index tuple \textit{(fqn, nD\_offsets, nD\_lengths)}
+%\cwu{consolidate what exactly?} 
+% and propose a tensor decomposition strategy to represent irregular tensor shards by multiple index tuples.
+% \cwu{how tensor shard decomposition is used to represent irregular tensor shards?}, without incurring expensive preprocessing for metadata generation \cwu{what the preprocessing is referring to and why metadata generation is relevant here}(Sec.~\ref{sec:reshard_optim}). 
+For the representation of dataloader states, we divide them into \textit{replicated} and \textit{sharded} states,
+storing sharded states in individual files while the replicated ones are only saved by the training worker whose global rank is 0.
+% File index information of sharded states is also recorded in the global metadata file.
+% \cwu{common and unique among what?}, applying different storage strategies \cwu{not clear what the storage strategies are referring to}.
+%The decoupled presentation for training states enables \sys{} to achieve efficient load-time checkpoint resharding. 
+% \yhpeng{We need to rewrite the sentence about dataloader state representation after we finalize the dataloader part}
+% \yhpeng{do not mention DCP here, instead, discuss it in background/related work}
+
+$\triangleright$ \sys{} offers a generic workflow for LFM training tasks employing different training frameworks and various storage backends (Sec.~\ref{sec:workflow}).
+It tailors a planner for each framework to generate unified saving/loading plans.
+These plans are then passed to a framework and storage backend agnostic engine to execute the I/O tasks.
+%\sys{}'s extensibility is significantly enhanced.
+\sys{}'s workflow utilizes this isolation in architecture, executing the same saving/loading steps for users with different training frameworks and storage backends.
+% unifies \sys{}'s interfaces for training frameworks and storage backends, simplifying the integration of new ones and facilitating broad adaptability and ease of use of the checkpointing system. 
+
+%\cwu{tell more design highlights on how \sys{} achieves the unified interface}.
+$\triangleright$ \sys{} implements multiple optimizations (Sec.~\ref{sec:io_optimization}) to enhance I/O performance, including balanced and zero-redundancy plan generation, fully asynchronous execution pipelines, and efficient irregular tensor processing. 
+% We leverage asynchronous tensor merging and partial file reading to handle the unique performance challenges brought by checkpoint resharding.
+We share our engineering experience in optimizing storage systems to support massive I/O requests, optimizing collective communications to guarantee stability, and designing monitoring and visualization tools for performance analysis and bottleneck detection
+(Sec.~\ref{sec:industrial_scale}).
+This full-stack approach scales \sys{} to support the training of a 405B LFM on 8,960 GPUs while still maintaining high efficiency.
+% and communication optimizations for checkpointing at scale, as well as integrate a suite of monitoring tools into \sys{} for performance and anomaly analysis in large-scale deployments (Sec.~\ref{sec:industrial_scale}). \yhpeng{need a second pass after finishing Sec.4 and Sec.5}
+
+\sys{} is deployed on our industrial AI platform with tens of thousands of GPUs for various LFM training tasks, including pre-training and post-training of language models, multi-modal understanding, and generation models (\eg, for video generation). %It supports extensive training scales with tens of thousands GPUs.
+%Through extensive experiments,
+\sys{} demonstrates significant advantages over existing open-source checkpointing systems, including PyTorch DCP~\cite{torch-dcp} and Megatron Distributed Checkpoint~\cite{megatron-dcp} (MCP).
+Compared to the baselines, \sys{} achieves improvements ranging from 12.13$\times$ to 161.50$\times$ in terms of checkpoint stalls reduction, making the end-to-end checkpoint saving and loading procedures 6.05$\times$ and 3.88$\times$ faster on average, respectively.
+% reduces checkpoint stalls by 67.51$\times$ and accelerates end-to-end checkpointing by 7.33$\times$. For loading (resharding) efficiency, the average acceleration is 4.61$\times$. 
+
+
+% \yhpeng{seems that the challenges/solutions do not map well to Sec. 3, Sec. 4 and Sec. 5. If so, maybe we just talk about two challenges, by combining the challenge1 and challenge2 into one big challenge. and the solution of this big challenge is Section 3.}
+
+
+% \textbf{(TODO: describe the performance gains when finishing experiments.)}
+
+% 5. Implementation, deployment. 
+
+% Sustained progress in Large Language Models (LLMs) such as GPT~\cite{gpt3, gpt4}, Gemini~\cite{gemini, gemini1.5} and Llama~\cite{llama2, llama3} families empowers various downstream AI applications like chatbot~\cite{chatgpt}, personalized AI character~\cite{character-ai}, coding assistant~\cite{github-copilot}, etc.
+% To facilitate efficient large-scale training, several distributed training frameworks (e.g., Megatron-LM~\cite{megatron}, PyTorch FSDP~\cite{fsdp}, DeepSpeed~\cite{deepspeed}, veScale~\cite{megascale}, etc.) have emerged in recent years.
+% Most of them are equipped with advanced parallelism strategies to improve Model FLOPs Utilization (MFU), including Pipeline Parallelism~\cite{pipedream, gpipe} (PP), Tensor Parallelism~\cite{megatron} (TP), Data Parallelism (DP) with zero redundancy optimizer~\cite{zero}, Sequence Parallelism~\cite{deepspeed-sp} (SP) and various combinations of them~\cite{megatron-lm3}.
+% Even with efficient training framework support, the immense model sizes and massive training corpora still make the development of LLMs resource-intensive and time-consuming, which can scale to 12288 GPUs~\cite{megascale} and over several months~\cite{characterization}.
+% Besides, LLM training typically comprises multiple interrelated stages, including Pre-Training (PT), Supervised Fine-Tuning (SFT), and Reinforcement Learning with Human Feedback (RLHF)~\cite{rlhf}. These stages are designed to enhance model performance and align with diverse real-world tasks.
+% Furthermore, it is crucial to run accompanying jobs like auto-evaluation~\cite{characterization} during the Pre-Training stage, allowing for continuous monitoring of the model quality via multifaceted evaluation metrics, and enabling timely hyper-parameter adjustments or debugging~\cite{check-n-run} based on the feedback.
+
+
+% During the full life cycle of LLM training, training states need to be carefully managed for failure recovery~\cite{bloom-failure, opt},
+% \zmf{\sout{,}}
+% and downstream~\cite{check-n-run} or concurrent~\cite{characterization} task transfers.
+% As the mainstream method for training state management in Deep Learning (DL) jobs, checkpointing captures snapshots of training states (e.g., model states, optimizer states, dataloader states, etc.), stores them in persistent storage, and exports them for different purposes. Since training states cannot be modified before the entire copies are obtained,
+% \zmf{before the entire copies are obtained?}
+% efficient I/O performance of checkpointing systems is significant to reduce checkpoint stalls, and thereby improve the Effective Training Time Ratio~\footnote{Effective training time ratio is calculated as the ratio between the actual training time and the total job running time.} (ETTR) for better resource utilization. 
+
+% Three challenges. Requirements for the underlying checkpointing system. Resharding requirements. Cross-framework requirements. Performances' consideration.
+
+% Add a figure to show the resharding scenarios.
+
+%Previous works~\cite{checkfreq, check-n-run, gemini-sys, jit-check}
+% \zmf{have explored?}
+%explore efficient checkpointing systems for various DL workloads.
+%However, two common requirements hinder their deployment to real-world LLM production.
+%\textit{Firstly}, there is a consistent need for \textit{checkpoint resharding}, defined as saving distributed checkpoints with certain parallelism strategies and configurations but loading them into different ones.
+%For example, when large-scale hybrid parallel~\cite{megatron-lm3} Pre-Training is completed and the LLM training enters the alignment (SFT or RLHF) phase, relatively fewer GPUs are involved and the TP, DP, and PP degrees are decreased correspondingly due to the reduction in the scale of training datasets.
+%Checkpoints stored in the PT phase must be resharded to align with the new parallelism
+% \zmf{\sout{degree}}
+%configuration and the total number of accessible GPUs.
+%Besides, checkpoints can also be loaded for other running tasks in the cluster like model evaluation, model debugging, etc.
+%The parallelism degrees and strategies are often tuned for those tasks based on the assigned GPU quota and the task characteristics.
+% For instance, the DP strategy is often adopted for evaluation since large optimizer states do not need to be stored in GPUs.
+%Additionally, for tasks running on elastic tidal resources~\cite{aryl, qsync}, frequent changes in the number of GPUs also bring about the need for checkpoint resharding when resuming the task to new hardware settings. Most of the existing checkpointing systems~\cite{checkfreq, check-n-run, gemini, jit-check} assume consistent parallelism configuration during saving and loading, failing to
+%\zmf{\sout{fulfill the common checkpoint resharding requirement in real-world production} meet the requirement mentioned at this point?}
+%fulfill the resharding requirement in real-world production. 
+%\textit{Secondly}, in the industry platforms, engineers often choose different training frameworks based on the characteristics of their tasks and ease-of-use of frameworks (e.g., Megatron-LM~\cite{megatron} for efficient large-scale distributed training, PyTorch DDP~\cite{ddp} for simple single-node model debugging) and save checkpoints in the storage systems.
+%Since different frameworks have their own checkpoint module and save/load logic, developing efficient checkpoint management and optimization functionalities for those frameworks often incurs extensive domain-specific knowledge and considerable engineering efforts. None of the previous checkpointing systems provide flexible multi-framework checkpointing support to address this issue.
+
+% We propose OmniStore and its main contributions. (standalone system, which is PyTorch-naive and framework-agnostic)
+%Recently, PyTorch introduced Distributed Checkpoint~\cite{torch-dcp} (DCP) to facilitate automatic load-time checkpoint resharding for Data-Parallel frameworks (\ie, DDP and FSDP).
+%However, DCP exhibits limitations in its compatibility with advanced parallelism strategies, such as 3D parallel training, and lacks the capability to save/load checkpoints for multiple training frameworks.
+%Additionally, the system designs of DCP are not optimized for large-scale training.
+%This oversight leads to potential stability issues and detrimentally affects the training efficiency, increasing ETTR and prolonging the duration required for loading.
+
+% Inspired by the concepts of DCP~\cite{torch-dcp}, in this paper, we introduce \sys{}, a PyTorch-native checkpointing system crafted for the full life-cycle of LLM development.
+%\sys{} stores the entire training states, including model, optimizer, and dataloader states, in selected storage backend and supports efficient automatic load-time checkpoint resharding across arbitrary parallel configurations. This versatility makes it adaptable to different hardware setups and task scenarios.
+%Additionally, \sys{} is compatible with multiple training frameworks, broadening its applicability.
+%For model and optimizer states checkpointing, one critical observation is that even though different frameworks have different abstracts for distributed tensor shards (e.g., \textit{DTensor} in FSDP~\cite{fsdp}, veScale~\cite{megascale}, \textit{ShardedTensor} in Megatron-LM~\cite{megatron}), it is feasible to standardize these abstractions using a unified representation, specifically the triple tuple consisting of (\textit{fully qualified name}, \textit{offsets}, \textit{lengths}).
+%This approach facilitates the comprehensibility of tensor management across diverse training frameworks.
+%Based on this observation, \sys{} adopts a data/metadata disaggregated storage architecture. We employ a customized serialization method to extract the metadata information of tensor shards and construct a consolidated global checkpoint metadata file. This file establishes a mapping between runtime tensor shard instances and storage files to maintain a global view of distributed checkpoints.
+%During the resharding process, each newly initialized process retrieves and parses the metadata file to selectively load the required segments from the stored checkpoints.
+% To settle the challenge of irregular tensor resharing (see Sec.~\ref{sec:storage_arch}) and guarantee checkpoint correctness during resharding, we design an asynchronous tensor merging technique, which hides the communication cost within the normal checkpointing workflow.
+% This approach brings significant performance gains for checkpoint saving, especially when training at scale (see Sec.~\ref{sec:exp_save}).
+% I/O optimizations and communication optimizations.
+%To reduce checkpoint stalls during training, we propose I/O performance optimization techniques from two orthogonal perspectives. 
+%Within each training process, we design a fine-grained fully asynchronous save pipeline to hide the cost of each checkpoint phase from others.
+%A Ping-Pong pinned memory pool is also adopted to accelerate the \textit{ Device-to-Host %(D2H) copy} and reduce the cost of CPU memory reallocation.
+%From the perspective of multiple training processes, we distribute balanced saving workloads to each process to enhance parallel processing capabilities for checkpointing.
+%For the loading efficiency, we craft a resharding-aware, zero redundancy loading mechanism: we develop a partial file reading technique that avoids unnecessary data reads from storage systems to CPU memory within each training process, and combine it with asynchronous tensor transfers to further utilize idle inter-GPU bandwidth during loading and eliminate redundant tensor reads across multiple processes.
+% \sys{} also incorporates several communication optimizations to guarantee stability and further boost I/O efficiency when deployed for large-scale training.
+
+
+
+% \yhpeng{Need to elaborate challenges and solutions in detail}
+%To reduce the stalls when calling \sys{} to save checkpoints during training, we design a fine-grained asynchronous save pipeline to hide the cost of each checkpoint phase. 
+% To further reduce the checkpointing time, we propose load-balanced saving workload distribution among processes in DP groups and leverage Ping-Pong pinned memory pool to accelerate tensor transfers from GPU to CPU memory.
+
+% We implement \sys{} as a framework-agnostic Python library, offering two straightforward APIs, i.e., \texttt{bytecheckpoint.save()} and \texttt{bytecheckpoint.load()}.
+% These APIs shield users from the intricacies of checkpoint management and I/O logic, thereby simplifying integration and enhancing usability across various tasks and environments.
+% The code is available at \url{https://github.com/volcengine/veScale/tree/main/vescale/checkpoint}.
+
+
+
+
+

@@ -1,0 +1,267 @@
+\section{%Performance Optimization
+Performance Optimization}
+\label{sec:io_optimization}
+We now elaborate on \sys{}'s performance optimization techniques, focusing on minimizing the overhead associated with checkpoint saving and loading.
+
+\subsection{Optimized Plan Generation}
+\label{sec:opt_plan}
+\noindent \textbf{Balancing saving workload}.
+% \yhpeng{Use data to illustrate how imbalanced if using existing approaches for model, optimizer and other states}
+In training scenarios employing data parallelism (DP), model states are replicated across all DP groups, resulting in duplicated model states. Existing checkpointing systems~\cite{torch-dcp, megatron-dcp} address this issue by designating the first DP group to save all model states. However, this approach leads to workload imbalance, potentially causing training workers in the first DP group to become stragglers.
+To address this challenge, we implement a workload-balancing deduplication mechanism during the planning procedure, utilizing a Worst-Fit algorithm. Specifically, the coordinator planner distributes the saving workload based on the size of each tensor shard, assigning the current tensor shard to the rank with the smallest cumulative tensor shard size. This approach ensures a more equitable distribution of the saving workload across ranks.
+% \cwu{explain more how the Worst-Fit method works}.
+ This balances workloads across all workers, improving saving efficiency.
+ 
+% In DCP~\cite{torch-dcp}, a simple deduplication algorithm is employed: it designates the process with group rank 0 in each DP group as responsible for saving all model states.
+% As shown in Fig. (\textbf{TODO: use FSDP GPT model to draw file size distribution between different methods}), this approach results in significantly imbalanced workloads.
+% To address this imbalance, we implement a workload-balanced deduplication mechanism. By adopting the Worst-Fit algorithm, we distribute the saving tasks according to the size of each tensor shard. This approach promotes a more even distribution of workloads across all processes within the same DP group, thereby enhancing the efficiency for parallel processing of saving tasks among various training processes and reducing the end-to-end completion time.
+
+\noindent \textbf{Eliminating redundant loading}.
+When loading checkpoints into parallelism configurations that include data parallelism, \sys{} optimizes the process by eliminating repetitive tensor reading across DP groups, effectively combining storage file reading with tensor transferring. A crucial observation is that idle inter-GPU bandwidth can be utilized to concurrently transfer loaded tensors to peer GPUs during the file reading process. As illustrated in Fig.~\ref{fig:load_pipeline}, tensor reading workloads across DP groups are evenly distributed among training workers during the planning phase, thereby avoiding duplication of reads. Subsequently, I/O threads are launched to read the allocated tensor shards. Concurrently, in the main thread, shards read into CPU memory are first copied into GPU memory and then transferred to other workers that require them, utilizing all-to-all collective communication. 
+
+%When loading to parallelism configurations that include data parallelism, eliminates repetitive tensor reading within each DP group by combining file reading with tensor transferring.
+%A key insight is that during the file reading process, idle inter-GPU bandwidth can be utilized to transfer loaded tensors to peer GPUs concurrently. As depicted in Fig.~\ref{fig:read_comm_overlap}, the tensor reading tasks within each DP group are evenly distributed among training workers during the planning stage to avoid duplication of reads. After that, I/O threads are launched to read the allocated tensor shards. In the main thread, shards read in CPU memory are copied into GPU memory and then transferred to other workers that require them.
+% Given that the tensor transfer communication pattern among the DP group constitutes the all-to-all (all2all) collective primitive, we implement a ring-based all2all algorithm to avoid communication contention between processes, thereby boosting communication efficiency effectively.
+% It is recognized that the distribution of all repeated tensor shards may not always be perfect even across processes in each DP group.
+% To address any discrepancies, we add no-communication operations (NOOP) for tail send and receive requests to pad the last incomplete all2all communication ring, guaranteeing the correct communication semantics.
+
+
+\noindent \textbf{Plan and metadata cache}. In large-scale training, the execution of the planning procedure can introduce significant communication overhead, particularly when checkpoint saving occurs frequently.
+For example, planning the saving procedure for a 405B transformer model distributed across 8960 GPUs requires 62 seconds.
+However, we have observed that both the save plans and the global metadata file, although coupled with specific parallelism, remain constant throughout a single training session.
+% observation presents an opportunity for optimization, as the invariance of these elements
+This allows for 
+% potential reuse and
+caching strategies to reduce planning times and associated overheads in subsequent checkpoint operations.
+% \cwu{why the saving plans remain unchanged? doesn't the saving plan change according to parallelism changes?}.
+We introduce plan metadata caching, transforming the planning into a one-time cost.
+Once established for the first time, the save plans and global metadata file are cached for future reuse,
+eliminating repetitive planning.
+% with communication overhead.
+% As outlined in Sec.~\ref{sec:workflow}, \sys{} adopts a planning protocol similar to that of DCP~\cite{torch-dcp} for saving, which involves three centralized communication operations.
+% This protocol not only introduces heavy communication overheads but also poses potential stability risks due to the centralized approach where data from all processes are funneled to a single coordinator.
+% reason 1: Performance.
+% reason 2: Stability.
+% \yhpeng{add a sentence with numbers to explain why we need to cache plan}
+%After the first execution of the deduplication algorithm,  both the save plans and the global metadata file remain unchanged during the training process.
+%Subsequently, it becomes unnecessary to execute the planning protocol with each invocation of the save function
+%\sys{} introduces plan and metadata caching mechanisms, transforming the planning into a one-time cost. Once established, the save plans and the global metadata file are cached for future reuse. This allows the system to avoid repetitive planning, therefore reducing unnecessary communication overheads.
+\subsection{Fully Asynchronous Engine Pipeline}
+\label{sec:opt_pipeline}
+% \yhpeng{1. It's better to demonstrate the loading/resharding pipeline since it is more complicated. We can add the all2all as a pipeline stage here. 2. Then combine Figure 11 and Figure 10 into one figure, 3. remove the baseline pipeline in Figure 10 and just describe in the text}
+
+% \yhpeng{use one example with detailed data/numbers to illustrate the saving bottlenecks and performance gain after applying each of the saving techniques}
+
+% \begin{figure}[h]
+%   \centering
+%   \includegraphics[width=0.49\linewidth]% {figures/save_pipeline.pdf}
+%   \caption{
+%   % Save pipeline comparison between different systems. The upload phase % in \sys{}'s save pipeline is only enabled when the storage backend is % remote persistent storage like HDFS.
+%   Save pipeline comparison.
+%   }
+%   \label{fig:save_pipeline}
+% \end{figure}
+
+% \begin{figure}[!t]
+%     \centering    
+%      \begin{subfigure}[b]{0.49\linewidth}
+%          \centering
+%          \includegraphics[width=\linewidth]{figures/save_pipeline.pdf}
+%          \caption{Save pipeline comparison.}
+%          \label{fig:save_pipeline}
+%      \end{subfigure}
+%      \hfill
+%       \begin{subfigure}[b]{0.49\linewidth}
+%      \centering
+%      \includegraphics[width=\linewidth]{figures/ping_pong_pool.pdf}
+%      \caption{Ping-Pong buffering of the pinned memory pool.}
+%      \label{fig:ping_pong}
+%     \end{subfigure}
+%      \caption{Fully asynchronous save pipeline and Ping-Pong pinned memory pool of % \sys{}.
+%      }
+%       \label{fig:save_optimization}
+% \end{figure}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/load_pipeline.pdf}
+  \caption{
+   Comparison between \sys{}'s loading pipeline and the naive implementation.
+   % \cwu{draw the timeline spanning the entire width; put the four legend blocks in one row underneath the timeline}
+  }
+  \label{fig:load_pipeline}
+\end{figure}
+
+
+%\begin{figure}[!t]
+%  \centering
+%  \includegraphics[width=\linewidth]{figures/read_comm_overlap.pdf}
+%  \caption{
+%    Illustrations of overlapping tensor reading and transferring.
+    % After allocating the reading tasks, each rank is responsible for reading two tensors and executing two all2all communication operations.
+% }
+%  \label{fig:read_comm_overlap}
+%\end{figure}
+
+%\mingji{
+\sys{} Engine optimizes operation execution during checkpoint saving and loading (resharding) through pipelining. Using loading as an example (Fig.~\ref{fig:load_pipeline}), we pipeline file reading, deserialization, Host-to-Device (H2D) copy, and inter-GPU communication for each tensor shard, thereby achieving higher efficiency.
+The \textit{read} operation downloads files containing desired tensors from the storage system and places them into shared memory (e.g., the \texttt{dev/shm} directory). The \textit{deserialize} operation deserializes tensors from shared memory. \sys{} employs multiple threads for parallel file downloading and deserialization. The \textit{H2D copy} operation transfers tensors from CPU memory to GPUs, while \textit{All2All} facilitates tensor transferring within the DP group.
+For saving, we implement a symmetrical, fully asynchronous pipeline comprising 
+% Device-to-Host
+D2H copy, serialization, and file uploading operations. To mitigate the performance impact of D2H copy on training, we employ a pinned CPU memory pool combined with a Ping-Pong buffering mechanism to accelerate this operation. We run multiple parallel processes to serialize tensors and dump files into shared memory.
+Uploading threads actively monitor and initiate file uploading upon the completion of the dumping phase.
+% Advanced features such fast failure recovery in Gemini~\cite{gemini-sys} can also be incorporated in the system.
+% \yhpeng{briefly discuss saving, TODO: add citation for ping-pong buffer}
+% Since the D2H copy phase lies in the critical path of training, \sys{} optimizes it by implementing a pinned CPU memory pool which leverages the high PCIe bandwidth to accelerate D2H tensor transfers, while also eliminating the costs of CPU memory reallocation. To avoid pinned memory contention between consecutive save function calls, \sys{} further employs the Ping-Pong buffering mechanism within the memory pool. This method involves two pinned memory pools that keep alternating their roles: one pool gathers newly copied states from GPU memory (serving as the read buffer), while the other transfers states to the I/O workers (acting as the write buffer).
+
+% \yhpeng{add more details to explain that existing approaches are not fully pipelined yet.}
+%Existing asynchronous checkpointing methods~\cite{checkfreq, megascale} employ a coarse-grained pipelining between model computation and the checkpointing process. This approach falls short of fully leveraging the execution independence of each phase during checkpointing. \sys{} enhances the efficiency by separating different phases of checkpoint saving for each tensor shard and pipelines their execution. This strategy hides the costs associated with each phase from others, thereby reducing the end-to-end checkpointing duration. When choosing remote storage backend (e.g., HDFS), the pipeline incorporates an additional upload phase. This phase facilitates the streaming of file uploads for multiple checkpoint files. Fig.~\ref{fig:save_pipeline} illustrates a fine-grained pipeline of checkpoint saving. 
+
+% \noindent \textbf{Overlap tensor reading with transferring}.
+% The partial file reading technique effectively eliminates redundant tensor reads within a single process.
+% When loading to parallelism configurations that include data parallelism, the same tensor shards are still requested and read by multiple processes within a DP group.
+% Besides, during large-scale training, a massive number of concurrent read requests can strain the bandwidth of HDFS, creating a bottleneck for checkpoint loading~\cite{megascale}.
+
+
+% \noindent \textbf{@yiyao, please check this section.}
+% \textbf{how do we save dataloader states (\eg, GB states in T2V cases) and other states (\eg, rng states) efficiently?} @yiyao.sheng, @mingji.han please add details
+
+
+% \yhpeng{Ping-Pong buffers are simple, we can simplify the description}
+% \zmf{do we have pics or experimental results to show the benefit of workload balancing?}
+
+% In data parallel training, models are replicated across GPUs with different data parallel ranks but the same pipeline and tensor parallel ranks. The default PyTorch DCP planner deduplicates replicated tensors using a simple algorithm, causing GPUs with data parallel rank 0 to save the entire model, which leads to load imbalance. To address this issue, we implemented a load-balancing algorithm for deduplicating model tensors. This ensures a more even distribution of the checkpointing workload across all GPUs.
+
+% \subsection{Fast Loading}
+% \yhpeng{I split loading and resharding into two subsections. Merge them into one subsection if later we find this subsection is short.}
+
+
+% \begin{figure}[!t]
+%     \centering    
+%      \begin{subfigure}[b]{0.49\linewidth}
+%          \centering
+%          \includegraphics[width=\linewidth]% {figures/partial_read.pdf}
+%          \caption{Partial file reading.}
+%          \label{fig:load_partial}
+%      \end{subfigure}
+%      \hfill
+%       \begin{subfigure}[b]{0.49\linewidth}
+%      \centering
+%      \includegraphics[width=\linewidth]% {figures/read_comm_overlap.pdf}
+%      \caption{Overlap tensor reading with transferring.}
+%      \label{fig:read_comm_overlap}
+%     \end{subfigure}
+%      \caption{
+%      Illustrations of \sys{}'s zero redundant loading % mechanism.
+%      In the example of Fig.~\ref{fig:read_comm_overlap}, % rank 0 to rank 3 are in the same DP group, there % exist 8 tensor shards in total to be loaded for each % one. After integrating the tensor transferring across % GPUs, each rank only has 2 reading tasks and 2 % all2all communication tasks that can be executed in a % pipeline.
+%      }
+%       \label{fig:zero_load}
+% \end{figure}
+
+% \yhpeng{Any special optimizations on loading? e.g., if there is no resharding, same 3d parallellisms.}
+
+
+% \noindent \yhpeng{Any efforts on bit-wise alignment when loading ckpt?}
+
+% \subsection{Decomposing Irregular Tensors}
+
+% \begin{figure}[!t]
+%   \centering
+%   \includegraphics[width=\linewidth]{figures/irregular_tensor.pdf}
+%   \caption{
+%   ShardMeta of irregular tensors in optimizer states.
+%   }
+%   \label{fig:irregular_decomposed_meta}
+%   \vspace{-5mm}
+% \end{figure}
+% \yhpeng{The sentences and paragraphs in this subsection need to be reorganized. First, introduce what is irregular tensor, why it exists, and whether Megatron-LM and PyTorch support it; Second, what is the naive way to save irregular tensor and what is the overhead (introduce tensor merging solution); Third, describe how we handle irregular tensor effciciently.}
+
+%We define irregular tensors as those which, when flattened before sharding, %cannot be reshaped back to their original dimensions. These tensors %typically arise when applying the Zero Redundancy Optimizer %(ZeRO)\cite{zero}, as implemented in Megatron-LM ZeRO2 and FSDP %ZeRO3\cite{fsdp}. In these implementations, optimizer states within a DP %group are flattened, concatenated, and sharded. Consequently, the resulting %1D tensor slices often cannot be directly represented using n-dimensional %shapes and offsets.
+%Fig.~\ref{fig:irregular_decomposed_meta} illustrates an example of %irregular tensor sharding: Unlike tensors $A$ and $C$, tensor $B$, with an %original shape of (3, 2), is evenly split into two shards. Each shard, %containing three elements, cannot be directly represented as a two-%dimensional shape with corresponding offsets.
+%One intuitive approach to addressing the challenge of irregular tensor %shards is to merge all tensor shards into complete tensors before saving %checkpoints, thereby simplifying the generation of ShardMeta.
+%For example, to eliminate potential irregular tensors in DCP~\cite{torch-%dcp}, FSDP performs synchronous all-gather communication operations, %interleaved with D2H copy operations for each tensor shard, regardless of %whether the shard is irregularly sharded.
+%However, this approach incurs significant communication overhead and %requires frequent synchronization between GPU and CPU, which substantially %impedes training performance.
+%To mitigate the overhead associated with merging tensor shards, \sys{} %employs a tensor decomposition strategy for managing irregular tensor %shards. Specifically, \sys{} decomposes an irregular tensor into a series %of regular ones, representing each with index tuples. For example, consider %the irregular tensor shard of tensor $B$ with three elements on rank $0$ in %Fig.~\ref{fig:irregular_decomposed_meta}. \sys{} decomposes this shard into %two regular tensors that can be directly represented by $nD\_offsets$ and %$nD\_lengths$. This approach allows \sys{} to use multiple %\textit{ShardMeta} entries to represent a single irregular tensor shard.
+%Although such decomposition slightly increases the metadata size and adds %steps to the loading procedure, as reconstructing the target tensor may %require looking up multiple smaller segments of irregular shards, it avoids %the costly communication of tensor shards without extra blocking time %during saving.
+% \begin{figure}[!t]
+%   \centering
+%   \includegraphics[width=\linewidth]{figures/partial_read.pdf}
+%   \caption{
+%     Illustration of Partial file reading mechanism.
+%   }
+%   \label{fig:load_partial}
+% \end{figure}
+% \yhpeng{The following subsection actually undermines the unified representation. Consider rewriting and move some contents to Sec.4.2 Efficient Loading and Resharding}
+% \noindent \textbf{Zero-communication metadata generation}.
+% 1. Irregular tensor resharding makes it hard to store relative position information when preparing ShardMeta.
+% 2. The solution in FSDP is all-gather D2H interleaving, to suit DCP.
+% 3. We settle this problem by adopting tensor decomposition, representing them with multiple index tuples.
+% 4. Representing tensor shards with multiple index tuples introduces no communication overhead during saving, but complicates loading.
+% Therefore, we further propose asynchronous tensor merging and set it as an option to achieve a trade-off.
+% The automatic load-time resharding mechanism operates effectively when each tensor shard retains its original shape before checkpoint saving
+% However, many mainstream training frameworks~\cite{megatron, fsdp, megascale} modify the original shape of tensor shards to enhance memory or communication efficiency.
+% For example, in Megatron-LM~\cite{megatron} and veScale~\cite{megascale}, all tensor shards of the optimizer states in the same layer (module) are flattened and merged into a one-dimension vector.
+% Therefore, the (FQN, offsets, lengths) representation cannot be directly applied due to irregular tensor sharding.
+% As shown in Fig.~\ref{fig:irregular_shard}, when 2D (TP with ZeRO-style DP) parallel training is applied, some tensors in optimizer states are not regularly divided along the axis independently, making it fail to represent them with the triple tuple format.
+% Other Data-Parallel training frameworks like FSDP~\cite{fsdp} also have similar designs.
+% The representation of a tensor shard's relative position information (ShardMeta) is not necessary when the parallelism configuration remains unchanged.
+% However, when checkpoint resharding is required, the loss of this position information can lead to incorrect resuming.
+%Before saving distributed checkpoints, existing frameworks like FSDP~\cite{fsdp} remove irregular tensor shards caused by flattening and merging operations through a preprocessing step.
+%It iteratively performs synchronous all-gather communication operations for each module.
+%Additionally, when the full GPU states exceed the GPU memory capacity, the D2H copy operation is interleaved with the all-gather operation across each module to avoid out-of-memory (OOM) issues.
+%This processing allows all workers to possess the full GPU states before generating ShardMeta and then utilizing checkpointing systems like DCP~\cite{torch-dcp} to persist checkpoints.
+%However, this method not only leads to substantial communication overhead but also results in considerable execution bubbles caused by frequent synchronization between the GPU and CPU.
+%Such delays increase with the training scale and severely impede training progress.
+%\mingji{
+%within training frameworks. This trade-off is crucial for maintaining training performance.
+% Consider a tensor again with shape (3, 2) that needs to be sharded into two parts, each containing three contiguous elements. Rather than merging the shards back to their original shape through communication, each rank independently stores the shard in its flattened format. The ShardMeta includes detailed information about the shard’s origin, such as the original tensor shape and the shard's position within the original flattened tensor.
+
+
+%Conversely, as introduced in Sec.\ref{sec:storage_arch}, \sys{} adopts a tensor decomposition strategy to manage irregular tensor shards, constructing the ShardMeta with multiple index tuples.
+
+
+
+
+% \noindent \textbf{Partial file reading}.
+% As illustrated in Fig.~\ref{fig:decomposed_meta}, under certain resharding scenarios, newly initiated training workers may only need to access specific sections of saved tensor shards from the checkpoint storage files.
+% DCP~\cite{torch-dcp} overlooks this aspect and reads the entire tensor shard, subsequently performing in-memory slicing to isolate the required segments. This approach leads to unnecessary I/O costs that negatively impact overall efficiency.
+% Besides, it can also bring potential OOM issues when CPU memory is scarce. 
+% Furthermore, when checkpoints are stored on remote persistent storage such as HDFS, each process must download the whole storage files to access the fragments in tensor shards, thereby exacerbating communication overhead.
+% \sys{} implements a partial file reading mechanism, allowing each worker to directly access only the needed segments of the tensor shards instead of reading in the whole tensor and then performing in-memory slicing (shown in Fig.~\ref{fig:load_partial}).
+% Specifically, for each tensor shard that is newly instantiated, \sys{} utilizes the ShardMeta and ByteMeta of the saved tensor shards to convert retrieval indices into a series of byte-level, one-dimensional indices, enabling direct data access based on these byte-level indices.
+
+% with torch.load/save or SafeTensor format various purposes including exporting the model to open-source Communities like HuggingFace and using checkpoints in the inference system. To speed up merging checkpoints, we use multiple processes to download and load checkpoint shards files in parallel then merge tensor shards into integrated tensors based on tensor metedata in the metadata file.
+
+\subsection{High Performance Read/Write}\label{sec:io_parallel}
+% \yhpeng{TODO: Add numbers in the sentences to illustrate the performance before and after optimization and polish the writing.}
+% \zmf{polished at 09/17 10:33 GMT+8}
+We optimize the read and write throughput of checkpointing by tailoring our implementation to optimal I/O %patterns 
+usage of commonly used storage backends. For example, while HDFS is not primarily designed for random data access, it does offer some random read capabilities via its SDK, allowing applications to access specific file offsets and retrieve data from those positions. We leverage this feature %we have enhanced our C++ HDFS SDK to support 
+and enable multi-threaded reading of a single file, significantly accelerating the download speed of checkpoint files from HDFS. In our production platform, single-file read speed has improved from 400 MB/s to 2-3 GB/s, all tested on H800 servers equipped with over 100 CPU cores, TB-level memory, and a 200Gbps NIC.
+
+For file writing, HDFS's append-only write makes it impractical to split a single file into multiple parts based on offsets for multi-threaded writing. To overcome this limitation, we split the target file into several sub-files of fixed size and concurrently write them into HDFS using multi-threading.
+After the upload is complete, we perform metadata-level concatenation to seamlessly merge the sub-files back into a single entity, ensuring the integrity of the stored data blocks. 
+Without network congestion, single-file upload speed can reach 3 GB/s, far exceeding the average read/write throughput of a single HDFS client (under 100 MB/s~\cite{shvachko2010hdfs}). 
+
+\subsection{Prefetching Dataloader States}
+\label{sec:dataloader_prefetch}
+% \yhpeng{How dataloader states sharded is removed. We focus on performance optimization in this section. The first paragraph describes the problem, and the second paragraph describes the optimization. See if we need to add back dataloader resharding later.}
+% \noindent \textbf{State prefetch for dataloader}.
+Each dataloader employs multiple subprocesses, referred to as read workers,
+% \cwu{I/O workers? differentiate it from training workers}
+to handle data loading and preprocessing.
+When checkpointing is initiated, the main read worker
+% \cwu{clarify what the main process is} 
+signals all 
+% \cwu{training?}
+other read workers to prepare their states. The training process is paused until all states are collected to ensure accuracy, as any update in the main process would result in the state change of workers.  %\yhpeng{explain why training is blocked.}
+The duration of this blocking period depends on both the number of workers and the size of the accumulated token buffers.
+For instance, when using a dataloader configured with 4 workers and a total state size of approximately 1GB, the state collection process typically takes around 8 seconds.
+
+To alleviate this overhead, we adopt prefetching. 
+Based on the pre-set checkpoint frequency, each read worker prepares its state during the training step just before checkpointing and puts the state into its state queue.
+At the checkpointing step, the main read worker gathers those prepared states immediately through queue polling.
+This optimization allows \sys{} to achieve near-zero dataloader state gathering delays.
+%We have also developed a dataloader state prefetching technique (see details in %Appendix~\ref{sec:dataloader_prefetch}) to achieve near-zero blocking when gathering %states from read workers (subprocesses) in each dataloader during checkpointing steps.
+% This technique achieves near-zero blocking time.
+% For a detailed explanation, see Appendix~\ref{sec:dataloader_prefetch}.

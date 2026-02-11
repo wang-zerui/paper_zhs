@@ -1,0 +1,152 @@
+\section{Checkpointing at Scale}
+\label{sec:industrial_scale}
+This section explores in depth the methods employed to optimize checkpointing for large-scale LFM training.
+
+\subsection{Storage Support}\label{sec:scale_storage}
+% \yhpeng{TODO: polish the writing @mofan}
+% \zmf{edited at 09/17 19:04 GMT+8}
+%The development of LFMs demands stable, high-performance storage services. 
+% Consider training %a scenario where 
+% a 405B LLM %is being trained 
+% on over 10,000 GPUs. The size of distributed checkpoints generated in a single saving step is approximately 5.5 TB. Given %the practice of 
+% periodic checkpointing every 10 minutes (commonly employed in our production platform), this results in a daily storage demand of 792 TB per replica
+% \cwu{what the replica is referring to}.
+% Effectively managing this colossal volume of checkpoint data necessitates not only substantial storage capacity but also high I/O performance, to alleviate any training stalls. %These factors ensure that the system can swiftly handle and store the massive influx of data, thereby maintaining the continuity and efficiency of the training process.
+
+%To manage this colossal volume of checkpoint data effectively, both substantial storage capacity and efficient I/O performance are essential.
+%These elements ensure that the system can swiftly handle and store the large influx of data, maintaining the continuity and efficiency of the training process.
+
+%In addition, since \sys{} employs a workload balancing mechanism to accelerate checkpointing, each training worker needs to save multiple relatively smaller checkpoint files.
+%Consequently, as the scale of training increases, the volume of storage metadata requests also rises linearly, exerting additional pressure on the backend storage system's metadata services.
+
+%\noindent HDFS, a storage system renowned for its stability, reliability, and cost-effectiveness, is currently the cornerstone of our storage infrastructure for LLM development. Building on this foundation, 
+% We have implemented several optimizations for HDFS (the primary storage backend in our system) to enhance throughput and scalability for large-scale checkpointing of LFMs.
+
+
+\noindent \textbf{High throughput, scalable storage system.} HDFS is the primary storage backend for \sys{}, we have implemented several optimizations to enhance throughput and scalability for large-scale checkpointing.  We have rewritten all HDFS components, including NameNode, DataNode, and SDK~\cite{hdfs}, in C++, effectively doubling performance compared to the original Java-based implementation.
+Additionally, we have refined its architecture 
+% of HDFS 
+by introducing a new component named NNProxy~\cite{nnproxy}.
+NNProxy functions as a stateless RPC proxy for HDFS NameNode, facilitating large-scale federated deployments of NameNodes while maintaining minimal querying latency.
+The NNProxy design addresses the 
+% Queries-Per-Second
+QPS bottleneck of HDFS NameNode metadata requests, a challenge intensified by the high volume of distributed checkpoints.
+NNProxy also provides additional features such as authentication, rate limiting, and metadata query caching. These capabilities enable more granular management of checkpoints in production environments.
+Our optimized HDFS achieves a substantial capacity of hundreds of PBs, 10 TB/s read/write bandwidth, and approximately 100,000 metadata QPS.
+%\yhpeng{describe more about the NNProxy and how NNProxy facilitates large scale support.}
+% \zmf{edited at 09/17 19:33 GMT+8}
+
+
+\noindent \textbf{Checkpoint cool-down strategy.} We have implemented a two-tier hot-cold storage architecture using a combination of SSD and HDD storage servers.
+Our key observation is that newly stored checkpoint files are typically downloaded by evaluation tasks shortly after their creation.
+However, 
+% under normal circumstances 
+where no training anomalies such as loss spikes occur,
+the access frequency of these files decreases significantly after being downloaded by evaluation tasks.
+Nonetheless, all checkpoint files must be preserved for traceability.
+To efficiently manage storage space while ensuring data availability, we have developed a data cool-down mechanism that migrates data from SSD to HDD storage, thus ensuring that high-performance hot storage consistently has sufficient space for operations.
+Specifically, we cool down all files that exceed the retention threshold based on their last modification time. We then remap the original file paths to the new HDD storage locations through pure metadata operations.
+This strategy applies to HDFS directories and preserves the original access paths of the cooled-down files, providing a seamless user experience.
+
+%This strategy is implemented at the HDFS directory level and preserves the original access paths of the cooled-down files, ensuring a seamless user experience.
+% LFMs Pre-Training tasks always checkpoint at a high frequency for training failover consideration; however, we have noticed that only a small fraction of checkpoint files are actually read for resuming training progress or for use in periodic evaluations, SFT, RLHF, and other downstream tasks, while most checkpoint files that not likely to be read still need to be persisted for traceability.
+% We have also observed that the majority of these read operations occur shortly after the checkpoints are written into HDFS.
+% Based on this reading pattern, our data cooldown strategy is designed as a daily cooldown task, automatically migrating all files in the directory that have exceeded the retention threshold according to files' modify time to HDD storage, and then mapping the original file paths to the new HDD storage locations through pure metadata operations.
+% For directories without any data cooldown strategy configured, we manually scan and analyze their usage patterns, according to which we notify users and perform manual data migration from SSD to HDD.
+
+\subsection{Collective Communication}
+\label{sec:opt_cc}
+% \yhpeng{TODO: Rewrite this subsection: 1. introduce the collectives used in global plan and integrity guarantee; 2. explain the problems we observed of existing implementation; 3. introduce our solution grpc+hierachical communication}
+
+Collective communications (e.g., scatter, gather, barrier) are crucial in \sys{}'s workflow (Sec.\ref{sec:workflow}), particularly for planning and checkpoint integrity guarantee.
+We initially used NCCL\cite{nccl} as the communication backend to execute gather and scatter operations at the coordinator. However, when scaling a pre-training task to 8960 GPUs, we observed that NCCL requires a long time to lazily build communication channels and allocate GPU memory during the planning stage of \sys{}'s saving workflow. In some cases, it becomes unresponsive or causes CUDA out-of-memory (OOM) errors, as scatter or gather operations necessitate establishing peer-to-peer communication with each GPU. These GPU
+OOM issues and long initialization times are not apparent in small-scale trials but become significant at larger scales.
+% However, when scaling a pre-training task to 8960 GPUs, we encounter an \texttt{NCCL Error 3} during the planning stage of \sys{}'s saving workflow.
+% Meticulous log analysis reveals that the function call of \texttt{scatter\_object\_list} in \texttt{torch.distributed} registers plenty of 128MB GPU memory buffers, triggering an OOM issue. % The root cause is that the scatter or gather operations consist of multiple P2P communications, and NCCL needs to initialize the communication each peer.
+% Please mention the Cuda OOM issue here.
+
+To enhance communication stability during planning, we have re-implemented the procedure using the gRPC framework~\cite{grpc}, which eliminates GPU memory usage during planning.
+However, when scaling training to tens of thousands of GPUs, centralized gathering and scattering operations continued to impose a significant burden on the coordinator, leading to communication failures.
+We further improved its stability by implementing a tree-based hierarchical communication topology.
+Training workers on a single machine are organized into first-level subtrees, with the worker of local rank 0 designated as the root. For inter-machine communication, we iteratively group multiple machines, designating the worker with the lowest global rank in each group as the root. This procedure continues until all workers are integrated into a hierarchy converging at the global root (i.e., the coordinator).
+In large-scale 3D parallel training scenarios, a TP-DP-PP communication tree naturally forms, removing extra connections. % Under this setup, each worker begins by extracting TensorMeta and ShardMeta from local tensor shards. The coordinator then hierarchically gathers all these data through the communication tree. The scattering step is executed in reverse order.
+% The above optimizations enable \sys{} to achieve stable save/load plan planning performance when deployed to training on more than 9,000 GPUs.
+% \noindent \textbf{@yanghua, please check the correctness of this section.}
+
+\subsection{Monitoring and Analysis}\label{sec:visualization}
+% \yhpeng{TODO: polish the writing}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/heat_map.pdf}
+  \caption{
+  %The end-to-end 
+  End-to-end checkpoint saving time heat map from a 3D parallel training task with Megatron-LM on 32 GPUs.
+  The color denotes the time of a selected 
+  % checkpointing
+  phase on a rank. 
+  % \cwu{what do 0, 1, 2, .. 31 mean? do they correspond to the phases shown using circles at the bottom? What does `end-to-end' phase mean? change instance to rank in the figure}
+  }
+  \vspace{-4mm}
+  \label{fig:heatmap}
+\end{figure}
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/checkpoint_breakdown.pdf}
+  \caption{
+    Time breakdown of checkpoint saving on rank 0.
+  }
+  \vspace{-5mm}
+  \label{fig:breakdown}
+\end{figure}
+
+During training, \sys{} continuously collects critical performance measurements and visualize them for real-time performance monitoring and analysis. This approach enables quick checkpointing issues detection, such as low read/write throughput, stragglers, and upload failures and retries.
+
+% As the scale of large model training systems continues to grow, it has become increasingly challenging to monitor and manage the complexity of the processes involved.
+% To enhance visibility across the entire system and quickly identify potential stragglers or abnormalities,
+% (1) (Menghan) We gathered data in the form of time intervals, providing a detailed breakdown of each stage in the chekcpoint load/save life-cycle across all ranks. (here describe examples of the breakdown or a data schema, maybe a table) (Optional: data process pipeline, streaming kafka client and data storage allowing online and offilne process) @ Mofan: Please review and add/remove contents.
+% (2) We provided two views: (a) heatmap visualizations for the total duration & Per-process duration -> showcasing data workload balance & more work for rank 0 and tp-0/pp-0 (2) detailed breakdown on a single rank: including timeline view, file_size & bandwidth.
+% (3) reflect system design & detect straggler () anomalies: file size change?
+\noindent \textbf{Data collection}.
+We have designed a user-friendly metrics system based on Python's context manager and decorator syntax to monitor critical procedures flexibly.
+It automatically captures the duration and I/O size of each operation, along with relevant metadata such as each worker's rank, the file path, and the current step.
+All collected metrics are transferred to a remote database via a background message queue.
+% The collected metrics data for different workers and checkpoint files are managed independently, avoiding inter-process communication overhead put into the training tasks.
+% To enhance the usability and flexibility of the metrics SDK, we have encapsulated two usage methods based on Python's context manager and decorator syntax, empowering users to effortlessly incorporate metrics into any operation within \sys{}, tailored to their specific needs.
+
+\noindent \textbf{Visualization}. 
+% \yhpeng{Split it into two paragraphs. Each paragraph describe one figure.}
+\sys{} provides users with a comprehensive topological performance overview of all ranks associated with different checkpoint phases, as well as detailed duration breakdowns for any specific rank.
+% （Borui）For example, in Fig.~\ref{fig:heatmap}, the end-to-end checkpoint saving time is shown within the 3D parallel training topology as a heat map.
+% This heat map highlights that ranks 0, 4, 8, and 12 experience the longest time.
+% This is because those ranks have additional I/O workloads for saving dataloader states.
+% Users can also select other fine-grained phases like planning or D2H copy for analysis.
+Fig.~\ref{fig:heatmap} presents an exemplary heat-map visualization of checkpoint saving times within a 3D parallel training topology.
+The visualization highlights that ranks 0, 4, 8, and 12 experience the longest saving times as their checkpoints including dataloader states. Additional metrics visualizations are also available for detailed analysis,
+such as blocking time and fine-grained phases like planning and D2H copy. These visualizations enable users to easily pinpoint straggler nodes or phases for both system development and in production environments. For instance, if certain nodes experience network issues, increased upload or download times during the HDFS transfer phase would be readily apparent.
+Furthermore, detailed timeline breakdowns of checkpointing procedures at each rank are accessible via the heat map topology overview, enabling users to thoroughly evaluate all optimizations in the system.
+Fig. ~\ref{fig:breakdown} illustrates the execution details of each checkpoint-saving phase for a specific rank.
+% The vertical axis represents each data parallel group, while the horizontal axis represents pipeline parallel stages, with four stages grouped together as a tensor parallel group.The total duration for one checkpoint saving or loading on each rank is visualized as a heatmap topology.
+
+% （Borui）The execution details of each checkpoint saving stage can be found in Fig.~\ref{fig:breakdown}, where the main training process returns from blocking after the completion of the D2H copy phase of optimizer states.
+% Meanwhile, other phases continue to operate in the background. 
+
+
+\noindent \textbf{Storage-side monitoring}.
+% We have also developed a performance and anomaly monitoring system for our storage backends.
+On the storage client side, we monitor the latency and I/O size of each atomic read/write operation at the I/O chunk level.
+All collected metrics are periodically transmitted via a message queue to a ClickHouse service, where the data are aggregated and analyzed.
+Unexpectedly high latency or low bandwidth triggers alerts to engineers for further investigation.
+On the storage cluster side, our primary focus is on overall performance metrics, including metadata request QPS, cluster-level read/write throughput, and storage capacity utilization.
+This comprehensive monitoring system plays a crucial role in identifying issues such as slow checkpoint reads and writes, and even complete system unavailability due to storage capacity exhaustion, facilitating the implementation of preventive measures for enhancing system reliability and efficiency.
+
+%We have also developed a 
+%% performance and anomaly
+%monitoring system for our storage backends, see details in %Appendix~\ref{sec:storage_monitor}.
+%Users can examine these details for each individual rank via the heat map topology overview, which significantly enhances the transparency and observability of the entire system aiding large-scale troubleshooting.
+
+
+%\yhpeng{In the figure, change bytecheckpoint.save() to bcp.save(); besides, upload and dump are not fully pipelined in the figure;}
+% \yhpeng{add 2-3 more sentences per paragraph for description of Fig.12 and Fig.13}
+

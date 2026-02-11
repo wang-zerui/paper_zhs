@@ -1,0 +1,66 @@
+\section{Related Work}
+\label{sec:related_work}
+
+%\begin{table*}[!t]
+%\caption{Comparison of existing checkpointing systems.
+%}
+%\label{tab:baseline_compare}
+%\resizebox{\linewidth}{!}{
+%\begin{tabular}{ccccc}
+%    \toprule
+%    \textbf{System} & \textbf{Multi-Parallel Strategy} & \textbf{Multi-Framework} & \textbf{Online Resharding} & \textbf{Scalabilty} \\
+%    \midrule
+%     CheckFreq~\cite{checkfreq} & \without & \without & \without & \without \\
+%     Check-N-Run~\cite{check-n-run} & \without & \without & \without & \with \\
+%     Gemini~\cite{gemini-sys} & \without & \without & \without & \without \\
+%     JIT Checkpointing~\cite{jit-check} & \without & \without & \without & \without \\
+%     DCP~\cite{torch-dcp} & \without & \without & \with & \without \\
+%     MCP~\cite{megatron-dcp} & \without & \without & \with & \without \\
+%     \sys{} & \with & \with & \with & \with \\
+%    \bottomrule
+%\end{tabular}}
+%\end{table*}
+%\vspace{-3mm}
+%We summarize the features of different checkpointing systems in Table~\ref{tab:baseline_compare} and give a detailed discussion about existing works as follows: %\yhpeng{what does general purpose in the table mean? Consider using another term, e.g., large-scale?} 
+% \yhpeng{The table can be deleted.}
+
+% \yhpeng{we need more references here}
+
+\noindent \textbf{Checkpointing frameworks.} %\yhpeng{discuss how PyTorch does checkpointing before DCP; also briefly discuss DeepSpeed UCP saying it is offline script}
+Some industrial initiatives focus on developing checkpointing systems for deep learning. Prior to DCP~\cite{torch-dcp}, PyTorch provided \texttt{torch.save} and \texttt{torch.load} APIs for local checkpoint management but lacked native support for resharding. DCP~\cite{torch-dcp} introduces resharding capabilities for FSDP but does not support %hybrid
+parallelism strategies like TP and PP. DeepSpeed-UCP~\cite{ucp} offers a unified format for DeepSpeed checkpoints and provides resharding capabilities through offline scripts. Megatron MCP~\cite{megatron-dcp} builds upon the workflow of DCP~\cite{torch-dcp} and extends available file storage formats to include options like Zarr~\cite{Zarr}. %However, 
+All these frameworks %are constrained by their
+provide limited support for various parallelisms and training frameworks, %(e.g., MCP only works for Megatron-LM~\cite{megatron}). 
+% \zmf{the "limited support" and the reasons why "they cannot fulfill the demand" can be elaborated more in details.}
+% Therefore, they cannot meet the multi-framework support requirement.
+% Moreover, both DCP and MCP struggle with complex, irregular-sharded tensors in hybrid parallel training (see details in Sec.~\ref{sec:representation}), hindering their applicability in general scenarios.
+%Additionally, when deployed for
+and their I/O performance does not scale well in large-scale training.  %remains sub-optimal, and scalability becomes an issue. 
+% Additionally, the centralized communication pattern used for process orchestration (See Sec.~\ref{sec:workflow}) in DCP~\cite{torch-dcp} and MCP~\cite{megatron-dcp} also presents potential stability risks. \sys{} address these limitations, enabling flexible multi-framework checkpointing support, as well as guaranteeing stability and efficiency at scale.
+
+\noindent \textbf{Checkpointing optimizations.} Several %previous
+works \cite{projectadam, deepfreeze} %\yhpeng{add citations of 2-3 papers here} 
+ investigated reducing checkpointing costs from different perspectives.
+Check-N-Run~\cite{check-n-run}, tailored for recommendation models, employs differential checkpointing to store only the modified portions of the model, alongside quantization %techniques
+to reduce checkpoint size. % However, differential checkpointing is not directly applicable to the Pre-Training of LLMs, as LLMs typically exhibit dense updating patterns. The quantization technique is beyond the scope of this work, given that lossless checkpoints are imperative in our production settings.
+CheckFreq~\cite{checkfreq} pipelines model states snapshot and saving operations with computation to reduce checkpoint stalls, and designs an online checkpoint frequency tuning algorithm to further reduce cost. 
+Gemini~\cite{gemini-sys} advocates in-memory checkpointing with inter-machine backup for fast failure recovery and interleaves checkpoint communication traffic for state backup with training traffic, enabling frequent checkpointing in each iteration. JIT~\cite{jit-check} adopts just-in-time checkpointing for low-cost error recovery. 
+%\mingji{Both CheckFreq~\cite{checkfreq} and Gemini~\cite{gemini-sys} focus on checkpoint efficiency during training.} 
+%However, Gemini~\cite{gemini-sys}'s in-memory checkpointing solution demonstrates vulnerabilities in real-world large-scale GPU clusters, where multiple machines within the same backup group can experience simultaneous failures, leading to unacceptable catastrophic state loss. Other checkpointing techniques like Just-In-Time checkpointing  also suffer from the same reliability problem as Gemini~\cite{gemini-sys}. %\yhpeng{do not argue in this way regarding to Gemini and JIT. Maybe we can say these techniques are complementary and we can also use these techniques for better failure recovery} 
+For industrial use cases, it is important to preserve checkpoints to persistent storage due to %the necessity of 
+accessing checkpoints for various %steps for 
+purposes like auto-evaluation~\cite{characterization}, hyper-parameter tuning, or even restarting training.
+%Regarding the latter, after making configuration adjustments, the checkpoint with the highest evaluation scores is likely to be selected as the new starting point. 
+Different from existing works, \sys{} champions both optimized I/O performance and flexible automatic online checkpoint resharding, supporting checkpointing for general LFM development.
+
+\noindent \textbf{Checkpoint representation.} PyTorch's \texttt{torch.save/load} functionality relies on \texttt{pickle} for serialization and deserialization. %However, 
+This format lacks crucial tensor shard metadata, such as global shape information, precluding automatic resharding. DCP \cite{torch-dcp} introduces a disaggregated format that separates metadata from tensor data. The metadata, which includes global shape and offset information, enables DCP's auto-resharding capabilities.
+Built upon DCP's design, BCP incorporates necessary adaptations to support irregular tensor sharding. Array-based storage systems like Zarr \cite{zarrZarr} and TensorStore \cite{googleTensorStore} allow for saving tensors as individual arrays and support concurrent array reading and writing. MCP \cite{megatron-dcp} supports distributed checkpointing using the Zarr format.
+For efficient and secure tensor storage, Safetensors \cite{huggingfaceSafetensors} is a file foramt for saving tensors safely and loading efficiently. For better compatibility with the Hugging Face open-source ecosystem, \sys{} incorporates functionality to export checkpoints in the Safetensors format.
+
+\noindent \textbf{Storage systems for LFM.} Large-scale checkpointing demands robust storage systems. The LLaMA 3.1 report \cite{llama3.1} highlights Tectonic \cite{tectonic}, Meta's general-purpose file system, as the backbone for storing checkpoints during pre-training. One of the primary challenges faced by this system is managing high-frequency checkpoint writes. Similarly, FireFlyer \cite{fireflyer}, the AI-HPC system developed by DeepSeek \cite{deepseekai} for LFM training, incorporates the custom-built 3FS Distributed File System, akin to many parallel file systems such as BeeGFS \cite{herold2014introduction}, to handle checkpoint storage. %\sys{} leverages HDFS, implementing a series of performance optimizations to ensure scalability for large-scale checkpointing operations.
+
+% \yhpeng{TODO: add related work for the above paragraphs}
+
+
+% \textcolor{blue}{Mingji: A better categories could be: 1. Persistent Checkpoint system (online and offline resharding) 2. In memory fault checkpoint system }

@@ -1,0 +1,170 @@
+\documentclass{article}
+
+\usepackage{iftex}
+\ifXeTeX
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\newcommand{\fandolpath}{/usr/local/texlive/2025/texmf-dist/fonts/opentype/public/fandol/}
+\setCJKmainfont{FandolSong-Regular.otf}[Path=\fandolpath,AutoFakeBold=2]
+\setCJKsansfont{FandolHei-Regular.otf}[Path=\fandolpath]
+\setCJKmonofont{FandolFang-Regular.otf}[Path=\fandolpath]
+\else
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\fi
+
+\usepackage{arxiv}
+\renewcommand{\rmdefault}{lmr}
+\renewcommand{\sfdefault}{lmss}
+\usepackage{graphicx}
+\usepackage[numbers]{natbib}
+\usepackage{doi}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage[table]{xcolor}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{pifont}
+\usepackage{threeparttable}
+\usepackage{makecell}
+\usepackage{algpseudocode}
+\usepackage{multirow}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{subfig}
+\usepackage{todonotes}
+\usepackage{float}
+\usepackage[ruled,vlined]{algorithm2e}
+
+\newcommand{\etal}{\textit{et al}. }
+\newcommand{\etc}{\textit{etc}.}
+\newcommand{\eg}{\textit{e.g.}}
+\newcommand{\aka}{\textit{a.k.a}}
+\newcommand{\ie}{\emph{i.e.}}
+\newcommand{\trm}[1]{\textcolor{blue}{(Ruiming: #1)}}
+\newcommand{\xj}[1]{\textcolor{red}{#1}}
+\newcommand{\fy}[1]{\textcolor{cyan}{[FY: #1]}}
+\newcommand{\qjr}[1]{\textcolor{green}{(qjr: #1)}}
+\newcommand{\ww}[1]{\textcolor{orange}{(ww: #1)}}
+
+\usepackage{authblk}
+\newcommand{\equalcontrib}{\textsuperscript{\textdagger}}
+\newcommand{\correspondauthor}{\textsuperscript{*}}
+
+\newcommand{\pangu}{Pangu}
+\newcommand{\modelname}{\pangu~Ultra}
+
+\makeatletter
+\renewcommand{\@maketitle}{%
+  \vbox{%
+    \hsize\textwidth
+    \linewidth\hsize
+    \vskip 0.1in
+    \centering
+    {\LARGE \@title\par}
+    \vskip 0.1in
+    \def\And{%
+      \end{tabular}\hfil\linebreak[0]\hfil%
+      \begin{tabular}[t]{c}\bf\rule{\z@}{24\p@}\ignorespaces%
+    }
+    \def\AND{%
+      \end{tabular}\hfil\linebreak[4]\hfil%
+      \begin{tabular}[t]{c}\bf\rule{\z@}{24\p@}\ignorespaces%
+    }
+    \begin{tabular}[t]{c}\bf\rule{\z@}{24\p@}\@author\end{tabular}%
+    \vskip 0.4in
+  }
+}
+\makeatother
+
+\renewenvironment{abstract}
+{
+  \centerline{\large \bfseries 摘要}
+  \vspace{0.5ex}
+  \begin{quote}
+}
+{
+  \end{quote}
+}
+
+\title{\modelname: 在升腾 NPU 上推动稠密大语言模型极限}
+
+\author{\pangu~Team, Huawei\\
+PanguTech@huawei.com}
+
+\renewcommand{\headeright}{Technical Report}
+\rhead{\footnotesize \headeright}
+\AtBeginDocument{\setlength{\headheight}{24pt}}
+\pagestyle{plain}
+\begin{document}
+
+\maketitle
+
+\thispagestyle{fancy}
+
+
+\begin{abstract}
+
+我们提出 \modelname，一种拥有 1350 亿参数的稠密 Transformer 大语言模型（LLM），在升腾 Neural Processing Units（NPUs）上完成训练。尽管近年来 LLM 规模和能力持续快速提升，但训练如此大规模模型仍面临显著的优化与系统挑战。为稳定训练过程，我们提出了 depth-scaled sandwich normalization，有效消除了深层模型训练中的 loss spike。我们在 13.2 万亿高质量、多样化 token 上进行预训练，并在后训练阶段进一步增强模型推理能力。为高效执行这一大规模训练，我们使用 8,192 张升腾 NPU，并配套一系列系统优化。多项公开基准评测表明，\modelname~在能力上显著推进了稠密 LLM 的 SOTA，相比 Llama 405B 和 Mistral Large 2 等模型更具竞争力，且与参数规模更大的稀疏模型 DeepSeek-R1 相比也取得了接近结果。我们的探索表明，升腾 NPU 具备高效训练百亿级以上稠密模型的能力。模型与系统将面向商业客户开放。
+\end{abstract}
+
+
+
+\section{引言}
+
+大语言模型（LLM）正在重塑人工智能的技术版图与行业认知。其出色能力正推动越来越多 AI 应用落地，并带来广泛商业机会。由此，业界普遍围绕 scaling law 展开竞争，持续推动参数规模增长。尽管 Transformer~\cite{vaswani2017attention} 是大模型的主流架构，但在超大规模场景下选择稀疏还是稠密仍存争议。参数规模超过千亿后，以 Mixture of Experts（MoE）为代表的稀疏架构（如 DeepSeek~\cite{liu2024deepseek,deepseekv3}）展现出接近人类的语言与思维能力~\cite{jones2025large}，这使稀疏模型成为冲击 LLM 上限的热门路径。
+
+与此同时，Qwen~\cite{bai2023qwen,yang2024qwen2}、Llama~\cite{grattafiori2024llama}、Gemma~\cite{team2024gemma} 等稠密模型系列，在 100B 以下参数区间依然广受采用，原因在于其在特定能力上的强表现与部署友好性。稠密模型参数通常更易优化，而稀疏模型中的动态组件在稳定训练时往往需要额外启发式策略。此外，稠密结构在推理时参数使用是确定性的，系统优化也更直接。基于此，我们进一步探索大规模稠密模型的潜力，验证其在多类任务上可与 SOTA MoE 模型竞争。
+
+对于稠密模型而言，参数规模与网络深度是释放模型潜力的两个关键维度。参数规模对性能至关重要并构成 scaling law 核心~\cite{kaplan2020scaling}；近期研究~\cite{ye2024physics,merrill2025littledepth} 则指出深度对推理能力也有显著影响。然而，在这两个维度同时推进会带来明显挑战。更深模型通常更易出现训练不稳定，表现为训练损失曲线中的尖峰。实验观察显示，这些尖峰可能将模型推离理想参数区域，并对后续训练造成难以恢复的伤害。与此同时，在稠密模型中训练千亿级参数需要协同数千个 AI 处理器，也带来系统效率层面的严峻挑战。
+
+
+在本工作中，我们提出 \modelname：一种包含 1350 亿参数、94 层的稠密 Transformer 架构。该模型规模处于当前高性能稠密模型前沿~\cite{bai2023qwen,yang2024qwen2,grattafiori2024llama,team2024gemma}。针对深层训练挑战，我们推测 loss spike 源于梯度波动，进而阻碍收敛并可能导致训练发散。因此，我们提出两项技术：depth-scaled sandwich norm 与 tiny initialization，二者都旨在维持稳定梯度范数。具体而言，我们将 pre-layer norm~\cite{DBLP:conf/emnlp/LiuLGCH20} 替换为 sandwich norm~\cite{NEURIPS2021_CogView}，并按模型深度对 post-layer normalization 的初始化参数进行缩放，从而有效控制梯度波动范围。除此之外，我们按模型宽度与深度缩放权重初始化标准差，形成 tiny initialization。两项技术共同提升了训练全过程的梯度稳定性，消除了 \modelname 训练中的 loss spike，并提升了整体性能。
+
+在实践中，我们在 13.2 万亿 token 自建语料上对 \modelname 进行预训练。预训练阶段包含三种不同数据配方的语料阶段，设计目标依次为：先建立知识与语言能力，再直接强化推理能力，最后进一步提升主动推理能力。模型上下文窗口由 4K 逐步扩展到 128K。在后训练阶段，我们先通过高效监督微调（SFT）进行冷启动，使用精心构建的指令数据；随后再通过强化学习（RL）进一步优化。\modelname 的完整训练在上述流程中保持稳定。
+
+为支持百亿级以上参数的大规模训练，我们使用由 8,192 张升腾 NPU 组成的集群，并引入一系列系统优化提升效率。
+首要挑战是在大规模下降低 pipeline bubble~\cite{huang2019gpipe}，其根因与 batch size 约束有关~\cite{megascale}。
+我们在升腾集群上同时使用四类并行：数据并行（DP）、张量并行（TP）~\cite{megatron-lm}、序列并行（SP）~\cite{megatron-sp} 和流水并行（PP）~\cite{gpipe,pipedream}。
+随着集群扩大，每个 DP 分配到的 mini-batch 变小，pipeline bubble 比例会上升。为缓解该问题，我们使用额外的虚拟流水并行（VPP）调度~\cite{interleaved-pp} 并做细粒度调优，将 PP bubble 比例从 30.45\% 降至 6.8\%。
+第二个挑战是长序列下维持高训练效率。
+attention mask 生成与自注意力计算在长上下文中都非常耗时且占内存。
+我们使用面向升腾 NPU 的 NPU Fusion Attention（NFA）算子~\cite{fa-github, flash_attention, flash_attention2}，其支持 reset attention mask 场景，并在调用 NFA 前无需显式构造 attention mask，从而提升计算效率并降低内存成本。
+通过多项细粒度系统优化，我们在 8,192 张升腾 NPU 上训练 \modelname~时实现了超过 50\% 的模型 FLOPs 利用率（MFU）~\cite{palm}。
+
+在公开评测基准上，\modelname~在几乎所有主要语言任务上超过 Llama 405B、Mistral Large 2 123B 等稠密 LLM，并与总参数规模超过 500B 的稀疏模型取得有竞争力的结果。这些结果说明稠密模型能力仍有较大探索空间。\modelname~也进一步证明了升腾 NPU 适合用于探索大规模稠密语言模型的能力边界。
+
+
+\input{sec/architecture_zh}
+\input{sec/pretrainng_zh}
+\input{sec/infrastructures_zh}
+\input{sec/results_zh}
+
+
+\section{结论}
+
+我们提出 \modelname{}：一个在升腾 NPU 上训练、拥有 1350 亿参数的稠密语言基础模型。为应对大规模深层模型训练挑战，我们提出 depth-scaled sandwich-norm，使 \modelname{} 在无明显 loss spike 的前提下获得了优异训练稳定性。在 8,192 张升腾 NPU 上完成 13.2 万亿 token 预训练与长上下文扩展后，模型又通过监督微调与强化学习进一步提升推理能力。大量实验结果表明，\modelname{} 不仅超过了 Llama 405B、Mistral Large 2 等 SOTA 稠密模型，也在与 DeepSeek-R1 等更大规模稀疏模型的对比中表现出竞争力。这说明我们提出的架构与系统优化方案有效，为未来可扩展、高效率 LLM 训练提供了可行路径。此外，我们的实践经验也表明，升腾 NPU 具备训练百亿级乃至更大规模稠密模型的能力。
+
+
+% 直接使用 arXiv 源码中提供的 main.bbl，避免缺失 ref.bib 导致引用问题
+\input{main.bbl}
+
+\newpage
+\appendix
+\section{贡献与致谢}
+
+
+
+\noindent
+\textbf{核心贡献者}
+Yichun Yin, Wenyong Huang, Kaikai Song, Yehui Tang, Xueyu Wu, Wei Guo, Peng Guo, Yaoyuan Wang, Xiaojun Meng, Yasheng Wang, Dong Li, Can Chen, Dandan Tu, Yin Li, Fisher Yu, Ruiming Tang, Yunhe Wang
+
+\textbf{贡献者}
+Baojun Wang, Bin Wang, Bo Wang, Boxiao Liu, Changzheng Zhang, Duyu Tang, Fei Mi, Hui Jin, Jiansheng Wei, Jiarui Qin, Jinpeng Li, Jun Zhao, Liqun Deng, Lin Li, Minghui Xu, Naifu Zhang, Nianzu Zheng, Qiang Li, Rongju Ruan, Shengjun Cheng, Tianyu Guo, Wei He, Wei Li, Weiwen Liu, Wulong Liu, Xinyi Dai, Yonghan Dong, Yu Pan, Yue Li, Yufei Wang, Yujun Li, Yunsheng Ni, Zhe Liu, Zhenhe Zhang, Zhicheng Liu
+
+
+\end{document}

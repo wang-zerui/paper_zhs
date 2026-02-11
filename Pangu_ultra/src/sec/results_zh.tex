@@ -1,0 +1,241 @@
+\section{实验结果}
+本节汇报 \modelname 的评测结果，包括预训练阶段表现与后训练结果。
+此外，我们给出较完整的消融研究，用于分析模型架构设计并讨论 \modelname 训练中的关键观察。
+
+\subsection{预训练损失曲线}
+图~\ref{fig:135b_loss} 展示了 \modelname~在整个预训练期间的损失曲线。
+损失曲线中的每一段对应第~\ref{sec:hyper_params} 节定义的一个训练阶段。各阶段都呈现稳定下降趋势。第二阶段虽然因学习率恒定而下降速度放缓，但相关性能指标仍持续提升。
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{fig/135B_loss.pdf}
+    \caption{\modelname~在预训练阶段的训练损失曲线。}
+    \label{fig:135b_loss}
+\end{figure}
+
+\paragraph{Zero loss spike} 如图~\ref{fig:135b_loss} 所示，整个预训练过程\textbf{没有出现 loss spike}。
+尽管此类尖峰在 LLM 训练中并不少见~\cite{takase2024spikemore}，这里的“零尖峰”结果进一步说明了 depth-scaled sandwich norm 与 TinyInit 对训练稳定性的关键作用。
+loss spike 对模型性能的负面影响将在第~\ref{sec:sandwich-ablation} 节进一步讨论。
+
+
+
+\subsection{预训练阶段}
+\paragraph{Benchmarks} 我们在多个公开基准上评估 \modelname{} 基座模型，覆盖语言理解、问答、代码生成与数学求解等领域。评测以英文与中文数据集为主，并补充少量多语种基准以增强覆盖面。
+
+\begin{itemize}[leftmargin=*]
+
+\item 语言理解：使用 \textit{Hellaswag}~\cite{Zellers2019HellaSwagCA}、\textit{Winogrande} 评估语境推理；使用 \textit{DROP}~\cite{Dua2019DROPAR}、\textit{RACE}~\cite{Lai2017RACELR}、\textit{ARC}~\cite{Clark2018ThinkYH} 系列评估阅读理解；并结合 \textit{PIQA}~\cite{Bisk2019PIQARA}、\textit{Natural Questions}~\cite{Kwiatkowski2019NaturalQA}、\textit{TriviaQA}~\cite{Joshi2017TriviaQAAL} 评估知识检索能力。
+
+\item 问答：包括中文知识基准 \textit{C-Eval}~\cite{Huang2023CEvalAM}，英文领域知识基准 \textit{MMLU}~\cite{Hendrycks2020MeasuringMM} 及其进阶版本 \textit{MMLU-Pro}~\cite{Wang2024MMLUProAM}，并使用 \textit{BigBenchHard}~\cite{Suzgun2022ChallengingBT} 评估复杂问题求解能力。
+
+\item 代码生成与理解：采用 \textit{HumanEval}~\cite{Chen2021EvaluatingLL} 与 \textit{MBPP}~\cite{Austin2021ProgramSW} 评估标准代码生成任务，并使用 \textit{CruxEval}~\cite{Gu2024CRUXEvalAB} 评估代码理解与推理。
+
+\item 数学推理：使用 \textit{CMath}~\cite{Wei2023CMATHCY}、\textit{GSM8K}~\cite{Cobbe2021TrainingVT} 评估基础算术与简单问题，\textit{MATH}~\cite{Hendrycks2021MeasuringMP} 评估高阶数学推理，\textit{MGSM}~\cite{Shi2022LanguageMA} 评估多语种数学求解能力。
+
+\end{itemize}
+
+\paragraph{Baselines \& Comparison Settings} 我们将 \modelname 与多个强基线比较，覆盖稠密模型（Qwen2.5-72B、Llama-405B）和 MoE 模型（DeepSeek-V3）。对于基座模型，大多数评测采用 few-shot，少数任务使用 zero-shot。多数基准通过与标准答案精确匹配打分，代码生成任务则采用执行验证。
+
+\paragraph{Evaluation Results}
+表~\ref{tab:main} 对比了 \modelname~预训练基座模型与其他主流模型。总体看，\modelname 在大多数英文通用基准和全部中文基准上达到最优。
+在代码与数学任务上虽略低于 DeepSeek V3，但整体表现仍具竞争力。
+
+进一步分析可见，\modelname~在中文基准上优势明显，不仅超过 Qwen 2.5 72B，也优于当前最强中文模型之一 DeepSeek V3。
+此外，与 Llama 3.1 405B 相比，\modelname 在多数高难度基准上得分更高，而训练 FLOPs 仅约为 Llama 405B 的 29\%。
+这说明我们的模型架构设计与训练数据质量是有效的。
+
+
+\begin{table}[!h]
+    \centering
+    \footnotesize
+    \setlength{\tabcolsep}{4.5pt}
+    \caption{\modelname~与代表性模型在语言、代码与数学能力基准上的对比。粗体表示该行最佳结果，下划线表示 \modelname~在稠密模型中的最佳结果。}
+    \small
+    \begin{tabular}{@{}c l c | c c c | c@{}}
+    \toprule
+    & \multirow{2}{*}{\centering \textbf{Benchmark {\tiny (Metric)}}} & \multirow{2}{*}{\textbf{\# Shots}} & \textbf{Qwen2.5} & \textbf{Llama-3.1} & \textbf{DeepSeek} & \textbf{\modelname} \\
+    & & & \textbf{72B Base} & \textbf{405B Base} & \textbf{V3 Base} & \textbf{Base} \\
+    \midrule
+    & Architecture & - & Dense & Dense & MoE & Dense \\
+    & \# Activated Params & - & 72B & 405B & 37B & 135B \\
+    & \# Total Params & - & 72B & 405B & 671B & 135B \\
+    \midrule
+    \multirow{16}{*}{English} & BBH {\tiny (EM)} & 3-shot & 79.8 & 82.9 & \textbf{87.5} & 79.1 \\
+    & MMLU {\tiny (EM)} & 5-shot & 85.0 & 84.4 & \textbf{87.1} & \underline{85.4}  \\
+    & MMLU-Pro {\tiny (EM)} & 5-shot & 58.3 & 52.8 & \textbf{64.4} & \underline{63.1}  \\
+    & DROP {\tiny (F1)} & 3-shot & 80.6 & 86.0 & \textbf{89.0} & 61.0  \\
+    & ARC-Easy {\tiny (EM)} & 25-shot & 98.4 & 98.4 & 98.9 & \textbf{100.0} \\
+    & ARC-Challenge {\tiny (EM)} & 25-shot & 94.5 & 95.3 & 95.3 & \textbf{97.0}  \\
+    & HellaSwag {\tiny (EM)} & 10-shot & 84.8 & 89.2 & 88.9 & \textbf{99.0}  \\
+    & PIQA {\tiny (EM)} & 0-shot & 82.6 & 85.9 & 84.7 & \textbf{98.0} \\
+    & WinoGrande {\tiny (EM)} & 5-shot & 82.3 & 85.2 & 84.9 & \textbf{91.0}  \\
+    & RACE-Middle {\tiny (EM)} & 5-shot & 68.1 & 74.2 & 67.1 & \textbf{97.0} \\
+    & RACE-High {\tiny (EM)} & 5-shot & 50.3 & 56.8 & 51.3 & \textbf{97.0} \\
+    & TriviaQA {\tiny (EM)} & 5-shot& 71.9 & 82.7 & 82.9 & \textbf{90.5} \\
+    & NaturalQuestions {\tiny (EM)} & 5-shot & 33.2 & 41.5 & 40.0 & \textbf{52.7} \\
+    & AGIEval {\tiny (EM)} & 0-shot & 75.8 & 60.6 & 79.6 & \textbf{80.4} \\
+    \midrule
+    \multirow{4}{*}{Code} & HumanEval {\tiny (Pass@1)} & 0-shot & 53.0 & 54.9 & 65.2 & \textbf{81.1} \\
+    & MBPP {\tiny (Pass@1)} & 3-shot & 72.6 & 68.4 & \textbf{75.4} & 72  \\
+    & CRUXEval-I {\tiny (EM)} & 2-shot & 59.1 & 58.5 & \textbf{67.3} & \underline{61.8}  \\
+    & CRUXEval-O {\tiny (EM)} & 2-shot & 59.9 & 59.9 & \textbf{69.8} & \underline{61.5}  \\
+    \midrule
+    \multirow{3}{*}{Math} 
+    & GSM8K {\tiny (EM)} & 8-shot & 88.3 & 83.5 & \textbf{89.3} & \textbf{89.3}  \\
+    & MATH {\tiny (EM)} & 4-shot & 54.4 & 49.0 & 61.6 & \textbf{62.5}  \\
+    & MGSM {\tiny (EM)} & 8-shot & 76.2 & 69.9 & \textbf{79.8} & 75.1  \\
+    & CMath {\tiny (EM)} & 3-shot & 84.5 & 77.3 & \textbf{90.7} & 78.2  \\
+    \midrule
+    \multirow{7}{*}{Chinese} & CLUEWSC {\tiny (EM)} & 5-shot & 82.5 & 83.0 & 82.7 & \textbf{95.0} \\
+    & C-Eval {\tiny (EM)} & 5-shot & 89.2 & 72.5 & 90.1 & \textbf{90.3}  \\
+    & CMMLU {\tiny (EM)} & 5-shot & 89.5 & 73.7 & 88.8 & \textbf{91.7} \\
+    & CMRC {\tiny (EM)} & 1-shot & 75.8 & 76.0 & 76.3 & \textbf{86.0}  \\
+    & C3 {\tiny (EM)} & 0-shot & 76.7 & 79.7 & 78.6 & \textbf{99.0} \\
+    & CCPM {\tiny (EM)} & 0-shot & 88.5 & 78.6 & 92.0 & \textbf{93.0}  \\
+    \bottomrule
+    \end{tabular}
+    \label{tab:main}
+\end{table}
+
+
+\subsection{后训练与推理能力}
+\paragraph{Benchmarks} 我们从推理与非推理两个维度，对 \modelname 的能力进行综合评测：
+
+\begin{itemize}[leftmargin=*]
+\item 复杂推理任务包含三类子任务：数学能力（\textit{AIME 2024}~\cite{MAA}、\textit{MATH-500}）、代码竞赛（\textit{LiveCodeBench}~\cite{jain2024livecodebench}）以及科学推理（\textit{GPQA Diamond}~\cite{rein2024gpqa}）；
+\item 通用语言理解与推理能力，使用 \textit{MMLU-Pro}~\cite{gema2024we} 与 \textit{Arena Hard}~\cite{arenahard2024}。
+\end{itemize}
+
+
+\paragraph{Baselines \& Comparison Settings} 我们将 \modelname 与强基线模型比较，包括 GPT-4o-0513、推理模型 DeepSeek-R1、Hunyuan-T1，以及大规模稠密模型 Qwen2.5-72B-Instruct 与 Mistral-Large 2。
+评测指标采用多次独立运行后的平均 Pass@1。
+
+\paragraph{Evaluation Results}
+表~\ref{tab:StandardBenchmarks} 展示了 \modelname 与其他模型的对比结果。\modelname 在 AIME 2024、MATH-500、GPQA、LiveCodeBench 等推理基准上达到领先，同时保持较强的通用语言理解能力。
+
+与稠密 LLM（Qwen、Mistral-Large 2）相比，\modelname 在推理任务上的优势尤其明显。该优势来自预训练中 0.8T 推理数据（见第~\ref{sec:hyper_params} 节）的支撑，推理增强后的 base 模型也显著助力了后训练阶段表现。
+
+
+
+\begin{table}[!h]
+    \centering
+    \caption{\modelname~与代表性模型在各基准上的比较。$\dagger$ 表示结果来自 Artificial Analysis~\cite{ai_analysis}。}
+    \resizebox{\linewidth}{!}{
+    \small
+    \begin{tabular}{@{}l *{6}{c} @{}}
+    
+    \toprule
+    \multirow{2}{*}{\centering\textbf{Model}} & \multirow{2}{*}{\textbf{AIME 2024}} & \multirow{2}{*}{\textbf{MATH-500}} & \textbf{GPQA} & \textbf{LiveCode} & \multirow{2}{*}{\textbf{ArenaHard}}& \multirow{2}{*}{\textbf{MMLU-pro}} \\
+    &  &  & \textbf{Diamond} & \textbf{Bench} &  \\
+     \midrule
+    \textbf{GPT-4o-0513} & 9.3 & 74.6 & 49.9 & 32.9 & 80.4 & 72.6 \\
+    \textbf{Qwen2.5-72B} & 16.0 & 83.1 & 49 & 27.6 & 81.2 & 72.0 \\
+    \textbf{Mistral-Large 2}$^\dagger$ & 11.0 & 73.6 & 48.6 & 29.3 & - & 69.7 \\
+    \textbf{Hunyuan-T1} & 79.8 & 96.2 & 69.3 & 64.9 & 91.9 & \textbf{87.2} \\
+    \textbf{DeepSeek-R1} & 79.8 & 97.3 & 71.5 &  65.9 & \textbf{92.3} &  84.0\\
+    \midrule
+    \textbf{\modelname} & \textbf{80.8} & \textbf{97.4} & \textbf{74.2} & \textbf{66.5} & 91.5 & 84.4 \\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:StandardBenchmarks}
+\end{table}
+
+\subsection{消融研究}  
+本节补充模型架构消融实验，并分析训练过程中的关键行为，以便更深入理解稠密 LLM 的训练特性。
+
+\subsubsection{Depth-scaled Sandwich-norm} \label{sec:sandwich-ablation}
+我们开展实验验证 depth-scaled sandwich norm 相比 pre-norm 架构的有效性。实验使用 130 亿参数稠密 Transformer，在相同超参数下训练 3000 亿 token，对两种配置进行对比。
+
+图~\ref{fig:sandwich_compare} 显示，depth-scaled sandwich-norm 可以稳定梯度范数并有效消除 loss spike，从而加快训练收敛。
+我们在两个组合基准上评估性能：EN basic（多个英文基准组合）和 ZH basic（中文基准组合）。此外，还使用 LAMBADA~\cite{Paperno2016TheLD}（英文）和 WPLC~\cite{Ge2021ChineseWA}（中文）next-token 预测任务进行补充验证。
+结果清楚表明：在预训练阶段抑制 loss spike 对模型性能至关重要。
+
+
+\begin{figure}[htbp]
+  \centering
+  \subfloat[Loss]{
+    \includegraphics[width=0.47\textwidth]{fig/sandwichnorm-loss.pdf}
+  }
+  \hfill
+  \subfloat[Gradient norm]{
+    \includegraphics[width=0.48\textwidth]{fig/sandwich_norm.pdf}
+  }
+  \caption{13B 模型在 Pre-LN 与 Depth-Scaled Sandwich-Norm（DSSN）下的预训练 loss 与梯度范数对比。Pre-LN 曲线存在明显尖峰并损害模型，而 DSSN 曲线更平滑。}
+  \label{fig:sandwich_compare}
+\end{figure}
+
+
+\begin{table}[h]
+	\centering
+    \small
+	\caption{Pre-LN 与 Depth-scaled Sandwich-Norm 的性能比较。}
+    \label{tab:sandwich_compare}
+	\setlength{\tabcolsep}{8.0pt}
+	\begin{tabular}{cccccc}
+		\toprule
+		\textbf{Model} & \textbf{Tokens (B)} & \textbf{EN basic} & \textbf{ZH basic} & \textbf{LAMBADA} & \textbf{WPLC} \\
+		\midrule
+		Pre-LN & 300 & 0.42 & 0.52 & 0.675 & 0.194 \\
+		Depth-scaled sandwich-norm & 300 & 0.45 & 0.54 & 0.693 & 0.224 \\
+		\bottomrule
+	\end{tabular}
+\end{table}
+
+为进一步验证初始化中深度缩放因子的作用，我们将不含 Eq.~\eqref{eq:sandwich} 中 $\sqrt{L}$ 缩放的原始 sandwich-norm 与我们方法进行对比。
+实验采用 16 亿参数、94 层代理模型（与 \modelname 深度一致），用于检验 sandwich-norm 在超深 Transformer 中的效果。
+如图~\ref{fig:1.6B_94l} 所示，原始 sandwich-norm 仍会出现一定 loss spike，而 depth-scaled sandwich-norm 训练更平稳且达到更低 loss。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\textwidth]{fig/1.6B_94l.pdf}
+    \caption{94 层 1.6B 模型在原始与 depth-scaled sandwich-norm 下的预训练 loss 对比。原始 sandwich-norm 在训练中仍会出现 loss spike。}
+    \label{fig:1.6B_94l}
+\end{figure}
+
+\subsubsection{Tiny Initialization}
+我们进一步验证第~\ref{sec:tinyinit} 节提出的 TinyInit 的有效性。
+在训练到 1020 亿 token 后，采用 TinyInit（标准差 $\sqrt{\frac{1}{2dL}}$）初始化的 \modelname{}，明显优于传统初始化基线（标准差分别为 $\sqrt{\frac{2}{5d}}$ 与 $\sqrt{\frac{2}{5dL}}$）。结果见表~\ref{tab:tinyinit_exp}。
+其中 BIG-bench (aug) 为我们内部基于原始 BIG-bench 做数据增强后的测试集，用于降低测试集泄漏影响。
+\begin{table}[h]
+	\centering
+        \small
+	\caption{传统初始化与 TinyInit 的性能比较。} \label{tab:tinyinit_exp}
+	\begin{tabular}{ccccccccc}
+		\toprule
+		\textbf{Model} & \textbf{Tokens (B)} & \textbf{EN basic} & \textbf{ZH basic} & \textbf{LAMBADA} & \textbf{WPLC} & \textbf{C-Eval} & \textbf{MMLU} & \textbf{BIG-bench (aug)} \\
+		\midrule
+		Baseline & 102 & 0.444 & 0.538 & 0.694 & 0.229 & 0.476 & 0.473 & 0.357 \\
+		TinyInit & 102 & 0.456 & 0.537 & 0.727 & 0.257 & 0.524 & 0.502 & 0.384 \\
+		\bottomrule
+	\end{tabular}
+\end{table}
+
+\subsubsection{\modelname 的层统计特性}
+
+\paragraph{稳定的激活尺度}
+图~\ref{fig:act_analysis} 展示了 Transformer 各层 attention 与 FFN 模块的激活模式，包括均值、标准差和 top-1 激活值。激活分布整体稳定：在保持清晰分层模式的同时，标准差在整个预训练过程中维持一致尺度。
+我们观察到 ``super activations'' 现象：浅层中其幅值可达 $10^3$ 量级，这与 Llama 模型中的观察一致~\cite{Yu2024TheSW}。
+值得注意的是，图~\ref{fig:act_analysis} 显示 top-1 激活值会随层深增加逐步下降，意味着其对最终输出的相对影响变小。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{fig/model_iter_7T_activation.pdf}
+    \caption{attention 与 FFN 模块激活统计，包括均值、标准差和 top-1 值。每条曲线对应 1T、2T、4T、7T 不同训练 token 位置。"Std" 行显示跨层激活尺度稳定；"Top 1" 行显示 down projection 与 attention output projection 中存在 "super activations"，其量级处于合理范围，并与 LLaMA 中观察到的现象相当~\cite{Yu2024TheSW}。}
+    \label{fig:act_analysis}
+\end{figure}
+
+
+
+\paragraph{Depth-scaled sandwich norm 的逐层模式}
+
+图~\ref{fig:gamma_analysis} 展示了各 sandwich-norm 层缩放参数 $\gamma$ 的分布，呈现以下关键现象：
+四个 LayerNorm 的 $\gamma$ 参数在训练过程中均值/标准差均下降，与 weight decay 效应一致；
+post-norm 的 $\gamma$ 呈明显层依赖模式：其标准差随层深增加而显著上升；
+pre-norm 的 $\gamma$ 在层间保持相对恒定的标准差。
+该模式揭示了一个有趣行为：浅层主要依赖残差连接，而深层随着缩放参数 $\gamma$ 幅值增大，逐步更依赖 Transformer 子层输出。
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{fig/model_iter_7T_param.pdf}
+    \caption{sandwich-norm 中 $\gamma$ 参数分布（均值与标准差）。每条曲线对应 1T、2T、4T、7T 不同训练 token 位置。两个 post-norm 呈现清晰逐层模式：$\gamma$ 的均值和标准差随深度增加而上升。更大的 post-norm $\gamma$ 表明深层更强调 Transformer 输出而非残差连接。}
+    \label{fig:gamma_analysis}
+\end{figure}
