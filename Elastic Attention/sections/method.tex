@@ -1,0 +1,90 @@
+
+
+\section{Elastic Attention}
+\label{sec:method}
+We provide an overview of our approach in Figure~\ref{fig:method_main}. 
+The sub-figure~\ref{fig:method_main}(a) illustrates the overall architecture integrating our Elastic Attention module, whose core component is an Attention Router mechanism. 
+Notably, except for the Elastic Attention components, all backbone model parameters are frozen during training.
+% We describe our design from three perspectives below: Attention Router mechanism (\Cref{subsec:attention_router_mechanism}), training objective (\Cref{subsec:head_identification_optimization}), and efficient deployment (\Cref{subsec:deployment_of_attn_router}).
+
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=\linewidth]{figures/kernel_speed.pdf}
+    \caption{Comparison of our fused kernel with a Torch-based sequential implementation for layer-wise hybrid attention.}
+  \label{fig:kernel_speed_layerwise}
+\end{figure}
+
+\subsection{Introduce Attention Router}
+\label{subsec:attention_router_mechanism}
+
+\paragraph{Information Flow of Attention Router}
+As illustrated in sub-Figure~\ref{fig:method_main}(b), the attention router operates in a manner analogous to a Mixture-of-Experts (MoE)~\citep{shazeer2017outrageously} gating mechanism: it determines, based on the input hidden states, which attention computation mode (i.e., FA or SA) is assigned to each key–value head.
+Specifically, the Key hidden states ($\boldsymbol{x}_K\in\mathrm{\mathbb{R}^{s\times H\times d^{\prime}}}$, where $s$ denotes sequence length, $d^{\prime}$ denotes head dimension) are fed into the attention router.
+Then, it produces a hard binary decision  ($r_\mathrm{{hard}}^{(\ell,h)}\in \{0, 1\}$) for each head, indicating whether this head employs FA ($r_\mathrm{{hard}}^{(\ell,h)}=0$) or SA ($r_\mathrm{{hard}}^{(\ell,h)}=1$) computation mode.
+Each head then adopts its allocated attention computation mode, and the resulting head outputs are concatenated along the feature dimension to form the final output.
+
+\paragraph{Architecture Design of Attention Router}
+We show the architecture of the attention router in sub-Figure~\ref{fig:method_main}(c), which consists of two components: a \textbf{task MLP} and a \textbf{router MLP}.
+The task MLP is designed to infer task-specific characteristics from the input hidden states, while the router MLP leverages these task-aware representations to determine the attention computation mode for each head.
+More concretely, given the Key hidden states ($\boldsymbol{x}_K$), the attention router first applies pooling along the sequence dimension to obtain a task representation $\boldsymbol{x}_K^{\prime}\in\mathrm{\mathbb{R}^{H\times d^{\prime}}}$.\footnote{In practice, we avoid pooling over the full sequence, as long context introduces substantial redundancy that degrades the quality of task representation. We investigate this in Appendix~\ref{appdix:truncation_analysis}.}
+The pooled latent $\boldsymbol{x}_K^{\prime}$ is then fed into the task MLP and the router MLP to produce a head-wise routing logit matrix ($z\in\mathrm{\mathbb{R}^{H\times 2}}$), which is then converted into a binary decision $r_\mathrm{{hard}}^{(\ell,h)}$ for each head via a softmax-based classifier.
+
+\subsection{Optimization-based Head Identification}
+\label{subsec:head_identification_optimization}
+
+\paragraph{Attention Router Optimization}
+Notably, to ensure consistency between training and inference, where inference uses hard routing decisions (i.e., binary classification), we also adopt hard routing during training. 
+This introduces two challenges:
+(i) \emph{how to make the softmax-based routing distribution closely approximate hard routing decisions}, and
+(ii) \emph{how to handle the non-differentiability introduced by hard routing decisions}.
+To address the first issue, we adopt a continuous relaxation scheme based on the Gumbel--Softmax~\citep{jang2016categorical} with annealing, which gradually sharpens the routing distribution during training toward discrete assignments.
+Specifically, we feed $z$ to the Gumbel--Softmax and obtain a soft routing matrix $r^{(\ell)}_{\mathrm{soft}} \in \mathbb{R}^\mathrm{{H\times 2}}$, where each column corresponds to the routing probabilities of all heads in layer $\ell$.
+Hard routing decisions are then obtained by applying $\arg\max$ over the second dimension:
+\begin{equation}
+r_{\mathrm{hard}}^{(\ell,h)}
+=
+\mathop{\mathrm{argmax}}\limits_{c \in \{0,1\}} \; r_{\mathrm{soft}}^{(h,c)}, 
+\qquad \forall h \in \{1,\dots,\mathrm{H}\}.
+\end{equation}
+For the second issue, since $\arg\max$ operation is non-differentiable and would block gradient flow, we employ a straight-through estimator (STE) strategy~\citep{bengio2013estimating}, where $r_{\mathrm{hard}}^{(\ell,h)}$ can be rewritten as:
+\begin{equation}
+    r_{\mathrm{hard}}^{(\ell,h)} = r_{\mathrm{hard}}^{(\ell,h)} + \left[r_\mathrm{soft}^{(\ell,h)} - \mathrm{gradient\_detach}\left(r_\mathrm{soft}^{(\ell,h)}\right)\right],
+\end{equation}
+which enables gradients to propagate through the soft routing distribution in the backward process while preserving hard routing behavior in the forward pass.
+We provide more details and theoretical explanations in Appendix~\ref{appdix:theoretical_explan_attn_router}.
+
+\input{tables/LongBench_main}
+
+\paragraph{Training Objective}
+We use the $\Omega_{\mathrm{MSR}}$ metric to calculate the predicted sparsity during training and compare it against the task-specific target sparsity $\boldsymbol{t}$. 
+Notably, instead of enforcing a fixed $\boldsymbol{t}$ for each task, we impose \emph{task-dependent non-tight constraints} with predefined lower and upper bounds since the optimal sparsity for a given task is unknown. 
+To ensure that introducing sparsity does not degrade the language modeling capability, we build a min-max optimization term upon the standard language modeling objective with a sparsity regularization term.
+Given an input $\mathcal{X}$ and corresponding label $\mathcal{Y}$, the training objective is:
+\begin{equation}
+\begin{aligned}
+& \max_{\lambda_1, \lambda_2} \min \underbrace{L_{\mathrm{language}}(\mathcal{X})}_{\mathrm{language~modeling}} + \underbrace{\lambda_1 L_{\mathrm{diff}}(\mathcal{X}) + \lambda_2 L_{\mathrm{diff}}^{2}(\mathcal{X})}_{\mathrm{sparsity~regularization}}, \\
+& \Rightarrow~\left\{
+\begin{aligned}
+& L_{\mathrm{language}} = \mathrm{CE\_Loss}\left(\mathcal{Y}\mid f_{\theta}(\mathcal{X})\right),\\
+& L_{\mathrm{diff}} = \Omega_{\mathrm{MSR}}\left(f_\theta(\mathcal{X})\right) - \boldsymbol{t}, \
+\end{aligned}
+\right.
+\end{aligned}
+\label{equ:training_ojective}
+\end{equation}
+where $\mathrm{CE\_Loss}$ denotes the standard cross-entropy loss for language modeling, and $\lambda_1, \lambda_2$ are task-specific trainable Lagrange multipliers optimized via gradient ascent~\citep{bhaskar2025cache}, which decouple the sparsity--performance trade-offs across tasks and mitigate optimization conflicts.
+
+
+\subsection{Efficient Deployment}
+\label{subsec:deployment_of_attn_router}
+Since each layer adopts a hybrid-heads computation, where different types of heads cannot be efficiently parallelized at runtime, we implement a fused attention kernel that jointly computes retrieval heads and sparse heads ``simultaneously''.
+In this work, we focus on single-GPU deployment, without introducing inter-device communication overhead, e.g., head-wise parallelism.
+In practice, attention kernels are launched over a three-dimensional grid spanning the sequence dimension, attention heads, and batch.
+When the input sequence length is sufficiently large, parallelism along the sequence dimension dominates the overall execution. 
+Since the number of concurrently active blocks is bounded by the available streaming multiprocessors, the GPU effectively schedules and executes almost all sequence blocks of one head before progressing to the next head.
+We report the speedup over a Torch-based sequential, layer-wise hybrid attention implementation in Figure~\ref{fig:kernel_speed_layerwise}, which indicates that our fused kernel yields prefill-time acceleration during inference.
+We show more details in Appendix~\ref{appdix:deployment}.
+
+% based on Block-Sparse-Attention~\citep{guo2024blocksparse}
+% A natural concern is that sparse-head computation might be throttled by retrieval heads in the fused kernel. 
+% Consequently, despite being conceptually independent, different heads are largely executed sequentially, and the observed speedup primarily stems from the reduced per-block computation of sparse heads.

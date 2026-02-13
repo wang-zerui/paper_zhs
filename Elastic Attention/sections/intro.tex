@@ -1,0 +1,32 @@
+\section{Introduction}
+\label{sec:intro}
+Large language models (LLMs) have demonstrated remarkable capabilities in processing long-context sequences~\citep{liu2025comprehensive,liu2025thus,mei2025survey}. 
+However, the quadratic computational and memory complexity of standard full attention~(\textbf{FA}) mechanisms~\citep{vaswani2017attention} poses a significant scalability bottleneck as the context window continues to expand.
+Sparse attention~(\textbf{SA}) mechanisms~\citep{child2019generating,zaheer2020big} represent an effective strategy for mitigating this limitation by selectively attending to a subset of critical tokens, thereby substantially reducing computational overhead and improving inference throughput.
+
+\begin{figure}[t]
+  \centering
+    \includegraphics[width=\linewidth]{figures/speedup_vs_performance_comparison.pdf}
+    \caption{Comparison between Elastic Attention (ours) and existing approaches on LongBench-V2~\citep{bai2024longbench2}. ``(XA+SSA)'' and ``(FA+SSA)'' denote our different settings.}
+    \label{fig:intro_speedup_vs_performance}
+\end{figure}
+
+To balance the trade-off between reduced computational cost and preserved model quality, i.e., achieving performance comparable to FA, existing methods typically adopt hybrid modeling strategies that integrate both SA and FA within a single model~\citep{zhang2025efficient,xiaoduoattention2025}.
+Yet, downstream task performance is susceptible to the proportion between those two attention computation modes (see our preliminary study in \Cref{subsec:deployment_sparisity}), and identifying an appropriate proportion typically requires extensive task-specific validation or tuning, which severely limits robustness and general applicability~\citep{peng2025accelerating}.
+
+In this work, we show that downstream tasks naturally fall into two categories: (1) sparsity-robust tasks (e.g., summarization), whose performance remains stable across a wide range of sparsity levels, and (2) sparsity-sensitive tasks (e.g., question answering), which suffer substantial degradation beyond a certain sparsity threshold.
+Such an observation suggests that a model should only differentiate between these two task regimes and allocate the appropriate sparsity, instead of painstakingly learning distinct sparsity configurations for each task.
+Going beyond this, we propose \emph{\textbf{Elastic Attention}}, which enables the model to automatically adjust its overall sparsity during the prefill stage to accommodate the two aforementioned task categories.
+The core of our approach is a lightweight \emph{\textbf{Attention Router}} module integrated into existing transformer architectures.
+
+Specifically, the Attention Router operates analogously to Mixture-of-Experts~\citep{shazeer2017outrageously}: it uses the input hidden states to perform head-wise routing, dynamically assigning each attention head to either FA or SA computation mode, thereby enabling dynamic adjustment of the model's overall sparsity.
+Notably, the Attention Router introduces negligible overhead, adding only 0.27M parameters per layer (assuming a head dimension of 128), which preserves both inference efficiency and computational cost.
+To optimize the Attention Router, we adopt a continuous relaxation scheme based on the Gumbel-Softmax~\citep {jang2016categorical} strategy, which alleviates the training–inference discrepancy arising from discrete routing decisions.
+Furthermore, to stabilize optimization, we employ a straight-through estimator (STE)~\citep{bengio2013estimating} trick for gradient propagation.
+During inference, different attention heads within the same layer may be routed to different computation modes.
+We design a fused kernel that enables all routed heads to be processed simultaneously in a single forward pass.
+
+We evaluate our method on 3 widely-used and cutting-edge LLMs (Qwen3-series~\citep{yang2025qwen3technicalreport} and Llama-3.1-8B-Instruct~\citep{grattafiori2024llama} models), considering both streaming~\citep{streamingllm} and block-sparse~\citep{guo2024blocksparse} SA patterns.
+Across a diverse set of long-context benchmarks (real-world, synthetic retrieval, and long-form reasoning tasks), our method not only learns to allocate different sparsity levels to different tasks but also yields superior performance compared to baselines.
+Notably, this gain is achieved under limited training budgets, requiring only 12 hours of training on 8$\times$A800 GPUs without modifying the backbone model's parameters.
+Furthermore, we conduct an in-depth analysis of the Attention Router, studying the impact of its architectural design and parameter capacity, as well as providing detailed training monitoring metrics.

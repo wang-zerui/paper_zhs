@@ -1,0 +1,43 @@
+\section{基础设施}
+\label{sec:infra}
+
+\subsection{计算集群}
+\ourmodel 在由 4,096 张 NVIDIA H800 GPU 组成的大规模集群上训练。每个节点包含 8 张 GPU，通过 NVLink 与 NVSwitch 互连以实现高带宽的节点内通信。节点间互联则依赖 8×200 Gbps RoCE 链路，以保证大规模同步与数据交换效率。
+
+\subsection{训练框架}
+\ourmodel 的训练由内部框架 \emph{Steptron} 驱动，这是一个构建在 PyTorch~\cite{Ansel_PyTorch_2_Faster_2024} 与 Megatron-LM~\cite{megatron-lm} 之上的轻量高性能系统。
+Steptron 统一了完整的模型研发流程，在同一工程栈下支持大规模预训练、后训练与强化学习（RL）工作负载。
+
+\ourmodel 采用混合并行化策略，包括 8 路流水线并行（PP）~\cite{narayanan2021efficientlargescalelanguagemodel}（带虚拟流水线阶段 VPP）、8 路专家并行（EP）~\cite{lepikhin2020gshardscalinggiantmodels}，以及 ZeRO-1 数据并行（DP）~\cite{rajbhandari2020zero}。
+为实现 \ourmodel 的高效训练，我们采用以下工程技术。
+
+\paragraph{解耦并行。}
+遵循 Megatron-Core~\cite{liu2025moeparallelfoldingheterogeneous}，我们实现了解耦并行方案，使注意力与 MoE 模块可使用不同的并行策略。我们为其分配独立的并行组，并在各自对应的数据并行组内完成梯度归约与缩放。
+
+\paragraph{通信优化。}
+在解耦注意力与 MoE 的设置下，并发的 DP 通信流可能使 RoCE 链路饱和，因拥塞显著增加 DP 开销。为此我们提出两项互补的通信优化，整体迭代时间最多可降低 5\%。其一，\emph{面向网络的通信调度}将 DP 流量划分为节点内 NVLink 与节点间 RoCE 两个阶段并进行流水化，以充分利用两种互联；其二，\emph{通信感知的 rank 放置}利用作业级通信画像跨交换机放置 rank，减少跳数并避免跨交换机热点。
+
+
+\paragraph{Muon ZeRO-1 重分片。}
+Muon~\cite{jordan2024muon} 的 Newton--Schulz 正交化需要每个参数的完整（未分片）梯度，这与 ZeRO-1~\cite{rajbhandari2020zero} 的 reduce-scatter（将参数梯度分片到各 DP rank）相冲突。Megatron-LM 当前实现通过对 FP32 梯度做全量 all-reduce 来重建完整梯度后再进行 Muon 更新，但这几乎使通信翻倍。我们改为将完整参数分配给 DP rank，并将梯度缓冲区重新打包为按 rank 排布的缓冲区，使单次 reduce-scatter 即可把每个参数的完整梯度传递给其所属 rank。由于填充到最大 rank 的开销随 DP 规模增长，我们仅对专家参数应用此策略，对非专家参数仍使用 DP all-reduce。与朴素 all-reduce 基线相比，该混合策略仅增加不到 4~GB 额外内存即可将端到端迭代时间降低约 5\%。
+
+
+\paragraph{GPU 内核优化。}
+我们还进行内核级优化以提升训练效率。
+在注意力中，我们融合 QK 归一化与 RoPE。
+在 MoE 中，我们融合多个小算子以减少内核启动开销与内存流量，并实现基于分组 GEMM 的融合式 MoE gather/scatter，类似于 SonicMoE~\cite{guo2025sonicmoeacceleratingmoeio}。
+
+
+
+\paragraph{细粒度选择性检查点。}
+我们的训练框架支持细粒度激活重计算，提供按层、子模块级别的开关（\eg，注意力、FFN、归一化、SiLU 与 MoE 置换），仅对最耗内存的组件进行选择性重计算，以最小开销降低峰值内存。
+
+
+
+\subsection{高吞吐轻量监控}\label{sec:log}
+
+我们收集全面的指标（例如每个微批内的专家分布、梯度范数）以进行细粒度训练监控。
+然而遥测规模巨大：4,096 张 GPU 的工作负载每次迭代产生近 600 万条消息。若在主循环内进行同步全局归约，将引入数秒开销，几乎使迭代时间翻倍，这对高性能训练不可接受。为此我们开发了轻量指标服务器，将遥测处理与训练路径解耦。每个 rank 使用自研异步通信框架 \textit{StepRPC}，异步将本地指标卸载到远端服务器，使遥测开销降至约 100 ms/迭代。
+
+
+指标服务器会缓存传入指标，只有在收到所有参与 rank 的\textit{迭代结束}信号后才触发归约与入库，从而消除主循环中的同步。为在低延迟下摄取与处理数百万条消息，服务器采用高并发多进程系统，并包含两个解耦模块：(i) 面向高吞吐接入的消息接收器；(ii) 负责聚合与持久化的归约处理器。通过在模块内与模块间利用多核并行，服务器能够跟上遥测流并确保指标管理不滞后于训练。

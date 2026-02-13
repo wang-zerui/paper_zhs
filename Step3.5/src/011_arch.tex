@@ -1,0 +1,201 @@
+\section{架构}
+\label{sec:arch}
+
+
+\subsection{设计理念}
+
+\ourmodel 的架构体现了模型—系统协同设计的范式转变。除了传统的智能与成本目标，自治智能体时代还引入了第三个关键约束：\textbf{\textit{推理时延}}。在交互式智能体工作流中~\cite{anthropic_agent_workflow,codex_agent_workflow}，更低时延直接缩短任务完成的墙钟时间；反之，在固定时间预算内也可通过测试时扩展~\cite{snell2025scaling,muennighoff2025s1,yang2025multiverse,hu2026pacorelearningscaletesttime} 提升智能。
+
+智能体工作负载通常呈现独特特征：大量上下文预填充，随后是长时间、多轮交互式解码。
+因此，我们围绕三条相互耦合的轴向协同设计 \ourmodel 以降低墙钟时延：\emph{注意力}（加速长上下文处理并与 MTP 具良好匹配）、\emph{稀疏 MoE}（避免分布式部署中的拖尾导致吞吐下降）、以及 \emph{多 Token 预测}（MTP，用于通过投机解码实现快速生成）。
+
+\paragraph{注意力。}
+为加速预填充，我们采用混合注意力机制~\cite{Beltagy2020Longformer,gemmateam2025gemma3technicalreport,openai2025gptoss120bgptoss20bmodel}，以缓解长上下文处理的二次复杂度。
+在解码端，我们优先考虑与投机解码~\cite{10.5555/3618408.3619203} 的架构兼容性，因为验证效率是在带宽受限硬件上最关键的杠杆。
+基于这些考虑，我们做出两项注意力设计决策：
+\begin{itemize}
+    \item \textbf{\textit{滑动窗口注意力（SWA）。}}
+我们选择 SWA~\cite{DBLP:journals/corr/abs-1904-10509} 而非线性注意力~\cite{10.5555/3524938.3525416,schlag2021linear}，以最大化解码效率。
+尽管两者都具有线性复杂度，但线性注意力的状态更新机制会使投机解码所需的高效草稿树生成与并行树验证更复杂~\cite{wang2025opt,xiong2025dyspec,10.5555/3692070.3694435}。
+相较之下，SWA 保持标准注意力语义，并天然适合通过 $KV$ 掩码进行并行验证。
+此外，在缺乏证据表明线性注意力在智能体任务的长上下文建模上更优的情况下，我们认为窗口大小 $W{=}512$ 的 SWA 在内核效率与局部依赖捕获之间取得了良好平衡。
+
+    \item \textbf{\textit{硬件对齐的分组查询注意力（GQA-8）。}}
+面向标准 8-GPU 服务器节点部署，我们将模型配置为 8 个 $KV$ 头（GQA-8）~\cite{ainslie-etal-2023-gqa}。
+这使 $KV$-cache 分片与 8 路张量并行对齐，并改善内存访问模式。
+关键在于，GQA-8 虽使注意力更受内存带宽约束，但也产生可吸收投机草稿与验证开销的计算余量，使多 Token 投机更激进而不会带来成比例的时延惩罚。
+\end{itemize}
+
+\paragraph{稀疏 MoE。}
+在前馈侧，我们采用细粒度 MoE~\cite{fedus2021switchtransformers,zoph2022stmoedesigningstabletransferable,pmlr-v162-du22c,lepikhin2020gshardscalinggiantmodels,dai2024deepseekmoeultimateexpertspecialization}，在保持容量的同时降低平均 FFN 计算。
+我们使用专家并行（EP）~\cite{lepikhin2020gshardscalinggiantmodels} 以实现可扩展部署。
+然而在 EP 下，端到端时延可能被路由不均导致的\emph{拖尾}所主导：token 分配偏斜会把负载集中到少数专家及其所在 GPU，并在同步点上限制吞吐。
+为此我们提出 \textit{EP 组均衡 MoE 路由} 策略。
+
+\paragraph{多 Token 预测（MTP）。}
+为进一步降低自回归时延，我们引入多 Token 预测（MTP）~\cite{li2024eagle,deepseek2024deepseekv3}，作为投机解码~\cite{10.5555/3618408.3619203} 的互补杠杆。
+为使投机更轻量，我们利用 SWA 与稠密 FFN~\cite{xiao2026mimov2flashtechnicalreport} 简化 MTP 头。
+
+我们还将模型规模约束在 200B 参数以内，使其在高端工作站 128GB 内存预算内可进行高性能推理。
+
+
+\subsection{带混合注意力的稀疏 MoE 骨干}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{src/img/pdf/step.pdf}
+    \caption{{\ourmodel 架构示意图。}
+模型采用按头门控注意力~\cite{qiu2025gatedattentionlargelanguage}，以一个全注意力层起始，随后为 $L=11$ 个混合块，每个混合块交错包含 3 个滑动窗口注意力（SWA）层与 1 个全注意力层（\emph{为清晰起见，图中省略第一层}）。
+我们全程使用零中心 RMSNorm~\cite{gemmateam2024gemmaopenmodelsbased}。
+前三个块使用稠密 FFN，后续块采用稀疏 MoE FFN。
+MTP 模块使用 SWA 与稠密 FFN。为限制开销，主训练仅训练 MTP 模块 1；MTP 模块 2–3 由其拷贝，并在轻量级末期阶段联合微调。
+\label{fig:arch}}
+\end{figure}
+
+如图~\ref{fig:arch} 所示，\ourmodel 采用 45 层稀疏 MoE Transformer 骨干（3 层稠密层 + 42 层 MoE 层），并配以专门的混合注意力层布局。
+每个 MoE 层包含 288 个路由专家与 1 个共享专家，top-$k$ 路由器每个 token 激活 $k{=}8$ 个专家。该配置在保持大容量知识（总参数 196B）的同时，将单 token 激活限制为 11B，确保推理时延足够低以支持高响应的智能体交互。
+表~\ref{tab:arch_hparams} 总结了 \ourmodel 的关键架构超参数。
+
+
+\paragraph{混合注意力层布局。}\label{sec:hybrid_swa}
+为在长上下文效率与长程连接性之间取得平衡，\ourmodel 采用受 \cite{openai2025gptoss120bgptoss20bmodel,gemmateam2025gemma3technicalreport,cohere2025commandaenterprisereadylarge} 启发的 3:1 交错注意力布局（SWA : Full），记作 $S3F1$。
+该配置重复四层结构：三层 SWA（$W{=}512$）后接一层全 GQA-8。
+然而在初始实验中，朴素的交错策略在多个基准上始终劣于稠密注意力基线（表~\ref{tab:swa_pretrain_results}）。
+为在不增加实际开销的情况下弥补差距，我们采用两项互补增强：
+(i) 提升 SWA 的 query 头数量；
+(ii) 采用按头门控注意力~\cite{qiu2025gatedattentionlargelanguage}。
+
+\paragraph{SWA 的增强 Query 头。}
+
+将 query 头数量从 $64$ 提升到 $96$，可有效缓解从统一全注意力架构转为 $S3F1$ 布局时常见的性能下降（表~\ref{tab:swa_pretrain_results}）。我们认为这几乎是“免费午餐”，因为在长文本场景中，朴素 SWA 的开销极小，即便我们显著增大了头数。
+
+\paragraph{按头门控注意力。}
+朴素 SWA 的一个局限是：当输入窗口内缺乏有效信息时，它无法有效吸收多余的注意力权重~\cite{xiao2024efficient,sun2024massive,gu2025when, qiu2025gatedattentionlargelanguage}。已有工作~\cite{openai2025gptoss120bgptoss20bmodel,xiao2026mimov2flashtechnicalreport} 通过在窗口内引入可学习、与数据无关的 sink token 来解决该问题。我们采用另一种方法：集成参数高效的按头门控机制~\cite{jumper_highly_2021,qiu2025gatedattentionlargelanguage,lin2025forgetting}，可视为引入数据相关的 sink token。
+实现细节与进一步讨论见附录~\ref{appx:gated_attn_details}。按头门控在理论 FLOPs 与实际时延上均可忽略。我们在附录~\ref{appx:attn_enhancement_benchmark} 中给出了更多关于门控与增加 SWA 头数的性能分析与基准。
+
+
+\paragraph{MoE 专家并行负载均衡。}\label{sec:moe_design}
+
+我们采用无损负载均衡~\cite{deepseek2024deepseekv3,wang2024lossfreebalancing} 以鼓励专家之间的\emph{全局} token 平衡。
+然而该方法无法保证微批级别的 EP rank 负载均衡，可能导致拖尾并降低吞吐。
+因此我们引入 EP 级别的均衡损失，显式促进 rank 级别的均匀利用~\cite{dai2024deepseekmoeultimateexpertspecialization}。
+
+\noindent
+EP partitions experts $\mathcal{E}$ into $G$ disjoint groups $\{\mathcal{E}_g\}_{g=1}^{G}$ across ranks. For token $t$, let $S_t$ denote the top-$K$ experts (mask $s_{t,e}=\mathbf{1}[e\in S_t]$) and $p_{t,\cdot}$ the routing probabilities. Then, the EP load balancing loss $\mathcal{L}_{EP}$ is:
+\begin{equation}
+\begin{aligned}
+p_e = \frac{1}{T}\sum_{t=1}^{T} p_{t,e}, & &
+f_e = \frac{1}{TK}\sum_{t=1}^{T} s_{t,e}, & &
+p_g = \sum_{e\in\mathcal{E}_g} p_e, & &
+f_g = \sum_{e\in\mathcal{E}_g} f_e, & &
+\mathcal{L}_{\mathrm{EP}} &= G\sum_{g=1}^{G} f_g\,p_g.
+\end{aligned}
+\end{equation}
+
+
+\paragraph{多 Token 预测（MTP）。}
+为加速长上下文智能体工作负载下的投机解码，我们附加三个轻量级 MTP 头。
+每个 MTP 头由一个 SWA 和一个稠密 FFN 组成，仅增加 0.81B 参数（约 0.41\%）。
+我们按相对标准 LM 头的\emph{额外}预测偏移为这些头编号：对 $h\in\{1,2,3\}$，MTP-$h$ 在位置 $t$ 的骨干隐藏状态条件下预测 token $x_{t+1+h}$。
+为控制训练开销，大多数训练阶段仅激活并优化 MTP-$1$。
+当骨干训练充分后，我们用 MTP-$1$ 初始化 MTP-$2$ 与 MTP-$3$，并在轻量级后训练阶段联合训练所有 MTP 头。
+受 Fast-MTP~\cite{cai2025fastmtpacceleratingllminference} 启发，我们在 MTP 头中对不同预测偏移采用位置相关的损失重加权，以避免过度优化远距 token 预测。
+
+
+\subsection{架构消融与结果}
+
+我们进行了大量实验以验证 \ourmodel 的关键设计选择，重点关注 (i) 注意力布局（包含 SWA 与头数扩展），以及 (ii) 按头门控注意力与 sink token 的对比。为确保效率优化不损害模型性能，我们采用两种互补的消融协议：一种评估覆盖预训练、32k 长上下文扩展与 64k 上下文长度 SFT 的端到端流程；另一种将规模扩展到 100B 参数，以研究这些设计在规模化下的表现。所有表格的详细架构与评测设置见附录~\ref{sec:arch_ablation}。下文总结了大规模实验的关键发现。
+
+
+\paragraph{SWA 与长上下文。}
+\label{sec:swa_ratio_head_30b}
+我们训练 30B-A3B 模型完成完整流程（1.4T token 预训练后接 SFT），以评估混合注意力对推理与长上下文性能的端到端影响。
+我们消融四种注意力布局：全注意力（$FFFF$）、SWA/全注意力交替（$S1F1$）、3:1 的 SWA:全注意力布局（$S3F1$），以及增加 SWA query 头的 $S3F1$ 变体（\texttt{$S3F1$+Head}）。
+为隔离注意力结构影响，我们固定 SWA 窗口为 $W{=}512$ 并关闭 MTP（见附录表~\ref{tab:train_setting_1p4t} 与表~\ref{tab:swa_pretrain_results}）。
+
+表~\ref{tab:swa_sft_results} 显示了清晰的成本—质量权衡。
+$S3F1$ 的注意力侧 FLOPs 最低（预填充与解码分别归一化为 1.00），而 $FFFF$ 约为其 2.68$\times$/2.90$\times$；但 $S3F1$ 质量存在一致下降（\eg，LongCtx 从 28.8 降至 27.5）。
+
+增加 SWA 的 query 头数基本弥补了该损失。
+尤其是 \texttt{$S3F1$+Head} 在预训练阶段已超过 $FFFF$（55.7 vs.\ 54.1），后训练后仍具竞争力：LongCtx 从 27.5 提升到 28.2，Sci 从 42.4 提升到 44.0，以几乎可忽略的额外注意力成本弥合了与 $FFFF$ 的差距。
+剩余劣势较为局部（\eg，Code 小幅下降到 18.3），总体质量趋势更有利于 \texttt{$S3F1$+Head}。
+
+有趣的是，交替的 $S1F1$ 布局在总体 SFT 质量与 LongCtx 得分（29.6）上最佳，但需要更高的注意力侧预填充/解码 FLOPs（约 1.58/1.65），相较 \texttt{$S3F1$+Head} 成本上升约 60\%。
+因此我们选择 \texttt{$S3F1$+Head} 作为长上下文智能体工作负载的默认配置，在保持强而稳定的长上下文性能的同时优先降低预填充/解码成本。
+
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.12}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c c c ccccccc}
+\toprule
+\multirow{2}{*}{\textbf{布局}} &
+\multirow{2}{*}{\makecell{\textbf{SWA} \\ \textbf{头数}}} &
+\multicolumn{1}{c}{\textbf{相对 FLOPs}} &
+\multirow{2}{*}{\shortstack{\textbf{预训练}\\\textbf{平均}}} &
+\multicolumn{7}{c}{\textbf{下游性能}} \\
+\cmidrule(lr){3-3} \cmidrule(lr){5-11}
+& & \textbf{\small{解码 / 预填充}} & &
+\textbf{推理} & \textbf{数学} & \textbf{代码} & \textbf{科学} & \textbf{通用} & \textbf{长上下文} & \textbf{平均} \\
+\midrule
+
+{$FFFF$} & 32 &
+$\sim$2.68 / 2.90 &
+54.1 &
+40.8 & 40.9 & \textbf{19.6} & 42.7 & 26.5 & 28.8 & 33.2 \\
+
+{$S1F1$} & 32 &
+$\sim$1.58 / 1.65 &
+54.6 &
+\textbf{42.1} & \textbf{42.3} & 19.3 & \textbf{44.5} & \textbf{26.8} & \textbf{29.6} & \textbf{34.1} \\
+
+{$S3F1$} & 32 &
+\phantom{$\sim$}\textbf{1.00 / 1.00} &
+53.6 &
+40.2 & 40.4 & 18.9 & 42.4 & 25.4 & 27.5 & 32.5 \\
+
+\texttt{$S3F1$+Head} & 48 &
+$\sim$1.01 / 1.02 &
+\textbf{55.7} &
+40.6 & 40.3 & 18.3 & 44.0 & 26.0 & 28.2 & 32.9 \\
+
+\bottomrule
+\end{tabular}
+}
+\caption{30B-A3B 的下游结果。$F$ 表示全注意力，$S$ 表示 SWA。
+$S3F1$ 指混合布局中 3 个 $S$ 层后接 1 个 $F$ 层。
+相对 FLOPs 以 $S3F1$ 为基准，并在 64k/256k 上下文上取平均（表~\ref{tab:rel}）。
+Pre-train Avg. 汇总了通用、数学与代码基准（表~\ref{tab:ablation_study}）。}
+\label{tab:swa_sft_results}
+\end{table}
+
+\begin{table}[t]
+    \centering
+    \footnotesize
+    \renewcommand{\arraystretch}{1.15}
+    \begin{tabular}{@{}l c c c c c c c@{}}
+        \toprule
+        \textbf{方法} &
+        \textbf{BBH} & \textbf{MMLU} & \textbf{GPQA} & \textbf{MBPP} & \textbf{C-EVAL} & \textbf{CMMLU} & \textbf{平均} \\
+        \midrule
+        {Sink Token} &
+        70.6 & 65.1 & 27.2 & 61.2 & 76.2 & 74.6 & 62.5 \\
+        {Head-wise Gate} &
+        \best{73.7} & \best{67.0} & \best{28.1} & \best{62.6} & \best{77.9} & \best{77.1} & \best{64.4} \\
+        \bottomrule
+    \end{tabular}
+    \caption{$S3F1$ 布局下 100B-A10B 模型的仅预训练评估。
+    按头门控在各基准（含总体平均）上一致优于固定 sink token。}
+    \label{tab:gate_vs_sink_100b}
+\end{table}
+
+
+\paragraph{按头门控注意力与 Sink Token。\label{sec:head_vs_sink}}
+我们在 100B-A10B MoE 上进行缩放且受控的预训练实验，以研究现实规模条件下的注意力侧机制。
+具体而言，我们在保持相同 $S3F1$ 布局（窗口 $W{=}512$）的前提下，对比 \textit{sink token} 与 \textit{按头门控注意力}。
+如表~\ref{tab:gate_vs_sink_100b} 所示，按头门控一致提升质量，使平均表现从 62.46 提升到 64.43（+1.97）。
+因此我们在后续研究中将按头门控注意力作为默认机制。
+

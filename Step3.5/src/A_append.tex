@@ -1,0 +1,1193 @@
+\section{Architecture Details}
+Table~\ref{tab:arch_hparams} summarizes key architecture hyper-parameters of {\ourmodel}.
+
+\begingroup
+\renewcommand{\arraystretch}{1.12}
+\begin{table}[!h]
+    \centering
+    \small
+    \setlength{\tabcolsep}{6pt}
+    \begin{tabular}{l c}
+        \toprule
+        \rowcolor{header_gray}
+        \textbf{Hyper-Parameter} & \textbf{Value} \\
+        \midrule
+        \rowcolor{section_gray}\multicolumn{2}{l}{\textsc{\textbf{Backbone}}} \\
+        Vocabulary size ($V$) & 128{,}896 \\
+        Model width ($d_{\text{model}}$) & 4096 \\
+        Transformer blocks & 45 (3 dense + 42 MoE) \\
+        \addlinespace[2pt]
+        \rowcolor{section_gray}\multicolumn{2}{l}{\textsc{\textbf{MoE FFN}}} \\
+        Experts per MoE block & 288 + 1 shared \\
+        Routing & top-$k=8$ \\
+        Dense FFN hidden size & 11{,}264 \\
+        MoE expert hidden size & 1{,}280 \\
+        \addlinespace[2pt]
+        \rowcolor{section_gray}\multicolumn{2}{l}{\textsc{\textbf{Attention}}} \\
+        Hybrid block structure & 3 SWA blocks + 1 full attention block \\
+        SWA window size & 512 \\
+        KV heads (GQA) & 8 \\
+        Query heads (full / SWA) & 64 / 96 \\
+        Gate Type & head-wise on output \\
+        Head dimension & 128 \\
+        RoPE $\theta$ & 10{,}000 \\
+        RoPE dims (full / SWA) & 64 / 128 \\
+        \addlinespace[2pt]
+        \rowcolor{section_gray}\multicolumn{2}{l}{\textsc{\textbf{Multi-Token Prediction}}} \\
+        MTP blocks  & 3 (Dense SWA) \\
+        \addlinespace[2pt]
+        \rowcolor{section_gray}\multicolumn{2}{l}{\textsc{\textbf{Parameter Counts}}} \\
+        Total params (backbone) & 196B \\
+        Activated params / token (backbone) & 11B \\
+        Total params (with MTP3) & 198B \\
+        Activated params / token (with MTP3) & 13B \\
+        \bottomrule
+    \end{tabular}
+    \caption{Key architecture hyper-parameters of {\ourmodel}. ``Activated params'' are reported per token and exclude embedding/output matrices.}
+    \label{tab:arch_hparams}
+\end{table}
+\endgroup
+
+\subsection{Head-wise Gated Attention}
+\label{appx:gated_attn_details}
+Each attention head is assigned a lightweight, input-dependent scalar gate, allowing the model to dynamically modulate information flow across the hybrid layout with negligible computational overhead.
+
+
+Formally, for a (single) head of dimension $d$, let $\boldsymbol{q}_i,\boldsymbol{k}_j,\boldsymbol{v}_j\in\mathbb{R}^{d}$ denote the query vector at position $i$ and the key and value vectors at position $j$,
+the scaled dot-product scores $s$, the corresponding attention weights $\alpha$ and the outputs $\boldsymbol{y}$ are computed as follows:
+\begin{equation}
+\label{eq:std_attn}
+s_{i,j} = \langle \boldsymbol{q}_i,\boldsymbol{k}_j\rangle/\sqrt{d},
+\qquad
+Z_i = \sum_{j'} \exp(s_{i,j'}),
+\qquad
+\alpha_{i,j} = \exp(s_{i,j})/Z_i,
+\qquad
+\boldsymbol{y}_i = \sum_j \alpha_{i,j}\,\boldsymbol{v}_j .
+\end{equation}
+Given the input representation $\boldsymbol{x}_i$ at position $i$, we compute a head-wise gate $g_i$ to modulate the head output:
+\begin{equation}
+    \label{eq:head_gated_attn}
+    g_i = \sigma(\boldsymbol{w}_{gate}^\top \boldsymbol{x}_i),
+    \qquad
+    o^{\mathrm{gate}}_{i} = g_i\,\boldsymbol{y}_i,
+\end{equation}
+where $\sigma(\cdot)$ is the sigmoid function and $\boldsymbol{w}_{gate}$ is a learnable vector.
+
+Head-wise gated attention can be viewed as introducing an \emph{input-dependent sink token}~\cite{openai2025gptoss120bgptoss20bmodel} into the attention mechanism.
+Substituting $\sigma(g) = \frac{1}{1+\exp(-g)}$ into Equation \ref{eq:head_gated_attn}, we have
+\begin{equation}
+    \boldsymbol{o}^{\mathrm{gate}}_i
+    = \sum_j \frac{\exp(s_{i,j})}{Z_i + e^{-g_i} Z_i} \boldsymbol{v}_j,
+\end{equation}
+where $\exp(-g_i)Z_i$ acts as an \emph{input-dependent sink mass} in the softmax normalizer.
+As shown in Section~\ref{sec:head_vs_sink}, this adaptive formulation consistently outperforms fixed (input-independent) sink tokens.
+
+\subsection{Speed Benchmark of Attention Enhancements}\label{appx:attn_enhancement_benchmark}
+
+We conduct simulations with MTP-3 to evaluate the latency overheads of the two enhancements under an ideal workload. Table~\ref{tab:attn_enhancement_benchmark} presents the relative increment of theoretical FLOPs and latency. Increasing the number of query heads in SWA slightly raises the FLOPs but has less impact on latency. This is due to a query-to-$kv$ ratio of 12, which keeps SWA in the IO-bound region, even when considering MTP-3. For head-wise gating, neither FLOPs nor latency has noticeable difference because of its lightweight.
+
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{lcccccc}
+\toprule
+\multirow{2}{*}{\textbf{Backbone}} & \multirow{2}{*}{\makecell{\textbf{SWA} \\ \textbf{Heads}}} & \multirow{2}{*}{\textbf{Setting}} & \multicolumn{2}{c}{\textbf{Decode (FLOPs / Lat.)}} & \multicolumn{2}{c}{\textbf{Prefill (FLOPs / Lat.)}} \\
+\cmidrule(lr){4-5} \cmidrule(lr){6-7}
+ & & & 64k & 256k & 64k & 256k \\
+\midrule
+\multirow{4}{*}{\makecell{\ourmodel \\ ($S3F1$ layout)}}
+ & 64 & no gate & 1.00 / 1.00 & 1.00 / 1.00 & 1.00 / 1.00 & 1.00 / 1.00 \\
+ & 96 & no gate & 1.02 / 1.01 & 1.01 / 1.00 & 1.08 / 1.06 & 1.04 / 1.03 \\
+ & 64 & head-wise & 1.00 / 1.00 & 1.00 / 1.00 & 1.00 / 1.02 & 1.00 / 1.01 \\
+ & 96 & head-wise & 1.02 / 1.02 & 1.01 / 1.00 & 1.08 / 1.08 & 1.04 / 1.05 \\
+\bottomrule
+\end{tabular}
+\caption{
+Relative increment under different SWA head counts and gating strategies. The metrics are presented as FLOPs / Latency. The baseline configuration (first line) is normalized to 1.0.
+}
+\label{tab:attn_enhancement_benchmark}
+\end{table}
+
+\begin{table}[h]
+\small
+\centering
+\begin{tabular}{llccccc}
+\toprule
+\multirow{2}{*}{\textbf{Backbone}} & \multirow{2}{*}{\textbf{Layout}} & \multirow{2}{*}{\makecell{\textbf{SWA} \\ \textbf{Heads}}} & \multicolumn{2}{c}{\textbf{Decode}} & \multicolumn{2}{c}{\textbf{Prefill}} \\
+\cmidrule(lr){4-5} \cmidrule(lr){6-7}
+ & & & 64K & 256K & 64K & 256K \\
+\midrule
+\multirow{4}{*}{\makecell{\ourmodel}}
+ & $S3F1$  & 64 & 1.00 & 1.00 & 1.00 & 1.00 \\
+ & \texttt{$S3F1+$Head}                & 96 & 1.02 & 1.01 & 1.08 & 1.04 \\
+ & $S1F1$                & 64 & 1.18 & 1.47 & 1.38 & 1.71 \\
+ & $FFFF$                & 64 & 1.51 & 2.33 & 2.07 & 3.00 \\
+\midrule
+\multirow{4}{*}{Internal 30B-A3B}
+ & $S3F1$  & 32 & 1.00 & 1.00 & 1.00 & 1.00 \\
+ & \texttt{$S3F1+$Head}                  & 48 & 1.02 & 1.01 & 1.05 & 1.02 \\
+ & $S1F1$                & 32 & 1.42 & 1.74 & 1.50 & 1.80 \\
+ & $FFFF$                & 32 & 2.21 & 3.16 & 2.47 & 3.34 \\
+\bottomrule
+\end{tabular}
+\caption{
+Relative FLOPs cost across different backbones and attention patterns. The head count refers to SWA heads. For each backbone, the configuration with minimum FLOPs ($S3F1$ with reduced heads) is the baseline (1.0).
+}
+\label{tab:rel}
+\end{table}
+
+
+\subsection{Meta Token}\label{app:meta}
+
+
+Recent literature \cite{gao2025metadata, allenzhu2024physics, fan2025urlsmetadatadiversityposition} has shown both theoretically and empirically that pre-pending structured metadata to pre-training sequences can improve data efficiency and accelerate convergence: by exposing high-level attributes (\eg, modality, language, domain), metadata provides global cues that reduce uncertainty about the upcoming content and thus makes next-token prediction easier.
+
+Motivated by this paradigm, we associate each training example with a metadata string $\mathbf{M}$ in a human-readable format, including content type (\eg, Code, Book, Paper, Web), language (\eg, EN, ZH), domain, and source. We then prepend $\mathbf{M}$ to the original token sequence $\mathbf{x}$, forming a single training sequence $\mathbf{s} = [\mathbf{M}; \mathbf{x}]$. During pre-training, the model is trained to maximize the likelihood of $\mathbf{s}$:
+\begin{equation}
+\mathcal{L}_{\text{full}}(\theta)
+= -\sum_{t=1}^{|\mathbf{s}|} \log P_\theta(s_t \mid \mathbf{s}_{<t}).
+\end{equation}
+
+After an initial phase of approximately 3.8T tokens, we keep $\mathbf{M}$ in the context but mask out its positions from the loss while continuing to predict the payload tokens:
+\begin{equation}
+\mathcal{L}_{\text{mask}}(\theta)
+= -\sum_{t=|\mathbf{M}|+1}^{|\mathbf{s}|} \log P_\theta(s_t \mid \mathbf{s}_{<t})
+= -\sum_{t=1}^{|\mathbf{x}|} \log P_\theta(x_t \mid \mathbf{M}, \mathbf{x}_{<t}).
+\end{equation}
+
+We hypothesize that by this stage the model has already learned to effectively use metadata as a conditioning signal. Masking the metadata loss therefore allocates optimization pressure entirely to the payload tokens, while still benefiting from the explicit conditioning on data characteristics.
+
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.2}
+
+\begin{tabular}{lcc}
+\toprule
+\rowcolor{header_gray}
+\textbf{Hyper-Parameter} & \textbf{100B-A10B} & \textbf{30B-A3B} \\
+\midrule
+Total Tokens & 250B & 1.4T \\
+Optimizer &  \multicolumn{2}{c}{Muon \cite{jordan2024muon} }\\
+Peak learning rate & $1.31\times10^{-4}$ & $1.1\times10^{-3}$ \\
+Batch-size warmup & - & First 30B tokens \\
+\midrule
+Layers & 43 & 48 \\
+Dimension & 4096 & 2048 \\
+Leading Dense Layers & 1 & 1 \\
+Routed Experts & 96 & 128 \\
+Active Experts & 4 & 8 \\
+Shared Experts & 1 & 1 \\
+Load Balancing Method &  \multicolumn{2}{c}{Loss Free \cite{wang2024lossfreebalancing}} \\
+Attention module & \multicolumn{2}{c}{GQA8} \\
+Sequence Length & \multicolumn{2}{c}{4096} \\
+Vocab Size & \multicolumn{2}{c}{129280} \\
+Batch Size & 8192 & 16384 \\
+Weight Decay & \multicolumn{2}{c}{0.1} \\
+Partial RoPE & Disabled & Enabled \\
+MTP & Enabled & Disabled \\
+\bottomrule
+\end{tabular}
+\caption{Training configuration for the 100B-A10B and the 30B-A3B architecture ablation suite.\label{tab:train_setting_1p4t}}
+\end{table}
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{l c cccccccccccc}
+\toprule
+\multirow{2}{*}{\textbf{Layout}} &
+\multirow{2}{*}{\makecell{\textbf{SWA} \\ \textbf{Heads}}} &
+\multicolumn{12}{c}{\textbf{Pre-train Evaluation}} \\
+\cmidrule(lr){3-14}
+& &
+\textbf{BBH}        &  \textbf{MMLU}       &  \textbf{MMLU-Redux} &  \textbf{MMLU-Pro}   &   \textbf{SimpleQA}   &  \textbf{GSM8K} &  \textbf{MATH} &  \textbf{HumanEval} &  \textbf{MBPP} &  \textbf{C-EVAL} &  \textbf{CMMLU} &  \textbf{Avg.} \\
+\midrule
+
+{$FFFF$} & 32 &
+\textbf{66.0} & 64.5 & 69.7 & 35.7 & 7.2 & 70.0 & 39.2 & \textbf{48.8} & 53.4 & 69.7 & 70.5 & 54.1 \\
+
+{$S1F1$} & 32 &
+64.1 & 64.7 & 69.8 & \textbf{37.7} & 7.5 & 70.1 & 43.9 & 47.0 & 56.2 & 69.8 & 69.8 & 54.6 \\
+
+{$S3F1$} & 32 &
+61.7 & 64.2 & 69.4 & 33.7 & \textbf{8.0} & 67.4 & 41.5 & 47.6 & 56.0 & 69.5 & 70.9 & 53.6 \\
+
+\texttt{$S3F1$+Head} & 48 &
+65.3 & \textbf{65.9} & \textbf{71.0} & 37.4 & 7.5 & \textbf{72.2} & \textbf{44.5} & \textbf{48.8} & \textbf{58.6} & \textbf{70.2} & \textbf{71.0} & \textbf{55.7} \\
+
+\bottomrule
+\end{tabular}
+}
+\caption{Pre-training evaluation results for hybrid attention layout ablations ($W{=}512$) on 30B-A3B.
+$F$ denotes full attention and $S$ denotes SWA; $S3F1$ indicates three $S$ and one $F$ in the hybrid layout.
+\texttt{$S3F1$+Head} increases the number of SWA heads from 32 to 48.}
+\label{tab:swa_pretrain_results}
+\end{table}
+
+
+\subsection{Pre-training Ablations Details}
+\label{sec:arch_ablation}
+
+
+We conduct controlled pre-training ablations to isolate the effects of (i) different hybrid attention layout and (ii) sink tokens versus head-wise gated attention.
+
+\noindent\textbf{Hybrid attention layout.}
+We adopt a \textbf{30B-A3B MoE} architecture to evaluate the downstream impact of different hybrid attention layout under a fixed token budget. The training follows a strict, multi-stage pipeline: a 30B-token warmup phase, followed by 1T tokens of main pre-training, a 300B-token cooldown phase, and an additional 100B-token long-context specialization stage—totaling approximately 1.4T tokens. Supervised fine-tuning (SFT) is then performed on a 0.1× downsampled dataset. Full training details are provided in Table~\ref{tab:train_setting_1p4t}.
+
+\noindent\textbf{Gate vs. sink (scaled setting).}
+We pre-train a \textbf{100B-A10B MoE} model for $\sim$250B tokens to compare sink tokens and head-wise gating under a larger-scale regime.
+
+
+Pre-training results of the architectural ablations are presented in Tables \ref{tab:gate_vs_sink_100b} and \ref{tab:swa_pretrain_results}.
+We employ the evaluation protocols detailed in Section \ref{sec:evals}. Specifically, GPQA \cite{rein2023gpqa} is evaluated using 5-shot prompting, while HumanEval \cite{chen2021evaluating} and MBPP \cite{austin2021program} utilize 3-shot prompting.
+
+
+The post-training results in Table \ref{tab:swa_sft_results} are aggregated as follows:
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Reasoning:} The average of MMLU-Pro~\cite{wang2024mmlupro}, GPQA-Diamond~\cite{rein2023gpqa}, LiveCodeBench v6~\cite{jain2024livecodebench}, and LiveBench\cite{white2025livebenchchallengingcontaminationlimitedllm}.
+\item \textbf{Math:} The average of AIME 2024~\cite{AIME}, AIME 2025~\cite{AIME25}, HMMT 2025 Feb.~\cite{balunovic2025matharena}, and CNMO 2024\footnote{https://www.cms.org.cn/Home/comp/comp/cid/12.html}.
+\item \textbf{Code:} The average of CF-Div2-Stepfun and LiveCodeBench v6~\cite{jain2024livecodebench}.
+\item \textbf{Sci:} Represented by GPQA-Diamond~\cite{rein2023gpqa}.
+\item \textbf{General:} The average of IFEval~\cite{zhou2023instructionfollowingevaluationlargelanguage}, IFBench\cite{pyatkin2025generalizing}, WildBench\cite{lin2024wildbenchbenchmarkingllmschallenging}, Arena-Hard~\cite{arenahard2024}, and MultiChallenge~\cite{sirdeshmukh2025multichallengerealisticmultiturnconversation}.
+\item \textbf{LongCtx:} The average of six benchmark-level averages: (i) the average score across context lengths 8k-128k on RULER~\cite{hsieh2024ruler}, (ii) the average score over the Short and Medium subsets of LongBench v2~\cite{bai2024longbenchv2}, (iii) the average score across context lengths 8k-128k on HELMET~\cite{yen2024helmet}, (iv) GSM-Infinite~\cite{zhou2025gsminfinite}, (v) the overall score on FRAMES~\cite{krishna2025fact}, and (vi) the overall score on RepoQA~\cite{liu2024repoqaevaluatinglongcontext}.
+
+\end{itemize}
+
+
+Tables~\ref{tab:swa_sft_results} and~\ref{tab:swa_pretrain_results} show that the vanilla $S3F1$ layout underperforms the full-attention baseline on general pre-training benchmarks and consistently degrades SFT quality (\eg, BBH: $-4.3$; SFT Avg: $-0.7$). Increasing the number of SWA query heads substantially closes this gap (e.g., MMLU-Pro: $+3.7$; SFT Reasoning: $+0.4$), with only a minor regression on SFT Code ($-0.6$), while matching or exceeding the full-attention baseline on several metrics. Table~\ref{tab:gate_vs_sink_100b} further demonstrates that head-wise gated attention yields an average improvement from 62.5 to 64.4 ($+1.9$) on the sink token metric.
+
+
+\section{Detail Analysis of Localized Activation Blow-up}\label{app:clip}
+
+To investigate the root cause of the localized activation blow-up, we analyze the tokens that trigger the largest expert activations across all layers, and identify two distinct large activation patterns: (1) Specific lexical items, such as special tokens and punctuation, commonly elicit large but not dramatic activations, particularly in the shallower layers. This pattern is not recognized as a failure mode by us, as there is no rapid increment and it may serve as an internal mechanism for semantic modeling~\cite{sun2024massive,an2025systematic}. Another pattern is that (2) some high-frequency bi-grams trigger extremely large activations on the first token, which represents the failure mode we are investigating. The pattern is triggered by several factors:
+The frequency of a bi-gram's occurrence is sufficiently high, and the MoE FFN is fine-grained enough, allowing an expert to specialize in that bi-gram without being regulated by the load balancing mechanism. This specialization serves as a shortcut: once the expert is activated, the output becomes deterministic, and other networks no longer influence the prediction. While finding shortcuts is a reasonable approach to minimizing loss, in a MoE model with a pre-norm architecture~\cite{radford2019language,xiong2020layer}, there is a straightforward, pathological solution for achieving such deterministic predictions, as outlined next. The model's final representation is the sum of the outputs from all layers, followed by a RMSNorm. This can be expressed as a combination of the outputs from the experts and the attention layers:
+\begin{equation}
+\boldsymbol{h}_{\text{final}} = \text{RMSNorm}(\underbrace{\text{expert}_{\text{outlier}}}_{\boldsymbol{h}_{\text{outlier}}} + \underbrace{\sum_{l=1}^L \text{attn}_l + \sum_{\substack{l,e\\(l,e)\text{ is not a outlier}}} \text{expert}_{l,e}}_{\boldsymbol{h}_{\text{others}}}),
+\end{equation}
+where attn, MoE, expert represent the output hidden states of their respective modules, while \(L\) and \(E\) denote the number of layers and experts, respectively. The straightforward solution is to boundlessly enlarge $\text{expert}_{\text{outlier}}$, then
+\begin{equation}
+\text{RMSNorm}(\boldsymbol{h}_{\text{final}}) = \lim_{c\rightarrow \infty}\text{RMSNorm}(c \cdot \hat{\boldsymbol{h}}_\text{outlier} + \boldsymbol{h}_{\text{others}}) = \text{RMSNorm}(\boldsymbol{h}_\text{outlier}),
+\end{equation}
+where we decouple $\boldsymbol{h}_\text{outlier}$ to the magnitude $c$ and the unit vector $\hat{\boldsymbol{h}}_\text{outlier}$ denoting the direction.
+
+SwiGLU~\cite{shazeer2020gluvariantsimprovetransformer}, the expert architecture in \ourmodel, provides a way to generate large outputs, even when the weight decay effectively suppresses the weight norms. SwiGLU is defined as follows:
+\begin{equation}
+\text{SwiGLU}(\boldsymbol{x}) = \boldsymbol{W}_{\text{down}}\left(\text{SiLU}(\boldsymbol{W}_{\text{gate}}\boldsymbol{x})\cdot\boldsymbol{W}_{\text{up}}\boldsymbol{x}\right).
+\end{equation}
+We analyze the activation norms of $\boldsymbol{W}_{\text{gate}}\boldsymbol{x}$ and $\boldsymbol{W}_{\text{up}}\boldsymbol{x}$ and find no significant differences between outlier experts and normal experts. However, the element-wise product produces abnormal outputs, which have
+\begin{equation}
+\|\text{SiLU}(\boldsymbol{W}_{\text{gate}}\boldsymbol{x})\|\cdot\|\boldsymbol{W}_{\text{up}}\boldsymbol{x}\|\approx\|\text{SiLU}(\boldsymbol{W}_{\text{gate}}\boldsymbol{x})\cdot\boldsymbol{W}_{\text{up}}\boldsymbol{x}\|,
+\end{equation}
+in outlier experts. It can be achieved only if $\text{SiLU}(\boldsymbol{W}_{\text{gate}}\boldsymbol{x})$ and $\boldsymbol{W}_{\text{up}}\boldsymbol{x}$ are highly aligned and concentrate on a very limited number of dimensions. Consequently, only a limited number of rows from \(\boldsymbol{W}_{\text{up}}\) are utilized due to the sparse input. This observation leads us to prefer activation clipping over weight clipping, as activation's numerical property directly contribute to the blow-up and the sparsity, and activation clipping can promptly address these issues. Besides, activation clipping has negligible negative effects, as well-behaved activations rarely exceed the threshold.
+
+When using the Muon optimizer, gated linear units, such as SwiGLU, are susceptible to logit explosion. This vulnerability arises from similar mechanisms that cause explosion in attention, as reported in \cite{kimi_k2}.
+For an outlier expert specialized to some specific bi-gram, hidden states routed to it are expected to be closely aligned to its router embedding. We validate this by inputting the router embedding into a outlier expert and directly predicting outputs based on this expert's output. The predicted distribution aligns with that of the real data and the entire network's performance. Combined with the overly single training target (to predict the second token in the bi-gram), we argue that gradients w.r.t. the outlier expert's parameters, $\boldsymbol{W}_{\text{gate}}$, $\boldsymbol{W}_{\text{up}}$ and $\boldsymbol{W}_{\text{down}}$, are not only abnormally low rank (denoted as $r$), but also consistently point in a direction that emphasizes the magnitude as analyzed in the first factor, without rotation. Let the update matrices of a parameter matrix $\boldsymbol{W}\in\mathbb{R}^{N\times N}$ to be
+\begin{equation}
+\Delta \boldsymbol{W} = \sum_i \sigma_i \boldsymbol{u}_i\boldsymbol{v}_i^\top =  \underbrace{\sum_{i=1}^r \sigma_i \boldsymbol{u}_i\boldsymbol{v}_i^\top}_{\text{low rank signal}} + \underbrace{\sum_{j=r+1}^{N} \sigma_j \boldsymbol{u}_j\boldsymbol{v}_j^\top}_{\text{noise}}
+\end{equation}
+Accumulating updates over optimization steps will rapidly increase the singular value of the low-rank signals, resulting in an explosion of the weight parameter. In the GLU structure, $\|\text{SiLU}(\boldsymbol{W}_{\text{gate}}\boldsymbol{x})\cdot\boldsymbol{W}_{\text{up}}\boldsymbol{x}\|$ squares the spectral norm in our strong alignment case, making the progress more sharp. Additionally, Muon completely eliminates the influence of gradient magnitudes. During the blow-up process, RMSNorm reduces the gradients of large inputs. When using the Adam optimizer, its $\epsilon$ acts as a threshold to filter out small gradients during the learning rate adaptation, which can hinder the progress. In contrast, Muon consistently and effectively orthogonalizes the gradients, resulting in more aggressive updates.
+
+
+\section{Step Pre-training Data Foundation}
+\label{sec:step-data}
+
+\subsection{Knowledge Data Construction}
+
+\subsubsection{StepCrawl}
+\label{subsubsec:stepcrawl}
+
+Beyond standard web-scale datasets (\eg, CommonCrawl), we develop \textbf{StepCrawl}, an in-house crawling and curation system designed to acquire \emph{high-quality} and \emph{diverse} tokens at scale.
+StepCrawl serves as a primary data source for both high-signal web pages and document-like content (notably PDFs), which frequently contain long-form, high-information-density material.
+
+\noindent A key component of StepCrawl is a site and URL selection layer powered by a WebOrganizer-style model~\cite{weborganizer}.
+We adapt the capabilities introduced in WebOrganizer and further fine-tune a version tailored to our pipeline.
+During crawling, each fetched web page is analyzed by this model, forming a lightweight LM-in-the-loop feedback cycle that (i) filters SEO-driven and other low-utility pages, and (ii) guides crawl-budget allocation by balancing site categories (e.g., preventing disproportionate crawling of tool and e-commerce sites) to preserve corpus diversity and reduce topical skew.
+In practice, StepCrawl processes on the order of $\sim$1B pages per day under this quality- and diversity-aware scheduling policy.
+
+\noindent All crawling activities strictly adhere to \texttt{robots.txt} and site-specific access policies.
+The collected content is subsequently passed through a multi-stage filtering process (quality scoring, deduplication, and sanitization), ensuring that only high-utility and policy-compliant data are retained for training.
+
+
+\subsubsection{Quality Refinement and Stratification}
+
+\paragraph{Quality stratification.}
+Inspired by Nemotron-CC~\cite{su2025nemotroncctransformingcommoncrawl}-style quality bucketing, we divide the internal web data into quality tiers and sample preferentially from higher tiers.
+We label each document using an ensemble of six lightweight scorers/classifiers and ensemble the tier assignments across scorers.
+In the final recipe, we keep High/Medium-High/Medium and discard Medium-Low/Low, which substantially improves token efficiency in ablations.
+For book and paper corpora, we apply the same stratification but restrict retention to High/Medium-High tiers exclusively during the annealing stage to maximize diversity.
+In addition to the shared six-scorer ensemble, we integrate additional domain-specific filters targeting STEM and knowledge-dense content, and down-sample overrepresented domains to ensure balanced representation.
+
+\paragraph{Embedding-based cluster rebalancing.}
+We leverage embedding-based corpus balancing as a principled way to further reduce redundancy and mitigate distribution skew.
+Specifically, we embed large-scale Chinese/English web data, run k-means clustering (100k+ clusters), and down-sample clusters with disproportionate mass.
+In ablations, this cluster-level rebalancing in the cooldown stage improves a broad set of benchmarks.
+
+\paragraph{Knowledge-Intensive Mining and Augmentation.}
+We construct a dedicated knowledge subset using a lightweight two-stage pipeline built on the shared embedding representation described above.
+First, a curated inventory of high-value entities, concepts, and relations is used to retrieve knowledge-dense documents and passages from the full corpus in embedding space; these candidates are ranked by a knowledge-density model and simple coverage heuristics.
+Second, for a portion of the retrieved content, we apply targeted transformations such as controlled rephrasing and QA synthesis to improve learnability.
+The resulting samples are mixed back into the training mixture to increase effective knowledge signal density.
+We observe consistent gains from this pipeline in ablations, while a detailed causal analysis of its benefits is left for future work.
+
+
+\subsection{Code Data}
+
+\subsubsection{Pure-Code}
+\label{sec:pure_code}
+
+\noindent We refine our internal programming dataset using a modified version of the OpenCoder filtering rules~\cite{huang2025opencoderopencookbooktoptier}, introducing a calibrated relaxation to balance data quality and diversity.
+In our pipeline, applying OpenCoder filters generates a set of ``hits'' for each document, where each hit represents a violation of a heuristic rule (signaling potential noise).
+We categorize the corpus by these hit counts: \texttt{hit0} for clean documents (zero violations), \texttt{hit1} for one violation, and so on.
+
+\noindent Our internal ablations reveal a clear quality-diversity trade-off: strict filtering (e.g., \texttt{hit0}-only) over-prunes the corpus, while no filtering introduces excessive noise.
+We find that the \texttt{hit0--6} configuration (accepting documents with up to 6 violations) yields the best overall benchmark performance, retaining a wider variety of high-signal code compared to the original strict constraints.
+
+\subsubsection{PR/Issue/Commit Data}
+\label{sec:pr_issue_data}
+
+\noindent To enhance software engineering capabilities, we construct a comprehensive dataset from GitHub repositories with over 10 stars, comprising PRs, issues, and commits.
+We apply strict filtering on repository popularity and content quality, and use LLMs to generate missing issue descriptions, resulting in a 5-million-sample foundation.
+From this, we derive four training subsets:
+
+\noindent \textbf{(1) Base PR/Issue/Commit Data:}
+We crawl data via GHArchive and GitHub API, including full commit histories.
+We extract changes and validate a small portion of samples against \texttt{git diff} ground truth, then filter to 20+ mainstream languages (\eg, Python, Java, C++).
+We strictly deduplicate against SWE-Bench Verified~\cite{swe_verified} and SWE-Bench Multilingual~\cite{yang2025swesmith} to prevent leakage.
+
+\noindent \textbf{(2) Concatenated PR-Dialogue Data (90B tokens):}
+We generate 90B tokens of code-editing training data by applying two Agentless-inspired templates~\cite{xia2024agentless}:
+(1) \textit{File localization}: Given a problem description and repository structure, identify target file paths;
+(2) \textit{Code repair}: Given a problem description and file content, generate precise modifications via SEARCH/REPLACE blocks.
+
+\noindent We integrate this 90B code-editing data into two training phases with phase-specific masking strategies.
+In the annealing stage of pre-training, only template scaffolding is masked; in mid-training, the data is converted to chat dialogs with user prompts masked.
+Internal ablations show consistent gains over SWE-Bench Verified and SWE-Bench Multilingual in the cooldown stage and mid-training.
+
+\noindent \textbf{(3) Rewritten Reasoning-Oriented Data (12B tokens):}
+From the Python subset of our base dataset, we derive bug-fix samples via LLM change-type annotation.
+We apply two concise rewriting strategies:
+(1) \textit{Reasoning reconstruction}: an LLM reconstructs the PR author’s problem-solving process (problem analysis, root cause identification, solution design, and code implementation), injected into PR-Dialogue format.
+Hallucinated/inconsistent traces are filtered via rule-based and LLM verification.
+(2) \textit{Active Reading notebooks}: PR/issue/commit data is converted into structured learning outlines (motivation, root causes, design decisions, insights), then synthesized into coherent technical notes.
+These rewritten datasets ($\sim$12B tokens) are incorporated during mid-training, yielding further gains on SWE-Bench Verified.
+
+\noindent \textbf{(4) Environment-based Seed Data.}
+We curate executable environments derived from raw PR, issue, and commit records using the environment building pipeline described in Appendix~\ref{sec:code-agent}.
+Candidate samples are rigorously filtered to ensure test-patch inclusion and validated via strict rule-based criteria to guarantee environmental reproducibility.
+Furthermore, selected issues undergo targeted rewriting to augment data quality and coverage.
+The resulting dataset comprises hundreds of thousands of seed samples, including problem descriptions, code changes, and test functions, and serves as the foundational bedrock for enhancing agentic coding capabilities, driving significant performance gains in downstream agent tasks.
+
+
+\subsection{Mathematics \& STEM Data}
+
+To enhance reasoning capabilities and elicit intelligence from knowledge, we curate a large-scale mathematics and STEM dataset.
+Beyond the standard Common Crawl data used in prior works~\cite{shao2024deepseekmathpushinglimitsmathematical,zhou2025megamathpushinglimitsopen}, we leverage our in-house {StepCrawl} system to harvest a massive scale of additional mathematics-related data.
+Specifically, we implement a filtering pipeline inspired by MegaMath~\cite{zhou2025megamathpushinglimitsopen}, utilizing an ensemble of internal classifiers alongside FineMath~\cite{allal2025smollm2smolgoesbig}.
+This allows us to retain hundreds of billions of mathematics-related tokens distinct from Common Crawl.
+We further collect a diverse 100M-sample educational dataset encompassing exercises, quizzes, and instructional content.
+This collection bridges the gap between academic theory and professional application, covering domains from K-12 mathematics/physics/chemistry and humanities to adult vocational exams (CPA, Legal).
+Early-stage experiments confirm that this problem-solving data is crucial for optimizing token efficiency during pre-training.
+
+
+\subsection{Data Infrastructure}
+\label{sec:data-infra}
+
+\noindent Our data construction and curation pipeline runs on a high-throughput in-house data infrastructure system designed for large-scale deduplication, mining, and model-inference filtering.
+We operate hybrid CPU/GPU clusters with distributed frameworks such as \texttt{Spark} and \texttt{Ray} to execute both large-volume processing (e.g., minhash-based deduplication) and model-driven curation workloads (e.g., embedding generation and classifier/LM inference), backed by a storage layer spanning object storage (OSS), \texttt{HDFS}, and \texttt{JuiceFS} for efficient reads/writes of raw corpora and intermediate artifacts.
+
+
+\subsection{Data Ablations Setting}
+
+To rigorously assess data quality and the impact of curation strategies, we conduct an extensive ablation suite using the 30B-A3B MoE architecture trained with the Muon optimizer, consistent with the mainline settings (Table~\ref{tab:train_setting_1p4t}).
+Adhering to a strict token efficiency protocol, we set a fixed training budget for all experiments.
+Models are evaluated on the comprehensive benchmarks listed in Section~\ref{sec:evals}, alongside a series of carefully designed held-out compression (perplexity) test sets.
+We observe that compression metrics often provide a more direct measure of knowledge capacity, offering signals complementary to mainstream benchmarks.
+
+Internal experiments on the 30B-A3B MoE model demonstrate its superior performance and stability compared to smaller proxies.
+While smaller models are computationally cheaper, they often fail to capture the nuances of complex reasoning and lack the capacity to memorize long-tail patterns, leading to an artificial bias towards data repetition.
+Empirically, the 30B-A3B size offers stronger stability and better fidelity to full-scale trends.
+
+
+\section{Post Training Details}
+This section describes the post-training process that refines the base model into a high-performance agentic system, covering SFT with rigorous data processing and quality control, followed by large-scale RL to further improve reasoning, tool use, and generalization.
+
+\subsection{SFT Details}
+\subsubsection{SFT Data Processing Pipeline}
+Across all domains, we apply a unified data processing pipeline that emphasizes answer verifiability, reasoning quality, and execution realism. To ensure overall data integrity, the aggregated dataset undergoes a strict two-stage filtration process:
+\begin{enumerate}
+\item \textbf{Rule-based Filtering:} We eliminate low-quality data exhibiting degenerate patterns, such as infinite repetition, harmful content, and personally identifiable information.
+\item \textbf{Model-based Filtering:} We utilize specialized models to detect and filter out linguistically inconsistent data. By identifying and removing samples with unnatural language mixing, we significantly refine the dataset's linguistic purity and overall quality.
+\item \textbf{Decontamination:} We conduct comprehensive benchmark decontamination to prevent test set leakage. This involves both exact matching (with digit masking to catch numerical modifications) and $N$-gram matching.
+
+\end{enumerate}
+This process yields a final refined dataset of 871k samples, totaling 7.23B tokens.The detailed distribution of the SFT data is presented in Table \ref{tab:sft_data_statistics}.
+
+
+\vspace{-1.5cm}
+
+\subsection{RL Details and Ablations}
+This section details the large-scale RL post-training, covering data curation, asynchronous search-agent training, and ablations on dense and MoE models.
+
+\vspace{-0.5cm}
+\subsubsection{Data Curation}
+We curate the RL training dataset by aggregating problems from open-source collections and competition archives spanning competitive coding, STEM, and synthetic data for general RLVR training.
+To prevent data contamination, we strictly exclude problems from competitions held during 2024–2026. The dataset is further augmented with:
+(i) synthetic arithmetic problems involving 11–13 digit integers;
+(ii) a generator–validator pipeline that synthesizes additional test cases for coding tasks; and
+(iii) synthetic environments for general reasoning tasks, such as puzzle and instruction following.
+
+We apply a two-stage filtering process. First, deterministic rule-based pruning removes prompts containing images, external links, or open-ended requirements without a unique final answer. Second, an accuracy-based filter excludes trivial or degenerate problems. During training, each batch is constructed by sampling from different domains according to predefined sampling probabilities.
+
+\subsubsection{Reward System}
+\label{sec:rl_reward}
+
+\paragraph{Verifiable Rewards.}
+
+
+For STEM tasks, we employ gpt-oss-120b~\cite{openai2025gptoss120bgptoss20bmodel} as the verifier model, using the following structured prompt (originally in Chinese) to rigorously assess final-answer correctness. For coding tasks, we utilize sandboxes to validate code execution against test cases with soft reward.
+
+
+\begin{MyBox}{}
+\footnotesize
+\linespread{0.8}\selectfont
+You are a strict grader. Below you are given the problem, the student's answer, and the reference answer. Please determine whether the student's answer is correct according to the rules below.
+
+\textbf{Grading procedure:}
+
+1. \textbf{Overall check:} If the student's response is incomplete, lacks a clear final answer, or contains repeated content multiple times $\rightarrow$ mark as incorrect.
+
+2. \textbf{Final-answer match:} Extract the student's \textbf{explicit final answer} and compare it with the reference answer:
+   \begin{itemize}[itemsep=0pt, parsep=0pt, topsep=0pt]
+      \item If they are exactly equivalent semantically or mathematically $\rightarrow$ proceed to process check.
+      \item If numerical computation is involved and the discrepancy is solely due to rounding $\rightarrow$ proceed to process check.
+      \item Otherwise $\rightarrow$ mark as incorrect.
+   \end{itemize}
+
+3. \textbf{Process check:} Carefully verify each reasoning step:
+   \begin{itemize}[itemsep=0pt, parsep=0pt, topsep=0pt]
+      \item If there are errors, contradictions, obvious irrelevance to the problem, or the student merely copies the prompt without a substantive solution $\rightarrow$ mark as incorrect.
+      \item If the solution process is correct, clear, and consistent $\rightarrow$ mark as correct.
+   \end{itemize}
+
+4. \textbf{Format requirements:} If the problem requires a specific format (\textit{e.g.}, units, step-by-step answers, or explicit equations) and the student does not satisfy it $\rightarrow$ mark as incorrect.
+
+5. \textbf{Multiple sub-questions:} If the problem contains multiple sub-questions, the student must answer \emph{all} of them correctly to be marked correct.
+
+6. \textbf{Other cases:} If the above rules do not cover the situation, make an overall judgment from the perspective of whether the student truly knows how to solve the problem.
+
+\textbf{Output requirement:}
+
+Your final output must be \emph{strictly} one of the following:
+\begin{itemize}[itemsep=0pt, parsep=0pt, topsep=0pt]
+  \item \texttt{<correct> True </correct>}
+  \item \texttt{<correct> False </correct>}
+\end{itemize}
+
+Now begin:
+
+\texttt{<question>}\\
+\{question\}\\
+\texttt{</question>}
+
+\texttt{<student\_answer>}\\
+\{student\_answer\}\\
+\texttt{</student\_answer>}
+
+\texttt{<reference\_answer>}\\
+\{reference\_answer\}\\
+\texttt{</reference\_answer>}
+\end{MyBox}
+
+
+\subsubsection{RL Ablation Details} \label{sec:rl_ab}
+\paragraph{MIS-PO vs. GSPO.}
+
+
+\begin{figure}[t!]
+    \centering
+    \begin{subfigure}[b]{1.0\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{src/img/pdf/tb_plots_qwen8b_algo_s0p8_i4_rew_eb.pdf}
+        \caption{\textbf{Comparison on the dense model.} While GSPO also effectively reduces the variance of the actor gradient norm, its efficiency is inferior to that of MIS-PO. Under the same iteration budget, MIS-PO achieves higher rewards and all acceptance ratio.}
+        \label{fig:mispo_vs_gspo_dense}
+    \end{subfigure}
+
+    \vspace{1em}
+
+    \begin{subfigure}[b]{1.0\linewidth}
+        \centering
+        \includegraphics[width=1.0\linewidth]{src/img/pdf/tb_plots_qwen30a3_algo_w0_s0p8_df2_i3_rew_eb.pdf}
+        \caption{\textbf{Comparison on the MoE model.}
+        \textbf{(1) Efficiency:} MIS-PO demonstrates superior sample efficiency, achieving higher rewards with accelerated convergence, whereas GSPO plateaus around iteration 200.
+        \textbf{(2) Stability:} GSPO exhibits an increasing training-inference discrepancy during training, quantified by the density ratio $\pi_{\theta_\text{old}}/\pi_{\theta_\text{vllm}}$ (where $\pi_{\theta_\text{vllm}}$ is the rollout policy in the inference backend and $\pi_{\theta_\text{old}}$ is the pre-update policy snapshot in the training backend). Conversely, MIS-PO consistently maintains this discrepancy within a stable range.}
+        \label{fig:mispo_vs_gspo_moe}
+    \end{subfigure}
+
+    \caption{\textbf{Performance comparison between MIS-PO and GSPO.} The top figure (a) shows results on the dense model, and the bottom figure (b) shows results on the MoE model. MIS-PO consistently outperforms GSPO in both efficiency and stability across different architectures.}
+    \label{fig:mispo_vs_gspo_main}
+\end{figure}
+
+
+To rigorously validate the effectiveness of our method, we benchmark MIS-PO against GSPO~\cite{zheng2025group} on both Dense and MoE architectures. We select GSPO as the primary baseline because it represents a competitive strategy for reducing the gradient variance inherent in importance sampling. In our implementation, we extend the original GSPO estimator to the actor-critic setting by integrating its Generalized Importance Sampling mechanism into the actor loss. Specifically, we replace the standard token-level importance sampling ratio with the geometric mean of trajectory-level ratios. The resulting actor loss is formulated as follows ($\gamma=\lambda=1$):
+\begin{gather}
+    r_\tau(\theta) = \left(\prod_{t=0}^{T-1}\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_\text{old}}(a_t|s_t)}\right)^{\frac 1T} \\
+    \hat{A}_t = \hat{R} - V_\phi(s_t) \\
+    \mathcal{L}^{\text{GSPO}}_\text{actor} = -\mathbb{E}_{\tau \sim \pi_{\theta_\text{vllm}}} \left[ \mathbb{I}(x_t) \cdot \mathbb{I}(\bar{\rho}(\tau)) \cdot  \min (r_\tau(\theta)\hat{A}_t, \text{clip}(r_\tau(\theta),1-\epsilon,1+\epsilon)\hat{A}_t) \right]
+    \label{eq:gspo_loss}
+\end{gather}
+To ensure a fair comparison, we apply the same token- and sample-level masking strategies used in MIS-PO to exclude data with significant training–inference mismatches. Regarding the clip ratio $\epsilon$, we conduct a grid search over $\{1,2,3,4\}\times10^{-4}$. We adopt $\epsilon = 10^{-4}$ for all experiments primarily because it achieves the best benchmark performance after 200 RL training steps. Additionally, we observe that this setting yields a clip fraction of approximately 15\%, consistent with the original GSPO~\cite{zheng2025group}.
+
+Figure~\ref{fig:mispo_vs_gspo_main} presents the comparative results. Empirically, MIS-PO demonstrates superior sample efficiency and scalability compared to GSPO. Crucially, MIS-PO effectively constrains the training-inference mismatch within a stable range. This stability proves particularly critical for the large-scale RL training of MoE models, where the baseline GSPO fails to maintain consistent convergence.
+
+\paragraph{Extended Training Dynamics on MoE.}
+To further validate the scalability of our method, we conduct an extended training run of MIS-PO on the MoE model using a challenging dataset. As illustrated in Figure~\ref{fig:extend_mispo_moe}, the model maintains a continuous upward trend in rewards, stable actor gradient norms, and well-controlled entropy levels. These results empirically confirm that MIS-PO is reliability for large-scale MoE off-policy RL training.
+
+\begin{figure}[thbp]
+    \centering
+    \includegraphics[width=1.0\linewidth]{src/img/pdf/tb_plots_grad_norm_qwen30a3_mispo.pdf}
+    \caption{\textbf{Extended training dynamics of MIS-PO on the MoE model.} The metrics include Reward (left), Actor Gradient Norm (middle), and Entropy (right). Notably, the middle panel displays the raw gradient norm without smoothing or downsampling to highlight the stability of the optimization.}
+    \label{fig:extend_mispo_moe}
+\end{figure}
+
+
+\subsubsection{Search Agent}
+Regarding the training architecture, the early client–server one-step off-policy framework is severely bottlenecked by long-tail latency: approximately 5\% of samples accounted for roughly 80\% of the generation cost. However, our observations indicate that the policy exhibits strong robustness to staleness, maintaining stable performance even with a latency of approximately 20 steps. Consequently, we adopt the FullyAsync paradigm, decoupling generation and updates into a completely asynchronous process. Furthermore, to minimize inference overhead during multi-turn interactions, we implement sticky scheduling, where the same session is consistently dispatched to the same node to maximize KV-cache reuse. Overall, this configuration achieves an approximate $10\times$ efficiency gain while maintaining training stability.
+
+Throughout the training process, the FullyAsync paradigm demonstrates robust stability, evidenced by a sustained increase in rewards and a Truncated Importance Sampling (TIS) truncation rate maintained within a controllable range, thereby indicating limited policy drift induced by asynchrony. Notably, we observe that distinct from the limited scalability of ``RL from zero'' regarding training budgets, injecting task-relevant knowledge and tool-use priors during the mid-training phase elicited significantly higher performance gains and a more stable emergence of capabilities during the RL.
+
+
+\definecolor{tg}{HTML}{228B22}
+\definecolor{hg}{gray}{0.9}
+\definecolor{sg}{gray}{0.95}
+
+\newcommand{\gain}[1]{\textcolor{glm_text}{\scriptsize~$\mkern-2mu\blacktriangle$#1}}
+
+
+\begin{table*}[h]
+    \centering
+    \small
+    \setlength{\tabcolsep}{2pt}
+    \setlength{\extrarowheight}{3pt}
+    \resizebox{\textwidth}{!}{
+    \begin{tabular}{l | c c c c c c}
+        \toprule
+        \rowcolor{hg} \textbf{Model} & \makecell{\textbf{BrowseComp}} & \makecell{\textbf{BrowseComp-ZH \ \ \ \ \ \ }}&\makecell{\textbf{GAIA\ \ \ \ \ \ \ \ \ }} & \makecell{\textbf{xbench}\\\small \textbf{DeepSearch-2505}} & \makecell{\textbf{xbench}\\\small \textbf{DeepSearch-2510}} & \makecell{\textbf{Avg Gain}} \\
+        \midrule
+        \rowcolor{sg}\multicolumn{7}{l}{\textsc{\textbf{Agent $\Delta$avg@3 (Metric: Pass Rate \%)}}} \\
+        Step 3.5 Flash* & 1.5 \gain{50.1}  & 25.0 \gain{41.9} & 17.0 \gain{67.5} & 26.0 \gain{57.7} & 11.3 \gain{42.7} & \best{52.0} \\
+        Kimi K2-Thinking* & 3.6 \gain{37.9}  & 23.8 \gain{38.5} & 18.8 \gain{36.6} & 28.7 \gain{39.3} & 14.3 \gain{27.0} & 35.9 \\
+        Kimi K2.5* & 7.4 \gain{53.2}  & 40.3 \gain{22.0} & 26.7 \gain{49.2} & 36.0 \gain{40.3} & 19.7 \gain{36.6} & 40.2 \\
+        DeepSeek V3.2         & 8.1 \gain{43.3}  & 41.2 \gain{23.8} & 23.4 \gain{51.7} & 35.7 \gain{41.3} & 18.7 \gain{30.6} & 38.1 \\
+        GLM-4.7               & 3.4 \gain{48.6}  & 30.2 \gain{36.4} & 19.6 \gain{26.5} & 29.7 \gain{34.6} & 19.3 \gain{23.4} & 33.9 \\
+        MiniMax M2.1          & 1.3 \gain{46.1}  & 10.1 \gain{37.7} & 15.4 \gain{30.9} & 18.7 \gain{46.6} & 6.0 \gain{36.3}  & 39.5 \\
+        MiMo-V2 Flash         & 0.9 \gain{44.5}  & 12.9 \gain{38.3} & 12.9 \gain{42.3} & 19.7 \gain{49.6} & 6.3 \gain{13.7}  & 37.7 \\
+        Gemini 3.0 Pro           & 25.2 \gain{12.6} & \na              & 32.1 \gain{44.5} & 45.0 \gain{32.0} & \na              & 29.7 \\
+        Claude Sonnet 4.5      & 1.4 \gain{22.7}  & 21.2 \gain{19.6} & 16.2 \gain{54.7} & 24.7 \gain{42.6} & 7.3 \gain{37.7}  & 35.5 \\
+        \bottomrule
+    \end{tabular}
+    }
+    \caption{\textbf{Impact of Tool Usage on Agent Performance.} Each cell displays the \textbf{Baseline Score} (internal knowledge only) followed by the \gain{\textbf{Performance Gain}} achieved by enabling search tools. The final score is the sum of both values. \textbf{Avg Gain} highlights the model's ability to leverage external information to improve results. Models marked with * denote tool results measured under a 256K setting; the setting for other models is unspecified.}
+    \label{tab:tool_gain}
+
+\end{table*}
+
+\vspace{+1cm}
+\noindent\textbf{Discussion.}
+To rigorously evaluate agentic competence isolated from parametric memorization, we focus on the \emph{tool-usage gain}, defined as:
+\[
+\Delta_{\text{tool}} = \text{Score}_{\text{with tools}} - \text{Score}_{\text{no tools}}
+\]
+This metric decouples the model's inherent knowledge from its ability to dynamically leverage external tools. As detailed in Table~\ref{tab:tool_gain}, \textbf{Step 3.5 Flash} demonstrates the most robust capability to leverage external information, achieving the highest average gain ($52.0$) and leading significantly on complex benchmarks such as GAIA and xbench-DeepSearch.
+
+This distinction is critical because high absolute scores on benchmarks like BrowseComp can sometimes stem from strong internalized knowledge rather than effective search strategies. A smaller $\Delta_{\text{tool}}$ in a high-performing model may ambiguously indicate either high efficiency (the model already ``knows'' the answer) or a failure to effectively utilize tools to improve results. Conversely, a large $\Delta_{\text{tool}}$ explicitly signals the model's proficiency in bridging knowledge gaps through retrieval.
+Therefore, we argue that future optimization should not merely chase higher absolute scores (``benchmark grinding''), but should aim to maximize this $\Delta_{\text{tool}}$ in long-context, evidence-critical scenarios. This ensures the agent is truly mastering the \emph{process} of information retrieval and reasoning, rather than overfitting to static knowledge or benchmark artifacts.
+
+
+\subsection{Tool-integrated Reasoning and Parallel Reasoning}
+
+In this section, we introduce two primary methodologies for test-time scaling in Step 3.5 Flash: tool-integrated reasoning and parallel reasoning.
+\paragraph{Tool-integrated Reasoning}
+For complex reasoning tasks, we integrate the model with a Python interpreter to facilitate tool-assisted reasoning. In this framework, the model operates within a sandbox to iteratively think and execute code for computational, simulation, and visualization purposes. In our experiments, we evaluate on AIME 2025, HMMT 2025, IMO-AnswerBench, GPQA, HLE$_{\text{text}}$, and ARC-AGI-1 with a 100-turn limit.
+As shown in Table \ref{tab:tir-results}, tool-integrated reasoning significantly enhances performance across challenging mathematics, STEM, and puzzle benchmarks, highlighting the advanced agentic reasoning capabilities of Step 3.5 Flash.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\rowcolor{header_gray}
+\textbf{Benchmark} & \textbf{Step 3.5 Flash} & \textbf{Step 3.5 Flash w. Python} \\
+\midrule
+AIME 2025           & 97.3 & \textbf{99.8} (+2.5) \\
+HMMT 2025 Feb.      & 98.4 & \textbf{98.7} (+0.3) \\
+HMMT 2025 Nov.      & 94.0 & \textbf{98.0} (+4.0) \\
+IMO-AnswerBench      & 85.4 & \textbf{86.7} (+1.3) \\
+GPQA-Diamond        & 83.5 & \textbf{84.4} (+0.9) \\
+HLE$_{\text{text}}$ & 23.1 & \textbf{26.5} (+3.4) \\
+ARC-AGI-1           & 54.8 & \textbf{56.5} (+1.7) \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of Step 3.5 Flash and Step 3.5 Flash w. Python.}
+\label{tab:tir-results}
+\end{table}
+
+\paragraph{Tool-integrated Parallel Reasoning}
+We present a preliminary exploration of extending PaCoRe to a multi-turn interactive environment.
+By design, PaCoRe preserves the standard LLM message interface. This compatibility allows for seamless integration into existing agentic frameworks that utilize multi-turn tool interaction.
+To adapt PaCoRe to this setting, we implement a state-aware input serialization protocol as shown in Table \ref{tab:pacore-tool-template}.
+
+We evaluate this approach on the GPQA and HLE$_{\text{text}}$ benchmarks using Step 3.5 Flash equipped with a Python interpreter. As shown in Table~\ref{tab:tool-results}, extending parallel reasoning to these agentic loops yields significant performance improvements over the standard reasoning baseline. These findings demonstrate that PaCoRe effectively generalizes to environments requiring interactive feedback, highlighting a promising avenue for agentic test-time scaling.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\rowcolor{header_gray}
+\textbf{Benchmark w. Python} & \textbf{Step 3.5 Flash} & \textbf{Step 3.5 Flash + PaCoRe} \\
+\midrule
+GPQA-Diamond        & 84.4 & \textbf{85.7} (+1.3) \\
+HLE$_{\text{text}}$ & 26.5 & \textbf{28.2} (+1.7) \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of Step 3.5 Flash w. Python and the same model with PaCoRe test-time scaling.}
+\label{tab:tool-results}
+\end{table}
+
+\input{src/tables/app_pacore_prompt_template_table}
+
+\section{Detailed Evaluation Protocols and Prompts}
+\label{sec:post_training_eval_appendix}
+
+This section provides the implementation details for our evaluation suite. We outline the specific prompt templates, few-shot configurations, and the judge models employed across different benchmarks. For complex metrics, such as those used in long-context or reasoning tasks, we also detail the underlying calculation logic and scoring criteria to ensure reproducibility. In the templates provided below, \texttt{\{question\}} denotes the placeholder for the textual problem description, while other placeholders (e.g., \texttt{\{test\}}, \texttt{\{context\}}) represent task-specific information.
+
+\subsection{Evaluation Details of Pre-trained Models}
+
+\subsubsection{General language understanding and reasoning benchmarks}
+
+\paragraph{BBH.} We use the official CoT-prompts~\footnote{https://github.com/suzgunmirac/BIG-Bench-Hard/tree/main/cot-prompts} of BBH~\cite{suzgun2022challengingbbh}, with only "Q:" and "A:" replaced by "Problem:" and "Solution:" as follows:
+
+
+\begin{MyBox}{}
+
+    Problem:\\
+    \{question\}\\
+    \\
+    Solution:\\
+\end{MyBox}
+
+
+\paragraph{MMLU.} We use the official evaluation metric of MMLU~\cite{hendrycks2020mmlu} with 5-shot. We employ the following task-specific system prompt:
+
+\begin{MyBox}{}
+
+    The following are multiple choice questions (with answers) about \{category\}.
+\end{MyBox}
+
+The corresponding question prompt is structured as follows:
+
+\begin{MyBox}{}
+
+    \{question\}\\
+    Answer:
+\end{MyBox}
+
+\paragraph{MMLU-Redux.} We use the official evaluation metric of MMLU-Redux~\cite{gema2024donewithmmlu} with 5-shot. and employ the following question prompt:
+
+\begin{MyBox}{}
+
+    Answer the question and place the option (A/B/C/D...) inside \textbackslash boxed\{\}.\\
+    \{question\}
+\end{MyBox}
+
+\paragraph{MMLU-Pro.} \label{sec:MMLU_pro_pretrain_evaluation} We follow the official evaluation metric of MMLU-Pro~\cite{wang2024mmlupro} with 5-shot. All evaluations use the following system prompt:
+
+\begin{MyBox}{}
+
+    The following are multiple choice questions (with answers) about \{category\}. Think step by step and then output the answer in the format of "The answer is (X)" at the end.
+\end{MyBox}
+
+The question prompt is structured as follows, with a deliberate trailing space after the final period:
+
+\begin{MyBox}{}
+
+    Question: \{question\}\\
+    Answer: Let's think step by step.
+\end{MyBox}
+
+Notably, we observe that a subset of the original MMLU-Pro dataset (470 out of 12,102 questions) contained an inconsistent leading space before the ground-truth options. We explicitly remove these spaces to mitigate potential formatting bias and ensure evaluation consistency.
+
+\paragraph{HellaSwag.} We use the official evaluation metric of HellaSwag~\cite{zellers2019hellaswag} with 10-shot. We employ the following question prompt:
+
+\begin{MyBox}{}
+
+    Question: \{question\}\\
+    A. \{option\_0\}\\
+    B. \{option\_1\}\\
+    C. \{option\_2\}\\
+    D. \{option\_3\}\\
+    Answer:
+\end{MyBox}
+
+\paragraph{WinoGrande.} We use the official evaluation metric of WinoGrande~\cite{sakaguchi2019winogrande} with 5-shot. The question prompt is structured to present the binary choices clearly:
+
+\begin{MyBox}{}
+
+    Question: \{question\}\\
+    Options:\\
+    A. \{option\_0\}\\
+    B. \{option\_1\}\\
+    \\
+    Answer:
+\end{MyBox}
+
+\paragraph{GPQA.} We use the official evaluation metric of GPQA~\cite{rein2023gpqa} with 5-shot. The question prompt is structured to present the choices clearly:
+
+\begin{MyBox}{}
+\small
+    Question: \{question\}\\
+    Options:\\
+    A. \{option\_0\}\\
+    B. \{option\_1\}\\
+    C. \{option\_2\}\\
+    D. \{option\_3\}\\
+    \\
+    Answer: Let’s think step by step.
+\end{MyBox}
+
+\paragraph{SuperGPQA.} We use the official evaluation metric of SuperGPQA~\cite{du2025supergpqa} with 5-shot. The question prompt follows a Chain-of-Thought (CoT) structure, where each few-shot example includes a step-by-step derivation leading to the final answer:
+
+\begin{MyBox}{}
+
+    Question:\\
+    \{question\}\\
+    \\
+    Answer: Let's think step by step.
+\end{MyBox}
+
+\paragraph{SimpleQA.} We use the official evaluation metric of SimpleQA~\cite{openai2024simpleqa} with 5-shot. As SimpleQA requires open-ended short answers, we employ an LLM-based judgement for evaluation, specifically using gpt-oss-120b\cite{openai2025gptoss120bgptoss20bmodel} as the judge model. The question prompt is formatted as a concise query:
+
+\begin{MyBox}{}
+
+    Question: \{question\} Answer:
+\end{MyBox}
+
+\subsubsection{Mathematics reasoning benchmarks}
+
+\paragraph{GSM8K.} We use the official evaluation metric of GSM8K~\cite{cobbe2021gsm8k} with 8-shot. The question prompt is designed to elicit CoT reasoning by using the following template:
+
+\begin{MyBox}{}
+
+    Q: \{question\}\\
+    A: Let’s think step by step.
+\end{MyBox}
+
+\paragraph{MATH.} We use the official evaluation metric of MATH~\cite{hendrycks2021math} with 4-shot. The question prompt is structured with explicit problem and solution delimiters:
+
+\begin{MyBox}{}
+
+    Problem:\\
+    \{question\}\\
+    \\[\baselineskip]
+    Solution:
+\end{MyBox}
+
+\subsubsection{Coding benchmarks}
+\paragraph{HumanEval.} We use the official evaluation metric of HumanEval\cite{chen2021evaluatinglargelanguagemodels} with 3-shot. The question prompt is structured with three ground-truth examples to provide contextual guidance for code generation:
+
+\begin{MyBox}{}
+\small
+\begin{verbatim}
+# Below are the ground-truth solutions:
+
+def add_two_numbers(a, b):
+""" Given two numbers a and b, return the sum of a and b. """
+    # get the sum of a and b
+    sum_of_a_and_b = a + b
+    return sum_of_a_and_b
+
+def reverse_list(some_list: list) -> list:
+    """ Given a list, return a reversed copy of the list. """
+    new_list = []
+    # iterate over the list
+    for item in some_list:
+        # insert item into new list
+        new_list.insert(0, item)
+    return new_list
+
+def fast_reverse_list(some_list: list) -> list:
+    """ Given a list, return a reversed copy of the list. Be fast! """
+    # use faster built-in reverse
+    some_list.reverse()
+    return some_list
+{question}
+\end{verbatim}
+\end{MyBox}
+
+\paragraph{MBPP.} We follow the official evaluation metric of MBPP\cite{austin2021programsynthesislargelanguage} with 3-shot.
+
+\paragraph{HumanEval+.} We follow the official evaluation metric of HumanEval+~\cite{liu2023evalplus} with 3-shot.
+
+\paragraph{MBPP+.} We use the official evaluation metric of MBPP+~\cite{liu2023evalplus} with zero-shot. We employ a structured instruction prompt that specifies the task requirements and includes a sample test case for alignment:
+
+\begin{MyBox}{}
+
+You are an expert Python programmer, and here is your task: \\
+  \{question\} \\
+  Your code should pass the test: \\
+  \{test\} \\
+  Here is the corresponding code: \\
+  \textasciigrave\textasciigrave\textasciigrave python
+\end{MyBox}
+
+\paragraph{MultiPL-E.} We use the official evaluation metric of MultiPL-E~\cite{cassano2022multipl} with zero-shot. We follow the official test cases to judge the generated code.
+
+\subsubsection{Chinese understanding benchmarks}
+
+\paragraph{C-Eval.} We use the official evaluation metric of C-Eval~\cite{huang2023ceval} and add a 5-shot setting. We employ the following system prompt:
+
+\begin{CJK*}{UTF8}{gbsn}
+\begin{MyBox}{}
+
+    \raggedright
+    你是一个中文人工智能助手，以下是中国关于 \{category\}考试的单项选择题，请选出其中的正确答案。
+\end{MyBox}
+\end{CJK*}
+
+The corresponding question prompt is structured as follows:
+
+\begin{CJK*}{UTF8}{gbsn}
+\begin{MyBox}{}
+
+    \{question\} \\
+    答案：
+\end{MyBox}
+\end{CJK*}
+
+\paragraph{CMMLU.} We use the official evaluation metric of CMMLU~\cite{li2023cmmlu} and add a 5-shot setting. We employ the following system prompt:
+
+\begin{CJK*}{UTF8}{gbsn}
+\begin{MyBox}{}
+
+    \raggedright
+    你是一个中文人工智能助手，以下是中国关于 \{category\}考试的单项选择题，请选出其中的正确答案。
+\end{MyBox}
+\end{CJK*}
+
+The corresponding question prompt is structured as follows:
+
+\begin{CJK*}{UTF8}{gbsn}
+\begin{MyBox}{}
+
+    \{question\} \\
+    答案：
+\end{MyBox}
+\end{CJK*}
+
+\paragraph{C-SimpleQA.}  We use the official evaluation metric and LLM-based judgement protocols of Chinese SimpleQA~\cite{he2024chinesesimpleqa}. We add a 5-shot setting and use gpt-oss-120b\cite{openai2025gptoss120bgptoss20bmodel} as the judge model. We employ the following question prompt:
+
+\begin{CJK*}{UTF8}{gbsn}
+\begin{MyBox}{}
+
+    问题：\{question\} \\
+    答案：
+\end{MyBox}
+\end{CJK*}
+
+
+\subsection{Evaluation Details of Post-Trained Models}
+In this section, we detail the evaluation protocols used to assess the post-trained models across a diverse set of agentic tasks.
+Our evaluations span both code-centric and general-purpose agent settings, covering software engineering, terminal interaction, deep search, research workflows, and real-world tool use.
+We report standardized metrics under carefully controlled environments and inference budgets to ensure fair, stable comparisons across benchmarks.
+
+\subsubsection{Reasoning benchmarks}
+
+\paragraph{CF-Div2-Stepfun.} Recent studies and advanced benchmarks emphasize the critical need to evaluate models on fresh, competition-level problem~\cite{zheng2025livecodebench,anonymous2026autocode}. We evaluate the competitive programming capabilities of our model using a custom CodeForces Div. 2 Benchmark~\footnote{https://huggingface.co/datasets/stepfun-ai/CF-Div2-Stepfun}. The benchmark comprises 53 problems sourced from official CodeForces Div.2 contests held between September 2024 and February 2025. We develop an offline evaluation framework that utilizes a local grading mechanism as an alternative to real-time online submissions. We try to construct test cases similar to the original test cases. Specifically, we first generate enough small-scale test cases for evaluation correctness coverage, then add randomized data for large-scale testing. Finally, we performed adversarial construction of edge cases by analyzing common error patterns and "hacked" submissions from actual users. Some edge cases are also auto-generated by the stress testing technique, which keeps generating countless test cases until one can distinguish failed submissions from correct submissions. To validate the reliability of this benchmark, we run both correct and representative failed submissions selected from the original contests. Our evaluator correctly identifies 100\% of the accepted submissions as "Passed", while 92.45\% of the failed submissions are accurately flagged.
+~\label{cf-div2-step}
+
+\begin{table}[H]
+    \centering
+    \small
+    \setlength{\tabcolsep}{8pt}
+    \begin{tabular}{l ccc c}
+        \toprule
+        & \multicolumn{3}{c}{\textbf{Accuracy (avg@8)}} & \textbf{Codeforces C++} \\
+        \cmidrule(lr){2-4}
+        \textbf{Model} & \textbf{C++} & \textbf{Python} & \textbf{Java} & \textbf{pass@8 Rating} \\
+        \midrule
+        \ourmodel & \textbf{86.1\%} & \textbf{81.5\%} & 77.1\% & \textbf{2489} \\
+        \addlinespace[2pt]
+        Deepseek V3.2 & 81.6\% & 66.5\% & 80.7\% & 2319 \\
+        GLM-4.7 & 74.1\% & 63.0\% & 70.5\% & 2156 \\
+        Kimi K2-Thinking & 67.9\% & 60.4\% & 58.5\% & 1976 \\
+        Minimax-M2.1 & 59.0\% & 46.4\% & 58.0\% & 1869 \\
+        Mimo-V2 Flash & 46.9\% & 43.6\% & 39.6\% & 1658 \\
+        \midrule
+        Gemini 3.0 Pro & 83.5\% & 74.1\% & \textbf{81.6}\% & 2397 \\
+        Claude Opus 4.5 & 72.2\% & 68.4\% & 68.9\% & 2100 \\
+        \bottomrule
+    \end{tabular}
+    \caption{Full evaluation results of variable models in CF-Div2-Stepfun.}
+    \label{tab:codeforces-full}
+\end{table}
+
+We sample 8 responses for each problem and report the average accuracy. The user prompt utilized for this process is:
+
+\begin{MyBox}{}
+
+You are a coding expert. Given a competition-level coding problem, you need to write a \{LANGUAGE\} program to solve it. You may start by outlining your thought process. In the end, please provide the complete code in a code block enclosed with \`{}\`{}\`~\`{}\`{}\`{}.
+\newline
+\{question\}
+\end{MyBox}
+
+The compilation and execution commands for C++, Python, Java are given below:
+
+\begin{MyBox}{}
+\small
+g++ -std=c++20 -fno-asm -fsanitize=bounds -fno-sanitize-recover=bounds --static -O2 -DONLINE\_JUDGE -o code.exe code.cpp
+
+./code.exe
+\end{MyBox}
+
+\begin{MyBox}{}
+\small
+python3 code.py
+\end{MyBox}
+
+\begin{MyBox}{}
+\small
+javac -J-Xmx544m \{JAVA\_CLASS\_NAME\}.java
+
+java -XX:+UseSerialGC -Xmx544m -Xss64m -DONLINE\_JUDGE \{JAVA\_CLASS\_NAME\}
+\end{MyBox}
+
+To maintain consistency with competitive programming norms and avoid the inconsistent overhead associated with JIT "warm-up" periods, we use the standard Python interpreter with a double time limit rather than PyPy\footnote{https://pypy.org/}. We apply this same double time limit to all Java submissions.
+
+While the Table~\ref{tab:codeforces-full} reports raw accuracy, we recognize that problem difficulty varies significantly. Therefore, rating scores provide more robust metrics. Although frameworks like CodeELO~\cite{quan2025codeelobenchmarkingcompetitionlevelcode} can calculate competitive ratings, current top-tier models perform so effectively in Division 2 contests that their ratings may result in statistical outliers. Furthermore, we adopt a simplified rating calculation that disregards submission time penalties by assuming all solutions are submitted at the onset of the contest. While this approach deviates from empirical competitive scenarios and may result in ratings that are not directly comparable to human participants, it provides a standardized benchmark for consistent cross-model comparison.
+
+\paragraph{LiveCodeBench-v6.} We use the official evaluation method of LiveCodeBench\cite{jain2024livecodebench}. We employ the following system prompt:
+
+\begin{MyBox}{}
+
+    You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests.
+\end{MyBox}
+
+The corresponding question prompt is structured as follows:
+
+\begin{MyBox}{}
+
+    \#\#\# Question: \\
+    \{question\} \\
+    \#\#\# Format: You will use the following starter code to write the solution to the problem and enclose your code within delimiters. \\
+    \textasciigrave\textasciigrave\textasciigrave{} python \\
+    \{starter\_code\} \\
+    \textasciigrave\textasciigrave\textasciigrave\\
+    \#\#\# Answer: (use the provided format with backticks)
+\end{MyBox}
+
+
+\paragraph{AIME 2025.} We use the official evaluation method of AIME 2025\cite{AIME25} with repeat@64. We employ the following question prompt:
+
+\begin{MyBox}{}
+
+    Answer the question and place the answer inside \textbackslash boxed \{\} with MathTeX format. \\
+    \{question\}
+\end{MyBox}
+
+\paragraph{HMMT 2025 Feb./Nov.} We use the official evaluation method of HMMT 2025~\cite{hmmt25} with repeat@64. We employ the following question prompt:
+
+\begin{MyBox}{}
+    Answer the question and place the answer inside \textbackslash boxed \{\} with MathTeX format. \\
+    \{question\}
+\end{MyBox}
+
+\paragraph{IMO-AnswerBench.} We use the official evaluation method of IMO-AnswerBench\cite{luong2025towards} with repeat@64. We employ the following question prompt:
+
+\begin{MyBox}{}
+
+    Answer the question and place the answer inside \textbackslash boxed \{\} with MathTeX format. \\
+    \{question\}
+\end{MyBox}
+
+
+\paragraph{MMLU-Pro.} We use the official evaluation method of MMLU-Pro~\cite{wang2024mmlupro}. The processing of dataset remains consistent with our pre-training MMLU-Pro evaluation methodology (see Appendix \ref{sec:MMLU_pro_pretrain_evaluation} for details).
+
+\begin{MyBox}{}
+
+Answer the question and place the option (A/B/C/D...) inside \textbackslash boxed\{\}.\newline
+\newline
+\{question\}
+\end{MyBox}
+
+
+\paragraph{GPQA-Diamond.} We use the official evaluation method of GPQA-Diamond~\cite{rein2023gpqa}. We employ the following question prompt:
+
+\begin{MyBox}{}
+
+Answer the question and place the option (A/B/C/D...) inside \textbackslash boxed\{\}.\newline
+\newline
+\{question\}
+\end{MyBox}
+
+\paragraph{\text{HLE}$_\text{text}$.} We use the official evaluation metric and LLM-based judgement protocols of HLE. We use gpt-oss-120b~\cite{openai2025gptoss120bgptoss20bmodel} as the judge model.
+
+\subsubsection{Code Agent benchmarks}\label{sec:code-agent}
+
+\paragraph{SWE-Bench.}
+SWE-Bench Verified~\cite{swe_verified} is a high-quality subset of the original SWE-bench dataset, consisting of 500 software engineering tasks rigorously validated by human expert developers to ensure reliable and accurate evaluation. SWE-Bench Multilingual extends the original benchmark to a diverse set of 300 real-world software engineering tasks across 9 programming languages.
+
+We test the software engineering agent ability of \ourmodel on SWE-Bench Verified and SWE-Bench Multilingual using our internal agent infrastructure, which is built upon the described session-router architecture. For each evaluation instance, we provision a containerized session orchestrated via Kubernetes. We then perform environment initialization specific to SWE-Bench, which includes removing future commits to prevent data leakage, as well as configuring network proxies and critical system settings.
+Regarding the agent scaffold, we adopted the OpenHands~\cite{wang2024openhands} CodeAct Agent framework, which is widely used in the research community. We enabled a default suite of four tools: execute\_bash, str\_replace\_editor, finish, and think. The max interactive turns is set to 350.
+
+Given the resource-intensive nature of compiled languages, we allocate 12GB of memory for the multilingual setting, whereas the verified instances are restricted to a 4GB limit. In evaluations, the tool execution timeout is set to 1200s, and the model inference parameters are: temperature=1, top-p=0.95. Following the above settings, \ourmodel reach 74.4\% on SWE-Bench Verified, and 67.4\% on SWE-Bench Multilingual benchmark with an average score of 4 repeat of runnings. We also cross-evaluate \ourmodel on other popular agent scaffolds: SWE-Agent~\cite{yang2024swe} with the original agent pipeline settings achieving 74.2\% accuracy on SWE-Bench Verified, and standard Claude Code~\footnote{https://github.com/anthropics/claude-code} environment scoring 72.0\% with an extended time limit of 4 hours for each instance and no time limit for single tool execution.
+
+\paragraph{Terminal-Bench 2.0.}
+
+We test the Terminal-Bench benchmark~\cite{terminalbench2025} within remote task-independent containers. We limit the container memory to 16GB. We have deployed an internal Artifactory repository and update the default package sources for all Docker containers. During session creation and dependency installation of the testing phases, the system will retry multiple times if an error occurs. To streamline the system-agent interaction, we modify the Terminus 2 framework so that it automatically interrupts timed-out commands and prevents subsequent commands in the same round from executing, returning a timeout warning to the agent. Accordingly, we modify the command duration control part of the original system prompt:
+
+\begin{MyBox}{}
+
+Keystroke duration sets the command hard timeout. The system automatically interrupts timed-out commands and prevents subsequent commands in the same round from executing. You can simply continue with your next round - no special action is required.
+\end{MyBox}
+
+During inference, we cap the model's single-turn output at 64k and the maximum context window at 256k for all interactions. The thinking process will be preserved in the multi-round history. If the model output exceeds the 256k context window limit, we execute a pruning context management: Keep the problem statement and the last 50\% of history before retrying. We use the inference parameters of top-p=0.95 and temperature=1. The interaction protocol is primarily conducted using XML-formatted structured responses. The agent is limited to 200 interaction rounds and will proceed directly to the testing phase once this limit is reached. The total time limit for interaction and testing is 6 hours.
+
+To ensure consistency, we verify and refine each task's checker against its problem statement~\footnote{https://huggingface.co/datasets/zai-org/terminal-bench-2-verified}, which improved overall accuracy by approximately 1.5\%. Each task is executed across 8 trials. Notably, 88.6\% of successful trajectories are completed within 30 interactions. The final pass@8 stands at 67/89, with an avg@8 of 50.98\%. Our agent achieves a 100\% success rate across all 8 trials in 23 out of 89 tasks. In the successful trajectories, 9.41\% of the runs triggered history pruning to manage context limits.
+
+\begingroup
+\begin{table}[H]
+    \centering
+    \small
+    \begin{tabular}{l c c c c c}
+        \toprule
+        \rowcolor{header_gray}
+        \textbf{Setting} & \textbf{Max Output} & \textbf{Max Round} & \textbf{Timeout} & \textbf{Context Management} & \textbf{Avg@8} \\
+        \midrule
+        Baseline & 64k & 200 & 6h & \checkmark & \textbf{50.98\%} \\
+
+        Limit 16k & 16k & 200 & 6h & \checkmark & 48.03\% \\
+        Limit 16k w/o Pruning & 16k & 200 & 6h & $\times$ & 45.22\% \\
+
+        Rounds 100 & 64k & 100 & 6h & \checkmark & 50.42\% \\
+        Timeout 2h & 64k & 200 & 2h & \checkmark & 49.72\% \\
+        \bottomrule
+    \end{tabular}
+    \caption{Ablation study of inference constraints on Terminal-Bench 2.0.}
+    \label{tab:ablation_study}
+\end{table}
+\endgroup
+
+The ablation study shows that Limit 16k causes the largest performance drop because the model’s long reasoning for complex tasks often exhausts the token limit before it can output the terminal commands. The further decline to 45.22\% when disabling context management under the 16k limit. Meanwhile, Rounds 100 has minimal impact as most tasks finish early. The Timeout 2h decrease reflects that certain tasks involving model training, heavy compilation, or complex environment configuration require more time to complete.
+
+
+\subsubsection{General Agent benchmarks}
+
+\paragraph{Deep Search.}
+
+We evaluate our agent's deep search capabilities on multiple benchmarks \ (e.g, \textbf{BrowseComp~\cite{wei2025browsecomp}, BrowseComp-ZH~\cite{zhou2025browsecompzhbenchmarkingwebbrowsing}, GAIA~\cite{mialon2023gaiabenchmarkgeneralai}, xbench-DeepSearch~\cite{chen2025xbench}}). The results reported in Table~\ref{fig:post-training-main-table} are based on the avg@3 metric; GPT-5.2 xHigh uses avg@1. The agent is equipped with a core toolset including:
+\begin{itemize}
+    \item \textbf{search}: Executes multiple search queries in parallel.
+    \item \textbf{visit}: Analyzes the content of the webpage to answer specific questions based on LLM.
+    \item \textbf{google\_scholar}: Search for academic articles and technical literature.
+    \item \textbf{python\_interpreter}: Runs Python code for calculations and data analysis.
+     \item \textbf{file}: Downloads and saves files from direct URLs.
+\end{itemize}
+
+During inference, we employ a 256k-token context window with no limit on the maximum generation length. Inference is conducted with top-p = 0.95, temperature = 1.0, and presence penalty = 1.1, allowing for an execution budget of up to 400 steps.
+
+The detailed system prompts for the agent and the LLM judge are consistent with the configurations provided in the GitHub repository associated with~\cite{hu2025stepdeepresearchtechnicalreport}.
+
+\paragraph{BrowseComp (w. Ctx Manage).}
+
+The BrowseComp (w. Ctx Manage) result of 69.0 reported in Table~\ref{fig:post-training-main-table} corresponds to the discard-all methodology evaluated on the full BrowseComp dataset. This approach, same as DeepSeek V3.2~\cite{deepseekai2024deepseekv32}, is triggered when the context length exceeds predefined thresholds, at which point the agent discards its entire context and reinitializes the operational loop. Under a maximum iteration constraint of 1000 steps, this strategy employs a context length threshold of 72k tokens for BrowseComp and 41k tokens for BrowseComp-ZH.
+
+We also evaluate various context management strategies on a subset of 200 instances from BrowseComp, including Summary, Keep-first\&last$K$, Discard-all, and Multi-agent orchestration. As shown in Table~\ref{tab:context_manager}, our model demonstrates robust adaptability across these diverse paradigms. Among single-agent strategies, Discard-all yields a competitive $66.0\%$ accuracy. We posit that Discard-all functions as a test-time pass@$k$ strategy, forcing the model to re-reason from scratch until a self-verified path is found. The performance follows a clear hierarchy: Multi-agent ranks highest by leveraging a master agent to decompose tasks and dispatch specialized agents for parallel reasoning, followed by Discard-all, Keep-first\&last$K$ and Summary —closely aligns with the increase in real steps. This alignment reflects a direct trade-off between inference cost (number of steps) and accuracy, suggesting that intensive context management effectively converts increased computation into superior performance.
+
+\begin{table}[h]
+\centering
+
+\begin{tabular}{lcc}
+\toprule
+\rowcolor{header_gray}
+\textbf{Method} & \textbf{Accuracy (\%)} & \textbf{Real Steps} \\
+\midrule
+Step 3.5 Flash & 49.5 & 86 \\
++ Summary & 57.0  & 131 \\
++ Keep-first\&lastK & 58.0  & 244 \\
++ Discard-all & 66.0  & 302 \\
++ Multi-Agent & 68.5 & 721 \\
+\bottomrule
+\end{tabular}
+\caption{Evaluation results of context manager methods.}
+\label{tab:context_manager}
+\end{table}
+
+\paragraph{\textsc{ResearchRubrics}.}
+
+To evaluate deep research capabilities, we utilize the \textsc{ResearchRubrics}~\cite{sharma2025researchrubrics} benchmark. This dataset comprises 101 domain-diverse research tasks, each accompanied by 20--43 expert-written, fine-grained scoring criteria that assess factual accuracy, reasoning soundness, and clarity. We benchmark performance against two representative system families: commercial agent systems and ReAct agents.
+
+For commercial agents, we collect reports via their official web interfaces (captured Dec 2--15, 2025) under default configurations. As shown in Table~\ref{tab:commercial_systems}, the leading commercial system (Gemini DeepResearch) achieves an aggregated score of 63.69.
+
+\begin{table}[h]
+    \centering
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabular}{lc}
+        \toprule
+        \rowcolor{header_gray}
+        \textbf{Agent System} & \textbf{Score} \\
+        \midrule
+        Gemini DeepResearch & 63.69 \\
+        OpenAI DeepResearch & 60.67 \\
+        Kimi Researcher & 53.67 \\
+        MiniMax Agent Pro & 51.85 \\
+        Qwen DeepResearch & 49.24 \\
+        \bottomrule
+    \end{tabular}
+    \caption{Performance of Commercial Agent Systems on the \textsc{ResearchRubrics} benchmark.}
+    \label{tab:commercial_systems}
+\end{table}
+
+For ReAct agents, detailed performance comparisons are presented in Table~\ref{fig:post-training-main-table}. Our model achieves a score of \textbf{65.3}, surpassing the complex, proprietary commercial baselines. Notably, when evaluating Gemini 3.0 Pro within our standardized ReAct framework, we observe a score of 50.1. We attribute this performance gap to insufficient search depth when addressing open-ended research questions; the model tends to rely on internal parametric knowledge rather than perform extensive external retrieval. Consequently, the generated reports lack comprehensiveness, failing to adequately cover the user's implicit criteria.
+
+We standardize the execution environment for ReAct agents with a maximum of 30 reasoning turns and a per-turn output limit of 16k tokens. For inference parameters, other API-based models use their default settings, and our model is configured with a temperature of $1$ and top-p=$0.95$. All outputs are subsequently appraised by an LLM judge using a ternary grading for each criterion. To support the end-to-end research workflow, our ReAct framework provides access to the following suite of tools:
+
+\begin{itemize}
+    \item \textbf{batch\_web\_surfer}: For concurrent web searching and multi-page browsing.
+    \item \textbf{file}: For robust file operations, including reading, writing, and iterative editing.
+    \item \textbf{file\_parser}: For converting files into Markdown format.
+    \item \textbf{shell}: For interactive command execution and environment interaction.
+    \item \textbf{todo}: For dynamic task state management and tracking.
+    \item \textbf{tmux}: For simulating a multiplexed terminal environment with persistent sessions and scrollback history.
+\end{itemize}
+
+\paragraph{$\tau^2$-Bench.}
+
+$\tau^2$-Bench\cite{tau2bench2025} is an agentic benchmark that evaluates general tool-use capability in three customer service domains: airline, retail, telecom. We evaluate Step 3.5 Flash using the official settings in the original codebase. Specifically, we use the default LLM agent framework and set the temperature to 1.0, top-p to 0.95, max sequence length to 256K. The user model is set to GPT-4.1 with 0.0 temperature to ensure a stable interaction during evaluation. For the airline domain, since it has incorrect ground truth answers, we use the fixed version from Claude Opus 4.5 to ensure evaluation reliability~\footnote{https://github.com/sierra-research/tau2-bench/pulls/chrisgorgo}. For the retail and telecom domains, we also follow Claude Opus 4.5 to include a general prompt addendum to the user prompt to avoid failure modes from the user ending the interaction incorrectly~\footnote{https://github.com/anthropics/model-cards/tree/main/claude-opus-4-5-20251101/tau2}. We report an average score of 8 runs to ensure stable evaluation results.
+
+
+\subsubsection{General benchmarks}
+
+\paragraph{Arena-Hard-v2.0.} We use the official evaluation metric of Arena-Hard-v2.0~\cite{arenahard2024} and use GPT-4.1~\cite{openai2024gpt4technicalreport} as the judge model.
+
+\paragraph{MultiChallenge.} We use the official evaluation metric of MultiChallenge~\cite{sirdeshmukh2025multichallengerealisticmultiturnconversation} with o3-mini~\cite{o3-mini} as the judge model. This follows findings from the GPT-5\cite{gpt5} release that GPT-4o~\cite{openai2024gpt4technicalreport} frequently mis-scores complex responses, leading to underestimated results.
+
+\paragraph{IFBench.} We use the official evaluation method of IFBench~\cite{pyatkin2025generalizing}.
+
+
+\subsubsection{Long Context benchmarks}
+
+\paragraph{LongBench v2.} We use the official evaluation method of LongBench v2~\cite{bai2024longbenchv2}.
+
+\paragraph{MRCR-8needle.} For MRCR-8needle~\cite{vodrahalli2024michelangelo} benchmark, we report the Area Under Curve (AUC) metric, following the protocol established by ContextArena~\footnote{https://contextarena.ai/}. Specifically, we use the \textbf{AUC@128k} metric, which provides a single holistic score summarizing performance across context lengths up to 131,072 tokens.
+
+The AUC is calculated by plotting the average retrieval accuracy for each context bin (ranging from 8k to 128k) against the bin's maximum context length. We apply the trapezoidal rule on a linear scale to measure the area under the resulting curve, which is then normalized by the total context width (128k minus the initial bin size) to yield a percentage score between 0\% and 100\%. This metric effectively penalizes performance degradation as difficulty increases with longer context sequences.
+
+\paragraph{FRAMES-Oracle.} We use the official evaluation metric of FRAMES\cite{krishna2025fact}. Since our focus is on long-context capabilities, we specifically report results for the \textbf{Oracle Prompt} subset. In this setting, the model is provided with the question alongside all ground-truth Wikipedia articles used during human annotation. This configuration serves as an upper bound for model performance, simulating a perfect retrieval system that delivers all relevant context to the model.
+
+\paragraph{RepoQA.} We use the official evaluation method of REPOQA~\cite{liu2024repoqaevaluatinglongcontext}.
+
+\input{src/internal-benchmark}

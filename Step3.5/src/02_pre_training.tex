@@ -1,0 +1,166 @@
+
+
+\section{预训练与中期训练}
+\label{sec:training_pre_mid}
+
+\paragraph{概述。}
+本节总结我们的\textbf{预训练与中期训练}流程，重点强调大规模稀疏 MoE 训练的实际稳定性约束。
+我们首先介绍训练稳定性诊断与缓解方法（第~\ref{sec:stability} 节），随后给出预训练与中期训练的课程设计，包括数据混合、训练日程与关键超参数（第~\ref{sec:training_curriculum} 节）。
+
+
+\subsection{训练稳定性}
+\label{sec:stability}
+
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.\linewidth]{src/img/pdf/stepboard_lm_loss_merged.pdf}
+    \caption{\ourmodel 的逐步训练损失曲线，\textbf{未进行平滑或子采样}。全程仅观察到 \textbf{一次}孤立损失峰值。为清晰起见，省略了初始训练步。标记 \textbf{\large \ding{172}}--\textbf{\large \ding{174}} 分别表示 batch size 增至 8,192、12,288 与 16,384。标记 \textbf{\large \ding{175}} 表示对 meta token 启用损失掩码（详见附录~\ref{app:meta}）。}
+    \label{fig:loss-fig}
+\end{figure}
+
+
+训练稳定性是大规模稀疏 MoE 预训练的\textbf{第一优先级}。
+为使稳定性可操作，我们基于轻量级异步指标服务器与微批级连续日志构建了完整的可观测与诊断栈（见第~\ref{sec:log} 节）。
+该基础设施为优化器级与专家级信号提供细粒度可视性，从而系统缓解大规模 MoE 训练的重复性失效模式。
+
+实践中，我们发现三类主导不稳定性，指标栈可帮助尽早发现并精确定位：
+(i) 由 Muon~\cite{jordan2024muon} 在低精度下对极分解迭代的数值敏感性引起的瞬时损失峰值与偶发随机数值爆炸；
+(ii) 即便路由分配统计看似健康也可能出现的专家侧塌陷（“死专家”）；
+(iii) 仅限于少量专家的局部激活爆炸。
+
+在这些诊断指导下实施缓解措施后，预训练损失在全程保持平滑，仅出现一次损失峰值。图~\ref{fig:loss-fig} 展示了学习率退火前的完整曲线。
+
+
+\subsubsection{Muon 的数值敏感性}
+
+Muon 通过 Newton--Schulz（NS）迭代~\cite{bernstein2024oldoptimizernewnorm} 近似半正交更新方向。早期实验显示，采用收敛更快的正交化近似可带来稳定、适度的损失下降。因此我们使用 {Polar Express}~\cite{amsel2025polarexpress} 迭代，并固定 $T{=}6$ 步，以在优化质量与吞吐之间平衡。
+
+然而，即便采用推荐的安全缩放~\cite{amsel2025polarexpress}，我们仍偶尔观察到尖锐且不可恢复的损失峰值。该峰值具有非确定性（通常可通过从相邻 checkpoint 继续训练而避免），暗示潜在数值病理。仿真显示，\texttt{bfloat16} 的 Polar Express 在某些更新统计下会因加法累计误差极少数地产生极端中间异常值。因此我们仅将 Polar Express 迭代（状态与中间量）转换为 \texttt{float16}，其余训练保持混合精度。修改后该峰值不再出现。
+
+
+\subsubsection{超越路由崩溃的专家塌陷}
+
+我们此前的 Step-3~\cite{step3blog} 报告 MoE 训练可能出现“死专家”，通常指专家长时间获得极少 token 分配，从而几乎没有有效梯度信号。在进一步研究中，我们发现即便路由分配保持稳定，专家塌陷仍可表现为\emph{专家侧}病理，即专家激活消失、专家参数范数停滞或衰减。
+
+我们观察到两项因素尤为关键：(i) 路由专家聚合需要显式缩放。当引入共享专家时，必须引入显式缩放因子来校准共享专家与路由专家的相对贡献。较小模型可能隐式学会此平衡，但大模型在自校准上不可靠。不匹配会抑制路由专家的有效贡献，即便路由频率看似健康。
+(ii) \textbf{细粒度稀疏下的微批均衡可能过于严格。} 对于细粒度稀疏 MoE 设计，微批级负载均衡约束（如 Switch 风格路由~\cite{fedus2021switchtransformers}）可能过于苛刻。正如 \cite{qiu2025demonsdetail} 所分析的，微批 LBL 可能引发过度的跨专家竞争并阻碍有效专精。
+
+
+因此我们更倾向于更大范围的均衡（\eg，全局批统计）~\cite{qiu2025demonsdetail,yang2025qwen3} 或基于观测负载的无损偏置调整~\cite{wang2024lossfreebalancing,deepseek2024deepseekv3}。
+实践中，路由分配统计通常稳定，并非专家塌陷的敏感指标。
+我们建议监控\textbf{专家侧}信号，包括每个专家的激活范数（\eg，MoE FFN 中间层的 RMS/均值范数）与参数范数（\eg，专家投影矩阵的 Frobenius 范数）。
+当部分专家的激活/更新趋近于零而中位数保持稳定（\eg，最小值与中位数之比下降）时，可作为“专家死亡”的早期预警。
+
+
+\definecolor{weightblue}{HTML}{aec9f7}
+\definecolor{basegray}{HTML}{777776}
+\definecolor{actblue}{HTML}{006CF4}
+
+
+\subsubsection{MoE 层的局部激活爆炸}\label{sec:clip}
+随着主训练阶段专家专精逐渐成熟，我们在更深的 MoE 层观察到局部稳定性病理。具体而言，少量专家（常常每层仅一到两个）的激活\textbf{范数}快速增长，而同层大多数专家保持良好状态。这种差异导致激活分布呈重尾：专家激活范数的中位数稳定，但最大值爆炸，显著增加数值溢出和下游不稳定风险。
+
+
+\noindent 图~\ref{fig:moe_clip_triptych} 展示了该失效模式。\textbf{值得注意的是，这种内部不稳定完全被训练损失掩盖}，即便面板 (a) 中范数爆炸，损失几乎无变化。我们通过监控每个专家 FFN 输出范数的离散度来跟踪该现象。如面板 (b) 与 (c) 所示，中间层（\eg，第 38 层）分布稳定，而最终层（\ie，第 45 层）最大值（实线）与中位数（虚线）之间的差距迅速扩大。这表明激活能量危险地集中在深层网络中的少数“离群”专家上。为缓解该问题，我们评估了两种干预：
+
+\begin{itemize}
+    \item \textbf{专家投影权重裁剪：} 约束 MoE FFN 专家投影矩阵的范数。对每个专家投影矩阵 $W$，若其最大激活范数 $\max_x\lVert Wx \rVert$ 超过阈值 $\tau$，则按 $W \leftarrow W \cdot \frac{\tau}{\max_x\lVert Wx \rVert}$ 缩放。该方法类似注意力中的 MuonClip~\cite{kimi_k2}，但我们在 checkpoint 上离线裁剪而非在线裁剪。
+    \item \textbf{专家内部激活裁剪：} 在输出投影前对 MoE FFN 中间激活进行逐元素裁剪，方法同 \cite{openai2025gptoss120bgptoss20bmodel}。
+\end{itemize}
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\linewidth]{src/img/pdf/moe_clip_triptych.pdf}
+\caption{{专家激活稳定性与缓解策略分析。}
+在面板 (b)--(c) 中，实线表示专家输出范数最大值，虚线表示中位数。
+{(1) 深度相关不稳定：} 不同方法的训练损失几乎一致（面板 a），中间层保持稳定（\eg，面板 b 的第 38 层），但最终层（\ie，面板 c 的第 45 层）在\textit{无裁剪}基线中出现灾难性范数爆炸。
+{(2) 缓解：} \textit{权重裁剪}仅延缓爆炸，而 \textit{激活裁剪}能有效约束最大范数，确保各层稳定。
+\label{fig:moe_clip_triptych}}
+\end{figure}
+
+\noindent 尽管图~\ref{fig:moe_clip_triptych}(a) 中不同缓解策略的训练损失几乎无差异，最大值与中位数之比却能可靠揭示潜在不稳定。如面板 (b) 与 (c) 所示，激活裁剪可确保内部范数稳定，而仅使用权重裁剪无法防止离群专家再次出现。因此，我们将每个专家激活范数的最大值/中位数比作为监控训练稳定性的关键且必要指标。
+
+激活爆炸由多种因素驱动。我们观察到高频双字（bi-gram）可能触发专家专精。在使用 pre-norm~\cite{radford2019language,xiong2020layer} 时，单个专家可无限放大输出并主导最终输出范数，导致近确定性预测行为。SwiGLU~\cite{shazeer2020gluvariantsimprovetransformer} 加剧了这一风险：门控分支与上投影分支强对齐会产生稀疏且极端幅度的激活。Muon 通过放大持续的低秩更新进一步加速塌陷。详细分析见附录~\ref{app:clip}。
+
+
+\subsection{训练课程}
+\label{sec:training_curriculum}
+
+训练从广泛的开放域覆盖逐步走向更强的智能体与长上下文专精。我们先在 {4k} 上下文上进行广域开放域预训练以建立通用能力，然后在将上下文扩展到 {32k} 的同时，将数据混合\textbf{退火}到更高质量知识与更多软件开发数据（代码、PR、issue 与提交）。
+随后，中期训练阶段将上下文窗口从 32k 扩展至 128k，以强化长程推理并改善下游后训练与智能体工作负载的初始化。
+总体而言，我们在预训练中使用约 17.6T token，在中期训练中使用约 750B token。
+
+\subsubsection{数据混合}
+\label{sec:training_data}
+
+\noindent 我们的语料结合了通用开放域数据与面向智能体的数据。
+下文概述关键来源，更多细节见附录~\ref{sec:step-data}。
+
+
+\paragraph{通用知识数据。}
+为支撑广泛的世界知识，我们构建了 \textbf{StepCrawl}（见附录~\ref{subsubsec:stepcrawl}），这是一个超越标准 Common Crawl~\cite{commoncrawl} 的自研爬取与整理基础设施，可从网页（HTML）与书籍/文档类来源（ePub/PDF）规模化采集数万亿高质量 token。
+所有内容均经过多阶段质量过滤、站点/类别标注、去重与清洗。
+
+
+\paragraph{代码数据。}
+强大的代码能力是智能体模型的基础。
+我们的代码语料使用改进的 OpenCoder~\cite{huang2025opencoderopencookbooktoptier} 流水线整理与精炼。
+我们将过滤策略从零容忍放宽至每篇文档允许 0--6 次启发式违规（附录~\ref{sec:pure_code}），在质量与多样性之间平衡，并在退火与中期训练中上采样代码相关数据以增强智能体编程能力。
+
+\paragraph{PR/Issue/Commit 数据。}
+为更好匹配真实软件工程流程，我们从 GitHub 星标 10+ 的仓库中整理了全面的 PR/Issue/Commit 数据集（附录~\ref{sec:pr_issue_data}）。
+其中包括：(1) 经过 \texttt{git diff} 验证的\textbf{基础数据}（并与基准去重~\cite{jimenez2024swebench,yang2025swesmith}）；
+(2) 基于 PR 讨论与提交、使用 Agentless 风格模板~\cite{xia2024agentless} 生成的\textbf{PR 对话数据}，用于文件定位与代码修复；以及
+(3) 用于中期训练与后训练的衍生软件工程语料。
+
+\paragraph{工具使用与推理数据。}
+为提升工具使用鲁棒性与多步推理能力，我们加入覆盖数学/代码/科学/通识的合成与半合成数据，以及面向搜索智能体、SWE 智能体与工具执行的领域样本。
+在中期训练中，我们进一步引入长上下文样本（自然长文档与长形式合成任务），以强化长上下文规划与推理。
+
+
+\subsubsection{训练日程}
+\label{sec:schedule}
+
+\paragraph{预训练日程。}
+预训练包含两个阶段：
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{预训练阶段 1：开放域预训练}（{14.6T} token，{4k} 上下文）。
+    进行广泛开放域训练，以最大化覆盖面与基础能力。
+
+    \item \textbf{预训练阶段 2：退火 + 长上下文初始化}（{3T} token，{4k 到 32k} 上下文）。
+    我们将数据混合退火到以代码与 PR/Issue/Commit 为中心的来源，同时提高高质量知识与高推理密度样本的比例。
+    该阶段先在 4k 上下文训练 {2T} token，随后在相同退火混合下切换到 32k 上下文训练 {1T} token，以初始化长上下文训练。
+
+\end{enumerate}
+
+\paragraph{中期训练日程。}
+中期训练同样包含两个阶段：
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{中期训练阶段 1：32k 专精}（{386B} token，{32k} 上下文）。
+    为缓解分布漂移并稳定专精，我们回放预训练中的 {81B} token（21\%），同时强调软件工程师与工具使用相关混合。
+
+    \item \textbf{中期训练阶段 2：长上下文专精}（{364B} token，{128k} 上下文）。
+    我们保留 {10.5B} 回放 token，并进一步通过合成长程推理与自然长文档（从预训练数据中选择长度 $>32$k 的样本），加上面向代码智能体、搜索智能体与工具使用的领域数据，强化长上下文能力。
+\end{enumerate}
+
+
+\subsubsection{超参数}
+\label{sec:hyperparams}
+
+\paragraph{预训练超参数。}
+预训练全程使用 Muon 优化器~\cite{jordan2024muon}，权重衰减设为 0.1，梯度裁剪设为 1.0。
+学习率在前 2{,}000 步线性从 0 预热至 $2.5\times10^{-4}$，随后在\textbf{预训练阶段 1} 内采用余弦衰减至 $5\times10^{-5}$。
+在\textbf{预训练阶段 2} 中，我们在 4k 部分（2T token）对学习率从 $5\times10^{-5}$ 进行二次余弦衰减至 $2\times10^{-5}$，并在 32k 部分（1T token）将学习率固定为 $2\times10^{-5}$。
+全局 batch size 在前 400B token 内从 4096 逐步提升至 16384，并在后续训练保持 16384；在退火的 32k 部分设为 2k。
+MTP 损失权重在\textbf{预训练阶段 1} 设为 0.3，在\textbf{预训练阶段 2} 设为 0.1，遵循~\cite{deepseek2024deepseekv3}。
+对于无损负载均衡，偏置更新率在前 14.6T token 设为 0.001，并在退火期间衰减至 0.0；同时全程应用系数为 0.001 的 EP 组均衡损失。
+RoPE~\cite{su2024roformer} 设置为：在 4k 训练期间全注意力与 SWA 均使用 $\theta=10{,}000$；在退火的 32k 部分，仅对全注意力设置 $\theta_{\mathrm{Full}}=1{,}000{,}000$，并保持 $\theta_{\mathrm{SWA}}=10{,}000$。
+
+\paragraph{中期训练超参数。}
+中期训练继续使用 Muon~\cite{jordan2024muon}。
+我们冻结 MoE 路由器权重，禁用 EP 组均衡损失，并将 MTP 损失权重固定为 0.1（两阶段一致）。
+学习率在前 3\% 迭代中从 0 预热至 $2\times10^{-5}$，在\textbf{中期训练阶段 1} 保持不变，在\textbf{中期训练阶段 2} 衰减至 $7.3\times10^{-6}$。
+在 RoPE 的选择性缩放中，\textbf{中期训练阶段 1}（32k）设 $\theta_{\mathrm{Full}}=1{,}000{,}000$，\textbf{中期训练阶段 2}（128k）提升至 $\theta_{\mathrm{Full}}=5{,}000{,}000$，而 $\theta_{\mathrm{SWA}}=10{,}000$ 在中期训练全程保持不变~\cite{xiong2024effective}。
+

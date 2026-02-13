@@ -1,0 +1,468 @@
+\input{sections/related_work}
+
+\section{Retrieval Scoring and Sparsification Setup}
+\label{appendix:preliminary_settings}
+In this section, we provide a detailed description of the retrieval head identification and the progressive sparsification strategy mentioned in Section~\ref{subsec:deployment_sparisity}.
+
+\subsection{Retrieval Score Calculation}
+Following the methodology proposed by Retrieval Head~\citep{wu2024retrieval}, we identify and rank attention heads based on their ability to retrieve specific information from long contexts.
+We employ the Needle-in-a-Haystack probing method using the Llama-3.1-8B-Instruct~\citep{grattafiori2024llama} model, where specific key information (the ``needle'') is inserted into a long context (the ``haystack'').
+
+For a given attention head $h$ in layer $\ell$, denoted as $H_{\ell,h}$, we calculate its Retrieval Score ($S_{\ell,h}$) by measuring the attention mass allocated to the needle tokens.
+Formally, let $s$ be the input sequence length, $\mathcal{O}^{(\ell, h)} \in \mathbb{R}^{s \times s}$ be the attention matrix, and $\mathcal{I}_{needle}$ be the set of indices corresponding to the needle tokens. The score is computed as:
+\begin{equation}
+    S_{\ell,h} = \frac{1}{|\mathcal{D}|} \sum_{x \in \mathcal{D}} \sum_{j \in \mathcal{I}_{needle}} \mathcal{O}^{(\ell, h)}_{T, j}
+\end{equation}
+where $\mathcal{D}$ represents the validation dataset, and $\mathcal{O}^{(\ell, h)}_{T, j}$ denotes the attention weight from the last token (query position $T$) to the needle position $j$.
+A higher $S_{\ell,h}$ indicates that the head frequently and strongly activates on relevant information in long contexts.
+
+\subsection{Progressive Sparsification Strategy}
+Based on the computed scores $S_{\ell,h}$, we rank all $L \cdot H$ attention heads across the model in descending order.
+As defined in the main text, the \textbf{Model Sparsity Ratio ($\Omega_{\mathrm{MSR}}$)} represents the proportion of heads converted to local attention.
+
+To simulate the varying levels of sparsity reported in our experiments (e.g., $\Omega_{\mathrm{MSR}} = 20\%$), we employ a thresholding mechanism:
+\begin{enumerate}
+    \item We determine the number of heads to preserve as Full Attention (FA) via $k = \lfloor (1-\Omega_{\mathrm{MSR}}) \cdot (L \cdot H) \rfloor$.
+    \item The top-$k$ heads with the highest retrieval scores are retained as \textbf{Retrieval Heads} (keeping FA) to ensure global information integration.
+    \item The remaining heads (the bottom ranked ones) are replaced with \textbf{Streaming Sparse Attention (SSA)} heads.
+\end{enumerate}
+\input{tables/preliminary}
+
+
+\input{tables/hyperparameters}
+
+\section{Implementation Details}
+\label{appendix:implementation_details}
+
+In this section, we provide a comprehensive overview of the training configurations, baseline implementation details, and system-level optimizations tailored for efficient long-context processing.
+
+\subsection{Training Configuration and Hyperparameters}
+\label{appendix:train_setting}
+
+\paragraph{Model Architecture.}
+We validate the scalability of our approach across diverse model sizes, ranging from lightweight architectures like Qwen3-4B to widely-adopted mid-class models such as Qwen3-8B~\citep{yang2025qwen3technicalreport} and Meta-Llama-3.1-Instruct~\citep{grattafiori2024llama}.
+To preserve the pre-trained model's general capabilities, we adhere to a parameter-efficient fine-tuning protocol: the pre-trained backbone is frozen, and only the \textit{Attention Router} parameters are optimized.
+Regarding task representation, we employ a boundary-pooling strategy that exclusively aggregates the first 100 and last 100 tokens of the sequence. These segments are selected as they typically encapsulate critical system instructions and user queries essential for accurate task identification.
+
+\paragraph{Optimization Setup.}
+All models are trained with a sequence length of $L=65,536$ tokens using `bfloat16` precision to accommodate long-context dependencies.
+The training utilizes the AdamW optimizer~\citep{loshchilov2019decoupledweightdecayregularization} ($\beta_1=0.9, \beta_2=0.95$) on a distributed cluster employing Fully Sharded Data Parallel (FSDP) with a Hybrid Sharding strategy.
+We adopt a decoupled learning rate strategy to balance router convergence and sparsity regularization:
+\begin{itemize}
+    \item \textbf{Router Parameters:} A learning rate of $5\times 10^{-4}$ is applied to the attention router to facilitate rapid adaptation to retrieval patterns.
+    \item \textbf{Regularization Coefficients:} A higher learning rate of $1\times 10^{-3}$ is assigned to the sparsity regularization terms. \textbf{Specifically, the dual regularization coefficients $\lambda_1$ and $\lambda_2$ are randomly initialized and optimized alongside the router parameters.}
+\end{itemize}
+We utilize a cosine decay learning rate schedule following a linear warmup phase spanning the first 20\% of total training steps.
+
+\subsection{Baseline Implementation Details}
+\label{appendix:baseline_train_setting}
+
+To rigorously evaluate the efficacy of our approach, we benchmark against a comprehensive suite of state-of-the-art sparse attention mechanisms. These are categorized into training-free methods and training-based adaptation methods.
+
+\paragraph{Training-Free Methods.}
+We employ XAttention~\footnote{\url{https://github.com/mit-han-lab/x-attention}}~\citep{xattention} as the primary training-free baseline. 
+This category relies on heuristic-based sparsity without parameter updates.
+
+\paragraph{Training-Based Methods.}
+For methods requiring training adaptation, including InfLLM\_v2~\footnote{\url{https://modelscope.cn/models/OpenBMB/MiniCPM4-8B/file/view/master/modeling_minicpm.py}}~\citep{infllmv2}, MoBA~\footnote{\url{https://github.com/MoonshotAI/MoBA}}~\citep{moba}, NSA~\footnote{\url{https://github.com/XunhaoLai/native-sparse-attention-triton}}~\citep{NSA}, PruLong~\footnote{\url{https://github.com/princeton-pli/PruLong}}~\citep{bhaskar2025cache}, and DuoAttention~\footnote{\url{https://github.com/mit-han-lab/duo-attention}}~\citep{xiaoduoattention2025}, we implement a unified fine-tuning protocol to ensure strict fairness.
+Unlike our method, which freezes the backbone entirely, most competing methods require updating projection layers. For InfLLM\_v2, MoBA, and NSA, we restrict the trainable scope to the query-key-value projection weights ($W_{qkv}$) and their respective method-specific parameters, freezing the remaining backbone.
+All baselines are trained under the same environment and dataset, and the hyperparameters are strictly adhered to their original setups, such as a block size of 1024 for MoBA versus 64 for NSA, and the specific dense context length (8K) for InfLLM\_v2.
+Detailed hyperparameter comparisons are provided in Table~\ref{tab:combined_hyperparameters}~(Right).
+
+\subsection{Sparsity and Kernel Configuration}
+\label{app:sparsity_config}
+
+To achieve efficient streaming inference, we employ Block-Sparse-Attention~\citep{guo2024blocksparse}.
+This configuration governs the granularity and retention policy of the attention mechanism:
+\begin{itemize}
+    \item \textbf{Block Size:} Set to 64, defining the minimum unit of sparsity.
+    \item \textbf{Chunk Size:} Set to 16,384, enabling the processing of ultra-long sequences.
+    \item \textbf{Sink Token Strategy:} We enforce a ``sink token" size of 128 to preserve the attention sink phenomenon, ensuring stability during streaming generation.
+\end{itemize}
+Specific kernel parameters, including stride, normalization, and selection modes, are detailed in the \textit{Sparsity Config} section of Table~\ref{tab:combined_hyperparameters}~(Left).
+
+
+\begin{algorithm}[t]
+    \caption{Comparison of Serial Dispatch (Baseline) vs. Parallel BSA (Ours)}
+    \label{alg:comparison}
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centerline{\textbf{(a) PyTorch Baseline}} 
+        \begin{algorithmic}[1]
+            \REQUIRE $\mathbf{Q}, \mathbf{K}, \mathbf{V}$, Router $\mathcal{R}$
+            \STATE $\mathbf{r} \leftarrow \mathcal{R}(\mathbf{x})$
+            \STATE \RedBlock{
+                \textbf{Step 1: Serial Split} \\
+                $\mathcal{I}_{\text{full}} \leftarrow \{h \mid \mathbf{r}_h = 0\}$ \\
+                $\mathcal{I}_{\text{sp}} \leftarrow \{h \mid \mathbf{r}_h = 1\}$ \\
+                $\mathbf{Q}_{\text{full}} \leftarrow \mathbf{Q}[:, \mathcal{I}_{\text{full}}]$ 
+                
+                \vspace{0.2em}
+                \textbf{Step 2: Separate Comp.} \\
+                $\mathbf{O}_{\text{full}} \leftarrow \texttt{FlashAttn}(\dots)$ \\
+                $\mathbf{O}_{\text{sp}} \leftarrow \texttt{SlidingWin}(\dots)$
+                
+                \vspace{0.2em}
+                \textbf{Step 3: Merge Results} \\
+                $\mathbf{O}[:, \mathcal{I}_{\text{full}}] \leftarrow \mathbf{O}_{\text{full}}$ \\
+                $\mathbf{O}[:, \mathcal{I}_{\text{sp}}] \leftarrow \mathbf{O}_{\text{sp}}$
+            }
+        \end{algorithmic}
+    \end{minipage}%
+    \hfill \vrule width 0.5pt \hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centerline{\textbf{(b) Ours (Parallel via BSA)}}
+        
+        \begin{algorithmic}[1]
+            \REQUIRE $\mathbf{Q}, \mathbf{K}, \mathbf{V}$, Router $\mathcal{R}$
+            \STATE $\mathbf{r} \leftarrow \mathcal{R}(\mathbf{x})$
+            \STATE $\mathbf{m} \leftarrow \texttt{Map}(\mathbf{r})$
+
+            \STATE \GreenBlock{
+                \textbf{Step 1: Unified Execution} \\
+                $\mathbf{O} \leftarrow \texttt{BSA\_Krn}(\mathbf{Q}, \mathbf{K}, \mathbf{V}, \mathbf{m})$ 
+                
+                \vspace{0.3em}
+                \hrule width \linewidth height 0.5pt \vspace{0.2em}
+                
+                \textbf{\textit{Inside Kernel:}} \\
+                \textbf{par\_for} $h$ \textbf{do} \\
+                \hspace*{1em} \textbf{if} $\mathbf{m}[h] {==} \texttt{SP}$ \textbf{then} \\
+                \hspace*{2em} $\mathbf{O}[h] \leftarrow \texttt{Sparse}(\dots)$; \\
+                \hspace*{1em} \textbf{else} \\
+                \hspace*{2em} $\mathbf{O}[h] \leftarrow \texttt{Full}(\dots)$; \\
+                \hspace*{1em} \textbf{end if} \\
+                \textbf{end par\_for}
+            }
+        \end{algorithmic}
+    \end{minipage}
+\end{algorithm}
+\section{Efficient Deployment of Elastic Attention}
+\label{appdix:deployment}
+
+% \begin{figure}[t]
+%   \centering
+%     \includegraphics[width=0.5\linewidth]{figures/cuda_latency.pdf}
+%     \caption{\textbf{Router latency analysis.} The router incurs negligible overhead (avg. 0.196 ms). Our design ensures length-invariant stability, maintaining constant speed from 512 to 1M tokens.}
+%   \label{fig:router_latency}
+% \end{figure}
+
+A critical system bottleneck in hybrid attention pertains to the efficient scheduling of heterogeneous attention workloads within a single batch. Algorithm \ref{alg:comparison}(a) illustrates the conventional paradigm, termed \textit{Serial Dispatch}, as adopted by libraries like Flash-Attn\footnote{\url{https://github.com/Dao-AILab/flash-attention}}~\citep{dao2023flashattention2}. This method entails explicit data rearrangement (highlighted in red), requiring the materialization of input tensors according to routing decisions $r$. 
+
+Consequently, it introduces two major sources of inefficiency that contradict the high-throughput requirements of long-context inference:
+(1) \textbf{Memory Overhead}, incurred by allocating and copying non-contiguous tensor fragments (e.g., separating retrieval heads from sparse heads); and 
+(2) \textbf{Kernel Launch \& Scheduling Overhead}. As noted in the main text, parallelism along the sequence dimension dominates execution in long-context scenarios. Launching separate kernels for different head groups fragments this workload, incurring latency from multiple kernel invocations and disrupting the GPU's ability to globally schedule thread blocks across available streaming multiprocessors.
+
+To overcome these limitations, we employ the Block Sparse Attention (BSA) Kernel\footnote{\url{https://github.com/mit-han-lab/Block-Sparse-Attention}}~\citep{guo2024blocksparse} (Algorithm \ref{alg:comparison}(b)). 
+Obviating the need for tensor splitting, we pass routing decisions $r$ directly to the kernel as lightweight metadata $\mathbf{m}$. 
+As depicted in the green block, the kernel leverages \textit{thread-block level branching}: each thread block dynamically retrieves its assigned head's type from $\mathbf{m}$ and executes the corresponding attention logic. 
+This design enables a \textbf{unified kernel launch} for all heads. By keeping the grid dimensions intact (Batch $\times$ Heads $\times$ Sequence Blocks), we effectively eliminate redundant memory copies and avoid workload fragmentation, allowing the GPU hardware scheduler to optimally distribute sequence blocks.
+One can refer to the anonymous code provided in Appendix~\ref{appdix:anonymous_code} for more details.
+
+\input{tables/LongBench_subtask_appendix}
+
+
+\section{Theoretical Explanation of Attention Router Optimization}
+\label{appdix:theoretical_explan_attn_router}
+
+The primary challenge in optimizing an attention router lies in the non-differentiable nature of discrete selection. 
+To enable the model to learn which attention heads are essential for a given task, we employ a continuous relaxation technique based on the Gumbel-Softmax (specifically, the Gumbel-Sigmoid for binary decisions) and the Straight-Through Estimator (STE).\subsection{Latent Representation and Logit Generation}Given the Key hidden states $\boldsymbol{x}_K \in \mathbb{R}^{\mathrm{s \times H \times d^{\prime}}}$, where $s$ is the sequence length and $d$ is the hidden dimension, the router first extracts a task-aware representation via a pooling operation and a two-stage MLP:
+\begin{equation}
+\boldsymbol{x}_K^{\prime} = \text{Pooling}(\boldsymbol{x}_K), \boldsymbol{x}_K^{\prime} \in \mathbb{R}^{\mathrm{H \times d^{\prime}}}
+\end{equation}
+The routing logits $\mathbf{z}$ for each head are then computed as:
+\begin{equation}
+\mathbf{z} = \text{MLP}_{\text{router}}(\text{MLP}_{\text{task}}(\boldsymbol{x}_K^{\prime})),
+\end{equation}
+where $\mathbf{z} \in \mathbb{R}^\mathrm{H}$ represents the unnormalized preference for a specific attention mode (e.g., FA vs. SA) for each head.
+
+\subsection{Differentiable Sampling via Gumbel-Sigmoid}To simulate the stochasticity of discrete routing while maintaining differentiability, we apply the reparameterization trick~\citep{bhaskar2025cache}. 
+We introduce i.i.d. noise samples $u \sim \text{Uniform}(0, 1)$ and transform them into Gumbel noise $g$:
+\begin{equation}
+g = -\log(-\log(u + \epsilon) + \epsilon),
+\end{equation}
+where $\epsilon$ is a small constant for numerical stability. 
+
+The discrete binary decision is then relaxed into a continuous approximation $\hat{z}_{\text{soft}}$ using a temperature-dependent Sigmoid function:
+
+\begin{equation}
+\hat{z}_{\text{soft}} = \sigma \left( \frac{\mathbf{z} + g}{\tau} \right) = \frac{1}{1 + \exp\left( -\frac{\mathbf{z} + g}{\tau} \right)}
+\end{equation}
+Here, $\tau \in (0, \infty)$ is the temperature parameter. When $\tau \to \infty$, the distribution becomes uniform; as $\tau \to 0$, the output $\hat{z}{\text{soft}}$ approaches a discrete Bernoulli distribution. 
+In Section~\ref{appdix:subsec_tau}, we introduce the strategy for parameter $\tau$.
+
+
+\subsection{Temperature Annealing Schedule}
+\label{appdix:subsec_tau}
+The optimization process utilizes an annealing schedule for $\tau$ to bridge the gap between the continuous relaxation and the discrete reality. 
+We define the decay as:
+\begin{equation}
+\tau^{(t)} = \max(\tau_{\text{min}}, \tau_{\text{init}} \cdot \exp(-r \cdot p)),
+\end{equation}
+where $p$ is the training step and $r$ is the decay rate (we set $r=0.6$). 
+In the early stages of training, a high $\tau$ encourages exploration by providing dense gradients; in later stages, a low $\tau$ forces the router to converge toward the ``hard'' binary decisions used during actual deployment.
+
+
+\section{Additional Evaluation Results}
+\label{appdix:eval_res}
+In this section, we present detailed performance for the benchmarks discussed in the main paper.
+
+\subsection{Evaluation Results on LongBench}
+\input{tables/LongBench_appendix}
+Table~\ref{tab:longbench_subtask_results} and Table~\ref{tab:longbench_appendix} provides the complete evaluation results on the LongBench-E. 
+We report the performance metrics across all sub-tasks, categorized into 6 categories: Single-Document QA~(S-Doc QA), Multi-Document QA~(M-Doc QA), Summarization~(Summ), In-context Learning~(In-Context), Synthetic, and Code Tasks.
+
+\subsection{Evaluation Results on LongBench-V2 and RULER}
+This subsection details the experimental settings and evaluation results for LongBench-V2 and the RULER benchmark. 
+For RULER, as detailed in Table~\ref{tab:ruler_settings}, our evaluation on the RULER benchmark covers a comprehensive range of context lengths, extending from 8K to 262K tokens. 
+The comparative performance results are summarized in Table~\ref{tab:ruler_lb2_result_appendix}.
+
+\begin{table}[t]
+    \centering
+    \caption{Detailed configuration for the RULER benchmark evaluation. We evaluate across exponentially increasing context windows up to 256k tokens.}
+    \label{tab:ruler_settings}
+    \begin{small}
+    \begin{tabularx}{\linewidth}{>{\columncolor{s-gray}}l X} 
+        \toprule
+        \textbf{\textsc{Parameter}} & \textbf{\textsc{Configuration Details}} \\
+        \midrule
+        \textbf{Context Windows} & 8k, 16k, 32k, 64k, 128k, 256k \\
+        \midrule
+        \textbf{Sample Size} & 50 samples per task-length pair \\
+        \midrule
+        \textbf{Evaluation Tasks} & 
+        \textbf{Retrieval (NIAH):} \texttt{single\_\{1-3\}}, \texttt{multikey\_\{1-3\}}, \texttt{multiquery}, \texttt{multivalue} \newline
+        \textbf{QA \& Extraction:} \texttt{qa\_\{1,2\}}, \texttt{fwe} \\
+        \bottomrule
+    \end{tabularx}
+    \end{small}
+\end{table}
+
+\input{tables/RULER_LB2_table_appendix}
+
+
+\section{Ablation Study}
+\label{appdix:abla_study}
+
+
+\subsection{Task-Discriminative Geometry of the Attention Router}
+\label{appendix:geometry_analysis}
+To elucidate the operational logic of the Attention Router, we examine the geometric structure of the latent space learned by its internal projection layers. We hypothesize that, despite being optimized solely for the sparsity-performance trade-off without explicit task supervision, the router implicitly learns task-discriminative representations to facilitate optimal retrieval head allocation.
+
+Formally, let $\boldsymbol{x}_K^{\prime} \in \mathbb{R}^{\mathrm{H \times d^{\prime}}}$ denote the pooled hidden state of an input sequence. 
+The $\text{MLP}_{\text{task}}$ maps this context to a latent routing representation $\mathcal{X}_K = \text{MLP}_{\text{task}}(\mathbf{\boldsymbol{x}_K^{\prime}})$. To quantify the distinctness of these representations while mitigating the representation anisotropy inherent in pre-trained models, we employ a Pairwise Conditional Rescaling strategy. This approach normalizes the local subspace spanned by a specific task pair $(u, v)$ to measure their geometric relationship independent of global variances.
+We define the pairwise similarity metric $M_{uv}$ as follows. Let $\mathcal{X}_k$ be the set of latent representations corresponding to task $k$. 
+We first construct the local support set $\mathcal{S}_{uv} = \mathcal{X}_u \cup \mathcal{X}_v$ and compute the feature-wise standard deviation $\boldsymbol{\sigma}_{uv}$ within this subset:
+\begin{equation}
+    \boldsymbol{\sigma}_{uv} = \sqrt{ \frac{1}{|\mathcal{S}_{uv}|} \sum_{\mathbf{x} \in \mathcal{S}_{uv}} (\mathbf{x} \odot \mathbf{x}) + \epsilon },
+\end{equation}
+where $\odot$ denotes the element-wise product, and the calculation assumes zero-centered activations.
+Using these statistics, we define a projection $\phi_{uv}(\mathbf{x}) = \mathbf{x} \oslash \boldsymbol{\sigma}_{uv}$ (where $\oslash$ denotes element-wise division). 
+The metric $M_{uv}$ is then calculated as the cosine similarity between the projected task centroids:
+\begin{equation}
+    M_{uv} = \mathrm{CosSim}\left( \frac{1}{|\mathcal{X}_u|} \sum_{\mathbf{x} \in \mathcal{X}_u} \phi_{uv}(\mathbf{x}), \; \frac{1}{|\mathcal{X}_v|} \sum_{\mathbf{x} \in \mathcal{X}_v} \phi_{uv}(\mathbf{x}) \right).
+\end{equation}
+
+As illustrated in Figure~\ref{fig:task_geometry2}, the latent space exhibits distinct modularity. The observation that similarity scores approach zero ($M_{uv} \approx 0$) implies that $\text{MLP}_{\text{task}}$ maps different problem types to orthogonal subspaces of the local manifold.  This geometric orthogonality confirms that the router implicitly functions as a semantic discriminator, disentangling task representations into independent basis directions to apply specialized sparsity policies without requiring explicit task labels.
+
+\begin{figure*}[t]
+\centering
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/task_similarity_pairwise_whitening_llama.pdf}
+    \caption{Hidden states Similarity before $\text{MLP}_{\text{task}}$.}
+    \label{fig:task_geometry}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/task_similarity_pairwise_whitening_pooled_latent.pdf}
+    \caption{Hidden states Similarity after $\text{MLP}_{\text{task}}$.}
+    \label{fig:task_geometry2}
+  \end{subfigure}
+\caption{Pairwise cosine similarity of routing representations $\mathbf{z_{task}}$. The prevalence of near-zero scores ($M_{uv} \approx 0$) indicates that the router maps distinct tasks to orthogonal subspaces on the local manifold. This confirms that the model implicitly disentangles task semantics into independent directions without supervision.}
+\label{fig:task_geometry_combined}
+\end{figure*}
+
+
+\begin{wrapfigure}{r}{0.5\linewidth}
+  \centering
+  \vspace{-1em}
+  \includegraphics[width=\linewidth]{figures/cuda_latency.pdf}
+  \caption{\textbf{Router latency analysis.} The router incurs negligible overhead (avg. 0.196 ms). Our design ensures length-invariant stability, maintaining constant speed from 512 to 1M tokens.}
+  \label{fig:router_latency}
+  \vspace{-1em}
+\end{wrapfigure}
+
+
+\subsection{Attention Mode Routing Analysis}
+\label{appdix:head_analysis}
+Comparing the multi-task heatmaps reveals a fundamental divergence in attention mechanisms between model families.
+For Qwen3 (Fig.~\ref{fig:extended_robustness}a), we observe \textbf{structural universality}: a specific subset of heads remains consistently active (dark red) or sparse (dark blue) across all tasks, suggesting a task-agnostic attention topology.
+In contrast, Llama3.1 exhibits \textbf{context-dependent sparsity}. While the multi-task aggregate (Fig.~\ref{fig:extended_robustness}b) shows no universally active heads, the single-task breakdown (Fig.~\ref{fig:extended_robustness}c) confirms that strong activations exist but shift dynamically depending on the input context.
+This indicates that Qwen3 relies on fixed retrieval heads, whereas Llama3.1-8B-Instruct adaptively reallocates attentional resources based on task requirements.
+\begin{figure*}[t]
+\centering
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/qwen3-8b_per_task_head_robustness.pdf}
+    \caption{Multi-Task in Qwen3-8B.}
+    \label{fig:qwen3_8b_multi}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/llama3.1-8b_per_task_head_robustness.pdf}
+    \caption{Multi-Task in LLama3.1-8B-Instruct.}
+    \label{fig:llama3_8b_multi}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/llama3.1-8b_head_robustness.pdf}
+    \caption{Single Task in Llama3.1-8B-Instruct.}
+    \label{fig:llama3_8b_single}
+  \end{subfigure}
+\caption{\textbf{Extended Head Robustness Analysis.} Similar to Figure \ref{fig:robustness_heatmap}, these heatmaps visualize the frequency of full-attention activation for each head. (a) and (b) show the multi-task global robustness for Qwen3-8B and Llama3.1-8B-Instruct, respectively, indicating how attention patterns generalize across tasks. (c) presents the robustness analysis for Llama3.1-8B-Instruct in a single-task setting. Darker blue indicates heads that are universally sparse, while darker red indicates heads that are universally active.}
+\label{fig:extended_robustness}
+\end{figure*}
+
+
+% \begin{figure*}[ht]
+%   \centering
+%     \begin{subfigure}[t]{0.48\textwidth}
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/sparsity_loss.pdf}
+%      \caption{$\Omega_{\mathrm{MSR}}$ during the training process}
+%      \label{fig:sparsity_loss1}
+%      \end{subfigure}
+%     \hfill
+%     \begin{subfigure}[t]{0.48\textwidth}
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/lambda_evolution.pdf}
+%      \caption{Adaptive Coefficients ($\lambda$) during the training process}
+%      \label{fig:sparsity_loss2}
+%      \end{subfigure}
+%     \caption{Analysis of the Adaptive Sparsity Mechanism. (a) illustrates the fluctuation of the sparsity metric $\Omega_{\mathrm{MSR}}$ as the model explores the parameter space. (b) highlights the evolution of the learnable coefficients $\lambda_k$, which automatically adjust the regularization strength to balance the trade-off between task performance and the target sparsity ratio.}
+%   \label{fig:sparsity_loss_combined}
+% \end{figure*}
+
+\begin{figure*}[ht]
+\centering
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/side_by_side_xs1.pdf}
+    \caption{RULER Performance.}
+    \label{fig:5}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/side_by_side_xs2.pdf}
+    \caption{Efficiency Analysis.}
+    \label{fig:6}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/side_by_side_xs3.pdf}
+    \caption{Sparsity Rate.}
+    \label{fig:7}
+  \end{subfigure}
+\caption{Analysis of length extrapolation capability and sparsity dynamics on the RULER benchmark (8K-256K). We adopt Llama-3.1-8B-Instruct as the backbone model to compare our Elastic Attention variants (FA-XA and XA-SSA) with including MoBA and NSA. (a) reports the RULER performance scores; (b) and (c) illustrate the trade-off between inference speedup and ($\Omega_{\mathrm{ESR}}$), highlighting the superior Pareto frontier established by our method.}
+\label{fig:8}
+\end{figure*}
+
+
+
+We observe that during training, the effective sparsity levels gradually diverge across different tasks. Despite sharing the same non-tight constraint $\boldsymbol{t}$, task-dependent differences emerge. 
+This behavior is enabled by the Lagrangian constraint, which dynamically adjusts the weighting of task losses, allowing each task to tolerate different gaps between the achieved sparsity $\Omega_{\mathrm{MSR}}$ and the target $\boldsymbol{t}$.
+
+
+\subsection{Length Extrapolation and Sparsity Dynamics Analysis}
+\label{appdix:length_extrapolation_and_sparsity_dynamics_analysis}
+We evaluate the length extrapolation capability on the RULER benchmark (8K-256K) using the Llama-3.1-8B-Instruct backbone. Figure~\ref{fig:8} visualizes the interplay between performance, inference speedup, and $\Omega_{ESR}$. As the context length extends to 256K, baselines like MoBA and NSA suffer catastrophic degradation (near-zero accuracy). In contrast, our Elastic Attention (FA-XA) demonstrates superior robustness, maintaining a high score of 68.51. Even our highly efficient variant, Elastic Attention (XA-SSA), achieves a score of 47.68, significantly outperforming the standard Xattention baseline (35.82) while operating at a much higher sparsity.
+
+Figure~\ref{fig:8} (b) \& (c) highlight a critical efficiency advantage. Baselines like NSA and InfLLM-V2 achieve high sparsity ($>0.95$) but suffer from limited or regressed speedups ($<1.0\times$) due to heavy dynamic selection overheads or kernel constraints. Conversely, our XA-SSA configuration achieves an extreme sparsity of $\sim 0.995$ while delivering a massive 3.28$\times$ speedup, verifying the minimal overhead of our router. Meanwhile, Elastic Attention (FA-XA) strikes a balanced trade-off, securing $1.51\times$ acceleration while retaining essential information.
+
+In summary, Elastic Attention establishes a superior Pareto frontier. Elastic Attention (FA-XA) prioritizes information retention ($\Omega_{ESR} \approx 0.65$) to effectively mitigate ``context collapse", while Elastic Attention (XA-SSA) maximizes throughput through adaptive extreme sparsity. Both configurations consistently outperform comparison methods in their respective regimes of accuracy and efficiency.
+
+\subsection{Loss Curve and Monitoring metrics}
+\label{appdix:loss_curve_monitoring_metrics}
+To validate the training stability and the dynamic routing capabilities of our proposed \textbf{Elastic Attention}, we visualize the detailed training dynamics in Figure \ref{fig:lm_reg_loss}. This visualization decomposes the optimization process into four key perspectives: the primary language modeling loss, the sparsity regularization loss, the evolution of the routed sparsity metric ($\Omega_{\mathrm{MSR}}$), and the adaptive coefficients ($\lambda$).
+\begin{figure*}[ht]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/lm_loss.pdf}
+\caption{Language Modeling Loss during the training process}
+\label{fig:lm_loss}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/reg_loss.pdf}
+\caption{Sparsity Regularization Loss during the training process}
+\label{fig:reg_loss}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/sparsity_loss.pdf}
+\caption{$\Omega_{\mathrm{MSR}}$ during the training process}
+\label{fig:sparsity_loss1}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/lambda_evolution.pdf}
+\caption{Adaptive Coefficients ($\lambda$) during the training process}
+\label{fig:sparsity_loss2}
+\end{subfigure}
+\caption{Decomposition of Training Objectives for Elastic Attention. We visualize the training dynamics of the Attention Router, separating the total loss into (a) the primary language modeling objective and (b) the sparsity regularization term. Subfigures (c) and (d) illustrate the task-level differentiation in sparsity allocation ($\Omega_{\mathrm{MSR}}$) and adaptive coefficients ($\lambda$), demonstrating how the model automatically distinguishes between sparsity-robust and sparsity-sensitive tasks.}
+\label{fig:lm_reg_loss}
+\end{figure*}
+
+\paragraph{Optimization Stability.}As illustrated in Figure \ref{fig:lm_loss} and Figure \ref{fig:reg_loss}, the joint optimization of the language modeling objective and the Attention Router parameters is stable.
+The LM loss decreases rapidly and stabilizes around 2.1, confirming that the integration of the lightweight Attention Router and the injection of sparsity do not hinder the backbone model's convergence. 
+Concurrently, the sparsity regularization loss drops significantly within the first 100 steps (from $\sim$0.16 to $\sim$0.06), indicating that the continuous relaxation scheme (Gumbel-Softmax) effectively guides the router to satisfy the prescribed sparsity constraints.
+\paragraph{Differentiation in Elastic Attention Allocation ($\Omega_{\mathrm{MSR}}$).}
+Figure \ref{fig:sparsity_loss1} provides empirical evidence for the motivation described in Section \ref{sec:intro}: downstream tasks naturally exhibit different sensitivity to attention sparsity.
+\begin{itemize}
+\item \textbf{Task-Dependent Routing:} Starting from a neutral initialization, the Attention Router automatically learns to differentiate between tasks. Consistent with our hypothesis, \textbf{sparsity-sensitive tasks} (such as Code and In-Context learning) converge to higher $\Omega_{\mathrm{MSR}}$ values (approx. 0.80--0.85), indicating a higher allocation of Full Attention (FA) computation to preserve performance.
+\item \textbf{Sparsity-Robust Efficiency:} Conversely, \textbf{sparsity-robust tasks} like Q\&A task plateau at lower values, closer to the target threshold (dashed line, representing $t_{\mathrm{sen}}$). This confirms that Elastic Attention successfully identifies tasks that can tolerate higher sparsity levels, thereby improving inference throughput without unnecessary computation.\end{itemize}
+\paragraph{Adaptive Coefficients ($\lambda$).}Finally, Figure \ref{fig:sparsity_loss2} plots the evolution of the Lagrangian multipliers ($\lambda$), which dynamically scale the penalty for violating sparsity targets. 
+We observe that $\lambda_5$ (In-Context) increases most aggressively, suggesting that the model prioritizes fulfilling the density requirements for this sensitive task. This adaptive mechanism ensures that the trade-off between computational cost and model quality is balanced automatically, removing the need for the manual task-specific tuning.
+
+
+\subsection{Impact of Input Truncation on Task Identification}
+\label{appdix:truncation_analysis}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/truncation_analysis.pdf}
+\caption{
+Impact of router input truncation length on downstream performance and $\Omega_{\mathrm{MSR}}$.
+We compare varying truncation budgets ($L \in \{50, \dots, 800, \text{All}\}$) applied to the concatenation of the sequence's prefix and suffix.
+Results indicate that increasing the input length beyond 100 tokens yields negligible performance gains and may degrade router selectivity due to a lower signal-to-noise ratio.
+}
+\label{fig:truncation_analysis}
+\end{figure}
+
+To optimize the trade-off between routing efficiency and accuracy, we investigate the sensitivity of the Attention Router to the input sequence length. Specifically, we analyze how varying the truncation budget influences the router's ability to distinguish between task types and allocate appropriate sparsity patterns. Figure~\ref{fig:truncation_analysis} illustrates the performance and sparsity trends across six downstream tasks as the truncation budget varies from 50 tokens (pooling boundaries) to the full sequence.
+
+\paragraph{The Boundary-Pooling Hypothesis.}
+Our default strategy employs a boundary-pooling mechanism that aggregates only the first and last 100 tokens. This design is predicated on the observation that task-specific instructions (System Prompts) typically reside at the beginning of the context, while specific user queries appear at the end. The intermediate content often consists of long context (e.g., documents to be summarized) which, while necessary for the \textit{generation} phase, acts as noise for the \textit{routing} phase.
+
+\paragraph{Analysis of Signal-to-Noise Ratio.}
+As shown in Figure~\ref{fig:truncation_analysis}, we observe that performance generally saturates around a truncation length of 100-200 tokens.
+Notably, incorporating the full sequence does not lead to performance improvements and, in some cases (e.g., Multi-Document QA), results in suboptimal routing decisions.
+We attribute this to a dilution of the task identification signal: as the router processes more tokens from the document body, the distinct semantic signatures of the instructions become obscured by the high variance of the content.
+Consequently, the router struggles to classify the task type accurately, leading to a convergence in sparsity patterns (as seen in the flattened sparsity lines for longer lengths) without a corresponding gain in generation quality.
+These findings validate our selection of a 100-token boundary window as a robust configuration that captures essential task descriptors while filtering out content-induced noise.
+
+\section{Error Analysis}
+In Table~\ref{fig:case_policy}, \ref{fig:case_legal}, and \ref{fig:case_montecristo}, we present representative model outputs comparing our method with other baselines. 
+Due to the extensive length of the contexts, only a partial input context is shown. 
+We observe that the primary source of performance improvement stems from our method's ability to accurately identify and respond to the key contextual segments relevant to the query.
+
+\label{appdix:error_analysis}
+\input{sections/case/case1}
+\input{sections/case/case2}

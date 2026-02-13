@@ -1,0 +1,499 @@
+\input{sections_zh/related_work}
+
+\section{检索评分与稀疏化设置}
+\label{appendix:preliminary_settings}
+本节详细介绍 \Cref{subsec:deployment_sparisity} 中提到的检索头识别方法与渐进式稀疏化策略。
+
+\subsection{检索分数计算}
+遵循 Retrieval Head~\citep{wu2024retrieval} 的方法，我们根据注意力头从长上下文中检索关键信息的能力，对其进行识别与排序。
+我们使用 Llama-3.1-8B-Instruct~\citep{grattafiori2024llama} 并采用 Needle-in-a-Haystack 探针：将特定关键信息（“needle”）插入长上下文（“haystack”）中。
+
+对于第 $\ell$ 层第 $h$ 个注意力头 $H_{\ell,h}$，通过其分配到 needle token 的注意力质量计算检索分数 $S_{\ell,h}$。
+形式化地，设输入长度为 $s$，注意力矩阵为 $\mathcal{O}^{(\ell, h)} \in \mathbb{R}^{s \times s}$，needle token 索引集合为 $\mathcal{I}_{needle}$，则分数定义为：
+\begin{equation}
+    S_{\ell,h} = \frac{1}{|\mathcal{D}|} \sum_{x \in \mathcal{D}} \sum_{j \in \mathcal{I}_{needle}} \mathcal{O}^{(\ell, h)}_{T, j}
+\end{equation}
+其中 $\mathcal{D}$ 为验证集，$\mathcal{O}^{(\ell, h)}_{T, j}$ 表示最后一个 token（query 位置 $T$）对 needle 位置 $j$ 的注意力权重。
+$S_{\ell,h}$ 越高，说明该头在长上下文中越频繁且越强地激活于相关信息。
+
+\subsection{渐进式稀疏化策略}
+基于计算得到的 $S_{\ell,h}$，我们对模型中全部 $L \cdot H$ 个注意力头按降序排序。
+如正文定义，\textbf{模型稀疏率（$\Omega_{\mathrm{MSR}}$）} 表示被转换为局部注意力头的比例。
+
+为模拟实验中的不同稀疏水平（例如 $\Omega_{\mathrm{MSR}} = 20\%$），我们采用阈值化机制：
+\begin{enumerate}
+    \item 通过 $k = \lfloor (1-\Omega_{\mathrm{MSR}}) \cdot (L \cdot H) \rfloor$ 计算需保留为全注意力（FA）的头数。
+    \item 保留检索分数最高的 top-$k$ 个头作为 \textbf{检索头}（保持 FA），以保证全局信息整合能力。
+    \item 其余头（排名靠后的头）替换为 \textbf{Streaming Sparse Attention（SSA）} 头。
+\end{enumerate}
+\input{tables_zh/preliminary}
+
+
+\input{tables_zh/hyperparameters}
+
+\section{实现细节}
+\label{appendix:implementation_details}
+
+本节给出训练配置、基线实现细节以及面向高效长上下文处理的系统级优化。
+
+\subsection{训练配置与超参数}
+\label{appendix:train_setting}
+
+\paragraph{模型结构。}
+我们在不同规模模型上验证方法可扩展性，从轻量模型 Qwen3-4B 到常用中等规模模型 Qwen3-8B~\citep{yang2025qwen3technicalreport} 与 Meta-Llama-3.1-Instruct~\citep{grattafiori2024llama}。
+为保留预训练模型通用能力，我们遵循参数高效微调协议：冻结预训练骨干，仅优化 \textit{Attention Router} 参数。
+在任务表示构建上，我们使用边界池化策略，仅聚合序列开头 100 个和结尾 100 个 token。这两段通常包含关键系统指令与用户请求，对准确任务识别最重要。
+
+\paragraph{优化设置。}
+全部模型在序列长度 $L=65,536$、`bfloat16` 精度下训练，以适应长上下文依赖。
+优化器采用 AdamW~\citep{loshchilov2019decoupledweightdecayregularization}（$\beta_1=0.9, \beta_2=0.95$），并在分布式集群上使用 Fully Sharded Data Parallel（FSDP）及 Hybrid Sharding 策略。
+我们采用解耦学习率策略以平衡 router 收敛与稀疏正则：
+\begin{itemize}
+    \item \textbf{Router 参数：} 对 attention router 使用 $5\times 10^{-4}$ 学习率，以更快适应检索模式。
+    \item \textbf{正则系数：} 对稀疏正则项使用更高学习率 $1\times 10^{-3}$。\textbf{具体地，双正则系数 $\lambda_1$ 和 $\lambda_2$ 随机初始化，并与 router 参数联合优化。}
+\end{itemize}
+学习率调度采用余弦衰减，并在前 20\% 训练步进行线性 warmup。
+
+\subsection{基线实现细节}
+\label{appendix:baseline_train_setting}
+
+为严格评估方法有效性，我们与一组前沿稀疏注意力机制进行对比，分为免训练方法与训练式适配方法。
+
+\paragraph{免训练方法。}
+我们采用 XAttention~\footnote{\url{https://github.com/mit-han-lab/x-attention}}~\citep{xattention} 作为主要免训练基线。
+该类方法基于启发式稀疏策略，不更新模型参数。
+
+\paragraph{训练式方法。}
+对于需要训练适配的方法，包括 InfLLM\_v2~\footnote{\url{https://modelscope.cn/models/OpenBMB/MiniCPM4-8B/file/view/master/modeling_minicpm.py}}~\citep{infllmv2}、MoBA~\footnote{\url{https://github.com/MoonshotAI/MoBA}}~\citep{moba}、NSA~\footnote{\url{https://github.com/XunhaoLai/native-sparse-attention-triton}}~\citep{NSA}、PruLong~\footnote{\url{https://github.com/princeton-pli/PruLong}}~\citep{bhaskar2025cache} 与 DuoAttention~\footnote{\url{https://github.com/mit-han-lab/duo-attention}}~\citep{xiaoduoattention2025}，我们统一采用一致的微调协议以保证公平。
+不同于我们完全冻结骨干，许多对比方法需要更新投影层。对 InfLLM\_v2、MoBA 与 NSA，我们将可训练范围限制为 query-key-value 投影权重（$W_{qkv}$）及其方法特定参数，其余骨干冻结。
+全部基线在相同环境与数据集下训练，并严格遵循原始超参数设置，例如 MoBA 的 block size 为 1024、NSA 为 64，以及 InfLLM\_v2 的 dense context length 为 8K。
+详细超参数比较见表~\ref{tab:combined_hyperparameters}（右）。
+
+\subsection{稀疏与 Kernel 配置}
+\label{app:sparsity_config}
+
+为实现高效流式推理，我们采用 Block-Sparse-Attention~\citep{guo2024blocksparse}。
+该配置定义了注意力机制的粒度与保留策略：
+\begin{itemize}
+    \item \textbf{Block Size：} 设为 64，作为最小稀疏单元。
+    \item \textbf{Chunk Size：} 设为 16,384，用于支持超长序列处理。
+    \item \textbf{Sink Token 策略：} 将 “sink token” 大小设为 128，以保留 attention sink 现象并保证流式生成稳定性。
+\end{itemize}
+具体 kernel 参数（如 stride、归一化、选择模式）见表~\ref{tab:combined_hyperparameters}（左）中的 \textit{Sparsity Config} 部分。
+
+
+\begin{algorithm}[t]
+    \caption{串行分发（基线）与并行 BSA（本文）对比}
+    \label{alg:comparison}
+    \centering
+    \begin{minipage}[t]{0.48\textwidth}
+        \centerline{\textbf{(a) PyTorch 基线实现}}
+        \begin{algorithmic}[1]
+            \REQUIRE $\mathbf{Q}, \mathbf{K}, \mathbf{V}$，Router $\mathcal{R}$
+            \STATE $\mathbf{r} \leftarrow \mathcal{R}(\mathbf{x})$
+            \STATE \RedBlock{
+                \textbf{步骤 1：串行拆分} \\
+                $\mathcal{I}_{\text{full}} \leftarrow \{h \mid \mathbf{r}_h = 0\}$ \\
+                $\mathcal{I}_{\text{sp}} \leftarrow \{h \mid \mathbf{r}_h = 1\}$ \\
+                $\mathbf{Q}_{\text{full}} \leftarrow \mathbf{Q}[:, \mathcal{I}_{\text{full}}]$
+
+                \vspace{0.2em}
+                \textbf{步骤 2：分开计算} \\
+                $\mathbf{O}_{\text{full}} \leftarrow \texttt{FlashAttn}(\dots)$ \\
+                $\mathbf{O}_{\text{sp}} \leftarrow \texttt{SlidingWin}(\dots)$
+
+                \vspace{0.2em}
+                \textbf{步骤 3：结果合并} \\
+                $\mathbf{O}[:, \mathcal{I}_{\text{full}}] \leftarrow \mathbf{O}_{\text{full}}$ \\
+                $\mathbf{O}[:, \mathcal{I}_{\text{sp}}] \leftarrow \mathbf{O}_{\text{sp}}$
+            }
+        \end{algorithmic}
+    \end{minipage}%
+    \hfill \vrule width 0.5pt \hfill
+    \begin{minipage}[t]{0.48\textwidth}
+        \centerline{\textbf{(b) 本文方法（基于 BSA 并行）}}
+
+        \begin{algorithmic}[1]
+            \REQUIRE $\mathbf{Q}, \mathbf{K}, \mathbf{V}$，Router $\mathcal{R}$
+            \STATE $\mathbf{r} \leftarrow \mathcal{R}(\mathbf{x})$
+            \STATE $\mathbf{m} \leftarrow \texttt{Map}(\mathbf{r})$
+
+            \STATE \GreenBlock{
+                \textbf{步骤 1：统一执行} \\
+                $\mathbf{O} \leftarrow \texttt{BSA\_Krn}(\mathbf{Q}, \mathbf{K}, \mathbf{V}, \mathbf{m})$
+
+                \vspace{0.3em}
+                \hrule width \linewidth height 0.5pt \vspace{0.2em}
+
+                \textbf{\textit{Kernel 内部：}} \\
+                \textbf{par\_for} $h$ \textbf{do} \\
+                \hspace*{1em} \textbf{if} $\mathbf{m}[h] {==} \texttt{SP}$ \textbf{then} \\
+                \hspace*{2em} $\mathbf{O}[h] \leftarrow \texttt{Sparse}(\dots)$; \\
+                \hspace*{1em} \textbf{else} \\
+                \hspace*{2em} $\mathbf{O}[h] \leftarrow \texttt{Full}(\dots)$; \\
+                \hspace*{1em} \textbf{end if} \\
+                \textbf{end par\_for}
+            }
+        \end{algorithmic}
+    \end{minipage}
+\end{algorithm}
+\section{Elastic Attention 的高效部署}
+\label{appdix:deployment}
+
+% \begin{figure}[t]
+%   \centering
+%     \includegraphics[width=0.5\linewidth]{figures/cuda_latency.pdf}
+%     \caption{\textbf{路由器时延分析。}Router 额外开销极小（平均 0.196 ms）。该设计在 512 到 1M token 范围内保持近似恒定速度。}
+%   \label{fig:router_latency}
+% \end{figure}
+
+混合注意力的关键系统瓶颈在于：如何在单个 batch 内高效调度异构注意力工作负载。算法 \ref{alg:comparison}(a) 展示了传统范式（\textit{Serial Dispatch}），代表实现如 Flash-Attn~\footnote{\url{https://github.com/Dao-AILab/flash-attention}}~\citep{dao2023flashattention2}。该方法需要根据路由决策 $r$ 显式重排数据（红色部分），并重新物化输入张量。
+
+这会引入两类主要低效，与长上下文高吞吐需求相冲突：
+(1) \textbf{内存开销}：需要分配和拷贝非连续张量片段（如分离检索头与稀疏头）；
+(2) \textbf{Kernel 启动与调度开销}：正文已说明，长上下文场景中序列维并行占主导。为不同头组分别启动 kernel 会割裂工作负载，带来多次启动延迟，并削弱 GPU 在可用 streaming multiprocessor 间全局调度 thread block 的能力。
+
+为解决上述问题，我们采用 Block Sparse Attention（BSA）Kernel~\footnote{\url{https://github.com/mit-han-lab/Block-Sparse-Attention}}~\citep{guo2024blocksparse}（算法 \ref{alg:comparison}(b)）。
+该设计无需拆分张量，而是将路由决策 $r$ 作为轻量元数据 $\mathbf{m}$ 直接传入 kernel。
+如绿色框所示，kernel 在 \textit{thread-block 级别分支}：每个 thread block 动态读取其分配头在 $\mathbf{m}$ 中的类型，并执行对应注意力逻辑。
+这使全部头可通过\textbf{一次统一 kernel 启动}完成计算。通过保持网格维度（Batch $\times$ Heads $\times$ Sequence Blocks）不变，我们有效消除了冗余内存拷贝与负载碎片化，使 GPU 硬件调度器可以更优地分配序列 block。
+更多实现细节可参考我们提供的匿名代码仓库。
+
+\input{tables_zh/LongBench_subtask_appendix}
+
+
+\section{Attention Router 优化的理论说明}
+\label{appdix:theoretical_explan_attn_router}
+
+优化 attention router 的核心难点在于离散选择不可导。
+为使模型学习“某任务需要哪些注意力头”，我们采用基于 Gumbel-Softmax（在二值场景下为 Gumbel-Sigmoid）的连续松弛，以及 Straight-Through Estimator（STE）。
+
+\subsection{潜表示与 Logit 生成}
+给定 Key 隐状态 $\boldsymbol{x}_K \in \mathbb{R}^{\mathrm{s \times H \times d^{\prime}}}$，其中 $s$ 为序列长度、$d$ 为隐藏维度，router 首先通过池化与两层 MLP 提取任务感知表示：
+\begin{equation}
+\boldsymbol{x}_K^{\prime} = \text{Pooling}(\boldsymbol{x}_K), \boldsymbol{x}_K^{\prime} \in \mathbb{R}^{\mathrm{H \times d^{\prime}}}
+\end{equation}
+随后，逐头路由 logits $\mathbf{z}$ 计算为：
+\begin{equation}
+\mathbf{z} = \text{MLP}_{\text{router}}(\text{MLP}_{\text{task}}(\boldsymbol{x}_K^{\prime})),
+\end{equation}
+其中 $\mathbf{z} \in \mathbb{R}^\mathrm{H}$ 表示每个头对某一注意力模式（如 FA/SA）的未归一化偏好。
+
+\subsection{基于 Gumbel-Sigmoid 的可微采样}
+为在保持可导的同时模拟离散路由随机性，我们采用重参数化技巧~\citep{bhaskar2025cache}。
+对独立同分布噪声样本 $u \sim \text{Uniform}(0, 1)$，将其变换为 Gumbel 噪声 $g$：
+\begin{equation}
+g = -\log(-\log(u + \epsilon) + \epsilon),
+\end{equation}
+其中 $\epsilon$ 为数值稳定常数。
+
+随后通过温度相关 Sigmoid，将离散二值决策松弛为连续近似 $\hat{z}_{\text{soft}}$：
+
+\begin{equation}
+\hat{z}_{\text{soft}} = \sigma \left( \frac{\mathbf{z} + g}{\tau} \right) = \frac{1}{1 + \exp\left( -\frac{\mathbf{z} + g}{\tau} \right)}
+\end{equation}
+其中 $\tau \in (0, \infty)$ 为温度参数。
+当 $\tau \to \infty$ 时分布趋于均匀；当 $\tau \to 0$ 时，$\hat{z}_{\text{soft}}$ 逼近离散伯努利分布。
+第~\ref{appdix:subsec_tau} 节介绍 $\tau$ 的设置策略。
+
+
+\subsection{温度退火策略}
+\label{appdix:subsec_tau}
+优化过程中，我们通过 $\tau$ 退火弥合连续松弛与离散部署之间的差距。
+退火形式为：
+\begin{equation}
+\tau^{(t)} = \max(\tau_{\text{min}}, \tau_{\text{init}} \cdot \exp(-r \cdot p)),
+\end{equation}
+其中 $p$ 为训练步，$r$ 为衰减率（本文设 $r=0.6$）。
+训练早期较高 $\tau$ 可通过更稠密梯度促进探索；后期较低 $\tau$ 则促使 router 收敛到实际部署所需的“硬”二值决策。
+
+
+\section{补充评测结果}
+\label{appdix:eval_res}
+本节给出正文所述基准的更细粒度结果。
+
+\subsection{LongBench 评测结果}
+\input{tables_zh/LongBench_appendix}
+表~\ref{tab:longbench_subtask_results} 与表~\ref{tab:longbench_appendix} 给出了 LongBench-E 的完整结果。
+我们报告全部子任务指标，并按 6 类组织：单文档 QA（S-Doc QA）、多文档 QA（M-Doc QA）、摘要（Summ）、上下文学习（In-Context）、合成任务（Synthetic）与代码任务（Code）。
+
+\subsection{LongBench-V2 与 RULER 评测结果}
+本小节介绍 LongBench-V2 与 RULER 的实验设置和结果。
+对于 RULER，如表~\ref{tab:ruler_settings} 所示，评测上下文长度覆盖 8K 到 262K token 的完整范围。
+对应性能对比见表~\ref{tab:ruler_lb2_result_appendix}。
+
+\begin{table}[t]
+    \centering
+    \caption{RULER 评测详细配置。我们在指数增长的上下文窗口上评测，最长至 256k token。}
+    \label{tab:ruler_settings}
+    \begin{small}
+    \begin{tabularx}{\linewidth}{>{\columncolor{s-gray}}l X}
+        \toprule
+        \textbf{\textsc{参数}} & \textbf{\textsc{配置细节}} \\
+        \midrule
+        \textbf{上下文窗口} & 8k, 16k, 32k, 64k, 128k, 256k \\
+        \midrule
+        \textbf{样本规模} & 每个“任务-长度”组合 50 条样本 \\
+        \midrule
+        \textbf{评测任务} &
+        \textbf{检索（NIAH）：} \texttt{single\_\{1-3\}}, \texttt{multikey\_\{1-3\}}, \texttt{multiquery}, \texttt{multivalue} \newline
+        \textbf{问答与抽取：} \texttt{qa\_\{1,2\}}, \texttt{fwe} \\
+        \bottomrule
+    \end{tabularx}
+    \end{small}
+\end{table}
+
+\input{tables_zh/RULER_LB2_table_appendix}
+
+
+\section{消融研究}
+\label{appdix:abla_study}
+
+
+\subsection{Attention Router 的任务可分几何结构}
+\label{appendix:geometry_analysis}
+为解释 Attention Router 的工作机理，我们分析其内部投影层学习到的潜空间几何结构。
+我们的假设是：即使优化目标仅是稀疏-性能权衡、未使用显式任务监督，router 仍会隐式学习任务可分表示，以实现更优检索头分配。
+
+形式化地，设 $\boldsymbol{x}_K^{\prime} \in \mathbb{R}^{\mathrm{H \times d^{\prime}}}$ 为输入序列池化后的隐状态。
+$\text{MLP}_{\text{task}}$ 将其映射为潜在路由表示 $\mathcal{X}_K = \text{MLP}_{\text{task}}(\mathbf{\boldsymbol{x}_K^{\prime}})$。
+为量化表示区分度并缓解预训练模型的表示各向异性，我们采用 Pairwise Conditional Rescaling 策略：在特定任务对 $(u, v)$ 张成的局部子空间内进行归一化，从而剥离全局方差影响并衡量几何关系。
+
+定义任务 $k$ 的潜表示集合为 $\mathcal{X}_k$，任务对相似度指标 $M_{uv}$ 的计算如下。
+先构建局部支撑集合 $\mathcal{S}_{uv} = \mathcal{X}_u \cup \mathcal{X}_v$，并计算其特征维标准差 $\boldsymbol{\sigma}_{uv}$：
+\begin{equation}
+    \boldsymbol{\sigma}_{uv} = \sqrt{ \frac{1}{|\mathcal{S}_{uv}|} \sum_{\mathbf{x} \in \mathcal{S}_{uv}} (\mathbf{x} \odot \mathbf{x}) + \epsilon },
+\end{equation}
+其中 $\odot$ 表示逐元素乘法，且计算默认激活零均值。
+据此定义投影 $\phi_{uv}(\mathbf{x}) = \mathbf{x} \oslash \boldsymbol{\sigma}_{uv}$（$\oslash$ 为逐元素除法）。
+指标 $M_{uv}$ 为投影后任务质心的余弦相似度：
+\begin{equation}
+    M_{uv} = \mathrm{CosSim}\left( \frac{1}{|\mathcal{X}_u|} \sum_{\mathbf{x} \in \mathcal{X}_u} \phi_{uv}(\mathbf{x}), \; \frac{1}{|\mathcal{X}_v|} \sum_{\mathbf{x} \in \mathcal{X}_v} \phi_{uv}(\mathbf{x}) \right).
+\end{equation}
+
+如图~\ref{fig:task_geometry2} 所示，该潜空间呈现明显模块化结构。
+当相似度接近零（$M_{uv} \approx 0$）时，说明 $\text{MLP}_{\text{task}}$ 将不同任务映射到局部流形上近似正交的子空间。
+这种几何正交性表明 router 在无显式任务标签监督下，仍可隐式充当语义判别器，将任务表示解耦到相互独立的方向，从而施加差异化稀疏策略。
+
+\begin{figure*}[t]
+\centering
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/task_similarity_pairwise_whitening_llama.pdf}
+    \caption{$\text{MLP}_{\text{task}}$ 之前的隐状态相似度。}
+    \label{fig:task_geometry}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/task_similarity_pairwise_whitening_pooled_latent.pdf}
+    \caption{$\text{MLP}_{\text{task}}$ 之后的隐状态相似度。}
+    \label{fig:task_geometry2}
+  \end{subfigure}
+\caption{路由表示 $\mathbf{z_{task}}$ 的两两余弦相似度。大量接近零的分数（$M_{uv} \approx 0$）说明 router 将不同任务映射到局部流形上的正交子空间，验证了模型在无监督条件下对任务语义的隐式解耦。}
+\label{fig:task_geometry_combined}
+\end{figure*}
+
+
+\begin{wrapfigure}{r}{0.5\linewidth}
+  \centering
+  \vspace{-1em}
+  \includegraphics[width=\linewidth]{figures/cuda_latency.pdf}
+  \caption{\textbf{Router 时延分析。}Router 仅引入极小开销（平均 0.196 ms）。该设计在 512 到 1M token 范围内保持长度无关的稳定速度。}
+  \label{fig:router_latency}
+  \vspace{-1em}
+\end{wrapfigure}
+
+
+\subsection{注意力模式路由分析}
+\label{appdix:head_analysis}
+对多任务热力图进行比较可以发现，不同模型家族在注意力机制上存在本质差异。
+对于 Qwen3（图~\ref{fig:extended_robustness}a），我们观察到 \textbf{结构普适性}：一部分头在所有任务中都稳定激活（深红）或稳定稀疏（深蓝），表明其注意力拓扑具备任务无关性。
+而 Llama3.1 呈现 \textbf{上下文依赖稀疏}：尽管多任务聚合图（图~\ref{fig:extended_robustness}b）不显示“全局恒激活头”，单任务拆分图（图~\ref{fig:extended_robustness}c）表明强激活头确实存在，但会随输入上下文动态迁移。
+这说明 Qwen3 更依赖固定检索头，而 Llama3.1-8B-Instruct 会根据任务需求自适应重分配注意力资源。
+\begin{figure*}[t]
+\centering
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/qwen3-8b_per_task_head_robustness.pdf}
+    \caption{Qwen3-8B 的多任务结果。}
+    \label{fig:qwen3_8b_multi}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/llama3.1-8b_per_task_head_robustness.pdf}
+    \caption{LLama3.1-8B-Instruct 的多任务结果。}
+    \label{fig:llama3_8b_multi}
+  \end{subfigure}
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/llama3.1-8b_head_robustness.pdf}
+    \caption{Llama3.1-8B-Instruct 的单任务结果。}
+    \label{fig:llama3_8b_single}
+  \end{subfigure}
+\caption{\textbf{扩展的头鲁棒性分析。}与图~\ref{fig:robustness_heatmap} 类似，热力图可视化了每个头被激活为全注意力的频率。(a)(b) 分别展示 Qwen3-8B 与 Llama3.1-8B-Instruct 的多任务全局鲁棒性；(c) 展示 Llama3.1-8B-Instruct 在单任务设定下的鲁棒性。蓝色越深表示头越稳定稀疏，红色越深表示头越稳定激活。}
+\label{fig:extended_robustness}
+\end{figure*}
+
+
+% \begin{figure*}[ht]
+%   \centering
+%     \begin{subfigure}[t]{0.48\textwidth}
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/sparsity_loss.pdf}
+%      \caption{$\Omega_{\mathrm{MSR}}$ during the training process}
+%      \label{fig:sparsity_loss1}
+%      \end{subfigure}
+%     \hfill
+%     \begin{subfigure}[t]{0.48\textwidth}
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/lambda_evolution.pdf}
+%      \caption{Adaptive Coefficients ($\lambda$) during the training process}
+%      \label{fig:sparsity_loss2}
+%      \end{subfigure}
+%     \caption{Analysis of the Adaptive Sparsity Mechanism. (a) illustrates the fluctuation of the sparsity metric $\Omega_{\mathrm{MSR}}$ as the model explores the parameter space. (b) highlights the evolution of the learnable coefficients $\lambda_k$, which automatically adjust the regularization strength to balance the trade-off between task performance and the target sparsity ratio.}
+%   \label{fig:sparsity_loss_combined}
+% \end{figure*}
+
+\begin{figure*}[ht]
+\centering
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/side_by_side_xs1.pdf}
+    \caption{RULER 性能。}
+    \label{fig:5}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/side_by_side_xs2.pdf}
+    \caption{效率分析。}
+    \label{fig:6}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.33\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figures/side_by_side_xs3.pdf}
+    \caption{稀疏率。}
+    \label{fig:7}
+  \end{subfigure}
+\caption{RULER 基准（8K-256K）上的长度外推能力与稀疏动态分析。以 Llama-3.1-8B-Instruct 为骨干，对比 Elastic Attention 两种配置（FA-XA、XA-SSA）及 MoBA、NSA 等方法。(a) 报告 RULER 评分；(b)(c) 展示推理加速与 $\Omega_{\mathrm{ESR}}$ 的权衡，体现了我们方法更优的 Pareto 前沿。}
+\label{fig:8}
+\end{figure*}
+
+
+
+训练过程中我们观察到，不同任务的有效稀疏水平会逐步分化。
+即使共享同一非紧约束 $\boldsymbol{t}$，任务间差异仍会自然出现。
+这一行为由拉格朗日约束驱动：它动态调整任务损失权重，使每个任务对“实际稀疏度 $\Omega_{\mathrm{MSR}}$ 与目标 $\boldsymbol{t}$ 的偏差”具备不同容忍度。
+
+
+\subsection{长度外推与稀疏动态分析}
+\label{appdix:length_extrapolation_and_sparsity_dynamics_analysis}
+我们在 RULER（8K-256K）上评估长度外推能力，骨干模型为 Llama-3.1-8B-Instruct。
+图~\ref{fig:8} 可视化了性能、推理加速与 $\Omega_{ESR}$ 的关系。
+当上下文扩展到 256K 时，MoBA 与 NSA 等基线出现灾难性退化（准确率接近 0）；相比之下，Elastic Attention（FA-XA）保持了更强鲁棒性，得分仍有 68.51。
+即使是高效率配置 Elastic Attention（XA-SSA），也可达到 47.68，显著优于标准 Xattention 基线（35.82），且在更高稀疏度下运行。
+
+图~\ref{fig:8}(b)(c) 还显示了关键效率优势。
+NSA 与 InfLLM-V2 等方法虽可达到高稀疏度（$>0.95$），但受动态选择开销或 kernel 限制，推理加速有限甚至回退（$<1.0\times$）。
+相对地，我们的 XA-SSA 在接近极限稀疏度（$\sim 0.995$）下仍能实现 3.28$\times$ 加速，验证了 router 的低额外开销。
+而 Elastic Attention（FA-XA）则在保持关键信息的同时达到更均衡权衡，实现 $1.51\times$ 加速。
+
+总体而言，Elastic Attention 构建了更优 Pareto 前沿：
+Elastic Attention（FA-XA）优先信息保留（$\Omega_{ESR} \approx 0.65$）以抑制“上下文坍塌”；
+Elastic Attention（XA-SSA）则通过自适应极致稀疏最大化吞吐。
+两种配置都在各自精度-效率区间持续优于对比方法。
+
+\subsection{损失曲线与监控指标}
+\label{appdix:loss_curve_monitoring_metrics}
+为验证 \textbf{Elastic Attention} 的训练稳定性与动态路由能力，我们在图~\ref{fig:lm_reg_loss} 中可视化了详细训练动态。
+该图从四个维度拆解优化过程：主语言建模损失、稀疏正则损失、路由稀疏指标（$\Omega_{\mathrm{MSR}}$）演化，以及自适应系数（$\lambda$）演化。
+\begin{figure*}[ht]
+\centering
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/lm_loss.pdf}
+\caption{训练过程中的语言建模损失}
+\label{fig:lm_loss}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/reg_loss.pdf}
+\caption{训练过程中的稀疏正则损失}
+\label{fig:reg_loss}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/sparsity_loss.pdf}
+\caption{训练过程中的 $\Omega_{\mathrm{MSR}}$}
+\label{fig:sparsity_loss1}
+\end{subfigure}
+\hfill
+\begin{subfigure}[t]{0.48\textwidth}
+\centering
+\includegraphics[width=\linewidth]{figures/lambda_evolution.pdf}
+\caption{训练过程中的自适应系数（$\lambda$）}
+\label{fig:sparsity_loss2}
+\end{subfigure}
+\caption{Elastic Attention 训练目标分解。我们展示 Attention Router 的训练动态：
+(a) 主语言建模目标，(b) 稀疏正则项，(c)(d) 分别为任务级稀疏分配（$\Omega_{\mathrm{MSR}}$）与自适应系数（$\lambda$）的演化，说明模型会自动区分稀疏鲁棒与稀疏敏感任务。}
+\label{fig:lm_reg_loss}
+\end{figure*}
+
+\paragraph{优化稳定性。}
+如图~\ref{fig:lm_loss} 与图~\ref{fig:reg_loss} 所示，语言建模目标与 Attention Router 参数的联合优化过程稳定。
+LM loss 快速下降并稳定在约 2.1，说明轻量 router 的集成与稀疏性引入未阻碍骨干模型收敛。
+与此同时，稀疏正则损失在前 100 步显著下降（约从 0.16 降至 0.06），表明连续松弛（Gumbel-Softmax）有效引导 router 满足预设稀疏约束。
+
+\paragraph{Elastic Attention 分配差异（$\Omega_{\mathrm{MSR}}$）。}
+图~\ref{fig:sparsity_loss1} 为 \Cref{sec:intro} 的动机提供了实证支持：下游任务天然具有不同注意力稀疏敏感性。
+\begin{itemize}
+\item \textbf{任务相关路由：} 从中性初始化开始，Attention Router 会自动学习任务差异。与假设一致，\textbf{稀疏敏感任务}（如 Code 与 In-Context learning）收敛到更高 $\Omega_{\mathrm{MSR}}$（约 0.80--0.85），意味着分配更多全注意力（FA）以保持性能。
+\item \textbf{稀疏鲁棒效率：} 相比之下，\textbf{稀疏鲁棒任务}（如 Q\&A）在更低水平附近收敛，更接近目标阈值（虚线，表示 $t_{\mathrm{sen}}$）。这表明 Elastic Attention 能识别可承受更高稀疏度的任务，从而提升推理吞吐并避免不必要计算。
+\end{itemize}
+
+\paragraph{自适应系数（$\lambda$）。}
+图~\ref{fig:sparsity_loss2} 展示了拉格朗日乘子（$\lambda$）的演化，它们会动态调整违反稀疏目标的惩罚强度。
+我们观察到 $\lambda_5$（In-Context）增长最快，说明模型优先满足该敏感任务的稠密需求。
+这一自适应机制可自动平衡计算成本与模型质量，减少人工任务级调参需求。
+
+
+\subsection{输入截断对任务识别的影响}
+\label{appdix:truncation_analysis}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/truncation_analysis.pdf}
+\caption{
+路由器输入截断长度对下游性能与 $\Omega_{\mathrm{MSR}}$ 的影响。
+我们比较了对“序列前缀与后缀拼接结果”施加不同截断预算（$L \in \{50, \dots, 800, \text{All}\}$）时的效果。
+结果表明，输入长度超过 100 token 后性能收益很小，且由于信噪比下降可能削弱 router 选择性。
+}
+\label{fig:truncation_analysis}
+\end{figure}
+
+为平衡路由效率与准确性，我们研究了 Attention Router 对输入序列长度的敏感性。
+具体地，我们分析不同截断预算如何影响 router 区分任务类型并分配合适稀疏模式的能力。
+图~\ref{fig:truncation_analysis} 展示了 6 个下游任务在截断预算从 50 token（边界池化）到全序列时的性能与稀疏趋势。
+
+\paragraph{边界池化假设。}
+默认策略使用边界池化：仅聚合前 100 与后 100 个 token。
+该设计基于一个经验观察：任务指令（System Prompt）通常位于上下文开头，用户具体查询通常位于结尾；中间内容多为长文档本体（如待摘要文本），对\textit{生成阶段}必要，但对\textit{路由阶段}往往是噪声。
+
+\paragraph{信噪比分析。}
+如图~\ref{fig:truncation_analysis} 所示，性能通常在 100--200 token 截断附近趋于饱和。
+值得注意的是，使用全序列并不会带来性能提升，且在部分场景（如多文档 QA）会导致次优路由。
+我们认为原因是任务识别信号被稀释：当 router 处理更多文档正文 token 时，指令语义特征会被高方差内容掩盖。
+由此 router 更难准确判别任务类型，导致稀疏模式趋同（长长度下稀疏曲线更平），但生成质量并未相应提升。
+这些结果验证了“100 token 边界窗口”是一种稳健配置：能保留关键任务描述信息，同时过滤由正文引入的噪声。
+
+\section{误差分析}
+在表~\ref{fig:case_policy}、\ref{fig:case_legal} 与 \ref{fig:case_montecristo} 中，我们给出与多种基线的代表性输出对比。
+由于上下文过长，仅展示了部分输入片段。
+我们观察到，性能提升的主要来源在于：本方法能够更准确识别并利用与查询相关的关键上下文片段。
+
+\label{appdix:error_analysis}
+\input{sections_zh/case/case1}
+\input{sections_zh/case/case2}

@@ -1,0 +1,54 @@
+\input{tables_zh/RULER_LB2_table}
+
+\section{实验}
+\label{sec:experiment}
+
+\subsection{实验设置}
+\label{subsec:exp_settings}
+
+\paragraph{训练与数据}
+\label{subsec:train_settings}
+我们选择 Qwen3-(4B/8B)~\citep{yang2025qwen3technicalreport} 和 Llama-3.1-8B-Instruct~\citep{grattafiori2024llama} 作为骨干 LLM。
+训练数据由 5 个来源构建：ChatQA2-Long-SFT-data~\citep{xu2024chatqa}、MuSiQue~\citep{trivedi2022musique}、CoLT-132K~\citep{li2025aixcoder}、GovReport~\citep{huang-etal-2021-efficient} 与 XSum~\citep{xsum-emnlp}，覆盖稀疏敏感任务（单文档 QA、多跳 QA）与稀疏鲁棒任务（代码补全、摘要、上下文学习）。
+最终数据集序列长度范围为 8K 到 64K token，总计约 0.74B token。
+针对稀疏鲁棒与稀疏敏感任务，我们经验设置目标稀疏度分别为 $\boldsymbol{t}=1.0$ 与 $\boldsymbol{t}=0.7$。
+我们在 $8\times$A800 GPU 上训练，每次实验可在 12 小时内完成。
+更多训练细节见附录~\ref{appendix:implementation_details}，超参数见表~\ref{tab:combined_hyperparameters}。
+
+\vspace{-0.5em}
+\paragraph{评测}
+\label{subsec:baseline}
+我们将方法与代表性训练式稀疏方法比较，包括 DuoAttention~\citep{xiaoduoattention2025}、PruLong~\citep{bhaskar2025cache} 与 InfLLM-V2~\citep{infllmv2}。
+对于稀疏头的注意力计算模式，我们考虑 Streaming Sparse Attention（SSA）~\citep{streamingllm} 与 XAttention（XA）~\citep{xattention}。
+在 XA 中设阈值 $\tau=0.9$，其余超参数采用默认值。
+我们使用“\{检索头模式\}–\{稀疏头模式\}”表示不同头配置，例如 FA-SSA 表示检索头采用 FA、稀疏头采用 SSA。
+由于篇幅限制，MoBA~\citep{moba} 与 NSA~\citep{NSA} 的实验，以及更详细基线配置见附录~\ref{appdix:eval_res}。
+全部评测均在 \textbf{\texttt{LOOM-Eval}} 框架~\citep{tang2025loom} 上完成。
+
+\subsection{评测结果}
+\label{subsec:eval_res_main}
+\paragraph{真实长上下文任务}
+我们首先在 LongBench-E~\citep{bai2024longbench} 上评估方法。该基准包含 6 类共 14 个真实长上下文任务。
+表~\ref{tab:longbench_main} 对比了 Elastic Attention 与其他基线。
+在每个比较组中，所有方法使用相同骨干模型与相同训练数据。
+结果显示，我们的方法在平均性能上持续最优，能够在提升推理效率的同时达到或逼近骨干模型（全 FA）表现。
+在不同任务上，Elastic Attention 能动态分配不同稀疏水平，例如在代码任务上平均 $\Omega_{\mathrm{MSR}}$ 约为 0.85，而在 QA 上约为 0.68。
+同时我们注意到，在稀疏鲁棒任务（如 Code、Summ）上，本方法有时弱于部分基线。
+其原因是我们采用更高稀疏度，而 InfLLM-V2 在部分场景会使用 FA\footnote{InfLLM-V2 没有严格定义的 $\Omega_{\mathrm{MSR}}$，因为其在上下文长度小于 8K 时使用 FA，超过 8K 时切换为混合注意力模式。}。
+
+\paragraph{长度外推能力测试}
+我们在 RULER~\citep{hsieh2024ruler} 上评测长度外推能力，考察不同上下文长度区间下模型表现。
+训练时最大上下文长度为 64K token，评测长度覆盖 8K 至 256K token。
+如表~\ref{tab:ruler_lb2_result}（左半部分）所示，我们的方法在所有长度上均取得最佳性能，同时保持较优稀疏水平，$\Omega_{\mathrm{MSR}}$ 基本稳定在 $0.65\sim 0.7$。
+此外我们观察到，对于 8B 规模模型，当上下文超过 64K token 时，FA–XA 配置通常表现最好。
+原因在于 FA–XA 的 $\Omega_{\mathrm{ESR}}$ 低于其他配置，可保留并利用更多有效信息。
+这种优势在超长上下文下尤为明显，例如在 256K token 时 FA–XA 仍保持较强性能。
+
+\paragraph{长程推理任务}
+我们进一步在 LongBench-V2~\citep{bai2024longbench2} 上评测，该基准被广泛用于长上下文推理，长度范围约为 8K 至 2M 词。
+如表~\ref{tab:ruler_lb2_result}（右半部分）所示，我们的方法在 Easy 与 Hard 设置下都取得了稳定强结果，并获得最佳平均性能（FA-SSA 或 FA-XA 配置）。
+值得注意的是，FA–XA 在 Qwen3-8B 上未表现出同等优势，这可能与该模型自身特性有关，后续可通过更细粒度超参数调优进一步改进。
+
+
+
+% We employ a comprehensive evaluation framework~\citep{tang2025loom} to assess the model's capabilities across three complementary dimensions. We primarily utilize \textbf{LongBench}~\citep{bai2024longbench} to evaluate real-world understanding; its diverse task set serves as a critical diagnostic tool to verify the router's ability to dynamically assign task-specific sparsity. To assess the effective context window, we employ \textbf{RULER}~\citep{hsieh2024ruler}. Furthermore, we test the model with \textbf{LongBench-v2}~\citep{bai2024longbench2}, focusing on multi-hop reasoning to demonstrate robustness in capturing intricate dependencies that standard benchmarks may overlook.

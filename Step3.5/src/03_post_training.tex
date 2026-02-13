@@ -1,0 +1,208 @@
+\section{后训练}
+\label{sec:post-train}
+
+
+本节介绍用于大规模强化学习（RL）的统一后训练方案，起点是统一的监督微调（SFT）模型。该框架将可验证奖励信号与人类偏好反馈结合，并在 MoE 模型的大规模离策略训练中保持稳定，从而实现持续的自我提升。
+流程采用与先前工作~\cite{liu2025deepseek, zeng2025glm} 类似的两阶段策略。首先，我们在统一 SFT 基线之上进行领域特定 RL，构建 \textbf{专家模型}，覆盖数学、代码、STEM、工具使用、长上下文理解、人类偏好与智能体推理。随后通过 \textbf{自蒸馏} 与 \textbf{可扩展 RL} 将这些专家蒸馏为通用模型，确保最终模型在多任务上与专门化基线保持竞争力。通过在目标化专精与全局综合之间系统交替，我们在不牺牲专家级性能的情况下获得稳健泛化。
+
+
+\subsection{专家模型构建与自蒸馏}
+\label{sec:sft}
+
+我们采用两阶段 SFT 流水线，为后续 RL 构建稳健基础。
+第一阶段进行大规模多领域 SFT，覆盖数学、代码、STEM、逻辑、通用问答、代码智能体、工具使用、搜索智能体与长上下文理解。通过难度感知过滤与策略性配比，促进广泛的智能体行为。
+第二阶段通过注入分布外（OOD）信号~\cite{ye2025limoreasoning, muennighoff2025s1} 显式提升推理密度，包含约 30k 条专家级化学轨迹与合成算术任务。这种针对性的推理模式暴露可在仅 3 个 epoch 内激活潜在能力，为后续领域特定 RL 提供所需的结构复杂度初始化。
+
+
+在完成领域特定 RL 后，我们将分化的专家能力汇聚为统一的学生模型，并从中期训练 checkpoint 初始化。在该阶段，专家模型使用与第一阶段 SFT 语料共享的提示分布生成高质量轨迹，相较直接并入 RL 更稳定、更高效。该方法通过拒绝采样剔除语言混杂或过度思考等不良模式，将专家知识集中到单一学生模型中。由此建立的高质量基础显著降低了后续 RL 的优化负担。
+
+\paragraph{超参数。}
+采用 Muon 优化器~\cite{jordan2024muon}，3\% 预热，并从 $1.0 \times 10^{-5}$ 余弦衰减至 $5.0 \times 10^{-6}$。
+与中期训练类似，我们冻结 MoE 路由器权重并禁用 EP 组均衡损失。
+SFT 训练使用 MTP 损失权重 0.1、全局 batch size 32、全局序列长度 $128\text{k}$。在 RoPE~\cite{su2024roformer} 上，我们保持 $\theta_{SWA}=10,000$，并将 $\theta_{Full}=5,000,000$ 以适配 128k 上下文长度~\cite{xiong2024effective}。
+
+
+\subsection{可扩展 RL}
+\label{sec:rl}
+
+
+在 LLM 的 RL 中，我们优化策略 $\pi_\theta$ 以最大化轨迹 $\tau=(s_0,a_0,\dots,s_T)$ 上的终止奖励，其中 $a_t$ 为状态 $s_t$ 生成的 token。
+然而在推理任务中，该过程会因高梯度方差而产生严重不稳定，并被极长序列与模型规模进一步放大（图~\ref{fig:mispo_vs_ppo} (2)）。
+方差主要来自\textbf{高吞吐推理引擎与训练框架之间的基础设施差异}，以及迭代更新固有的\textbf{离策略失配}。
+在此设置下，重要性采样本身不稳定，微小的 token 概率偏移会累积为噪声梯度，阻碍收敛。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{src/img/pdf/tb_plots_grad_norm_biglegend.pdf}
+    \caption{\textbf{MIS-PO 与 PPO 在内部模型上的可扩展性对比}。
+    \textbf{(1) 效率}：MIS-PO 具有更高样本效率，以更快的收敛趋势达到更高奖励平台。
+    \textbf{(2) 稳定性}：MIS-PO 明显稳定训练动态，抑制梯度噪声并消除策略梯度范数的大幅尖峰。
+    \textbf{(3) 探索保持}：MIS-PO 的熵衰减更慢，有助于更好的探索—利用平衡。}
+    \label{fig:mispo_vs_ppo}
+\end{figure}
+
+\subsubsection{MIS 过滤的策略优化（MIS-PO）}
+为应对这些稳定性挑战，我们提出 MIS-PO，受 Metropolis Independence Sampling（MIS）~\cite{metropolis1953equation,hastings1970monte} 启发。
+我们将推理策略视为提议分布、训练策略视为目标分布，将更新限制在与目标分布足够接近的样本上。
+与通过有界比率缩放梯度且常伴随高方差的重要性采样不同，MIS-PO 对分布外样本施加二值掩码过滤，并将保留轨迹视为近似 on-policy，从而显著降低梯度方差并稳定优化。
+
+
+形式化地，我们定义二值指示函数 $\mathbb{I}(x)=\mathbb{1}[\rho_{\min}\le x\le\rho_{\max}]$，并在两个粒度上使用。\textbf{token 级}上，用其过滤概率比 $x_t=\pi_{\theta_{\text{old}}}(a_t|s_t)/\pi_{\theta_\text{vllm}}(a_t|s_t)$，以抑制训练与推理策略的局部不匹配~\cite{yao2025offpolicy}。\textbf{轨迹级}上，将同一指示函数应用于几何均值比 $\bar{\rho}(\tau)=(\prod_t x_t)^{\frac1T}$，从而丢弃偏离目标分布较大的整条轨迹。
+新的 actor 损失以双层离散掩码替代连续重要性权重：
+\begin{equation}
+    \mathcal{L}_{actor} = - \mathbb{E}_{\tau \sim \pi_{\theta_\text{vllm}}} \left[ \mathbb{I}(x_t) \cdot \mathbb{I}(\bar{\rho}(\tau)) \cdot \log \pi_\theta(a_t|s_t) \cdot \hat{A}_t \right].
+    \label{eq:mispo_loss}
+\end{equation}
+
+将有效样本视为近似 on-policy 后，该目标在信任区域约束下显著降低长程推理任务的梯度方差。
+图~\ref{fig:mispo_vs_ppo} 给出约 5,000 训练步的消融结果，MIS-PO 的 actor 梯度范数噪声显著低于 PPO，表明其可扩展性更好。更多消融见附录~\ref{sec:rl_ab}。
+
+为进一步稳定训练动态，我们采用多项技术：\textbf{截断感知的价值自举}~\cite{pardo2022timelimitsreinforcementlearning} 用于纠正上下文截断带来的乐观奖励偏差，以及\textbf{路由置信度}监控以预测 MoE 架构特有的不稳定性。
+
+
+\paragraph{截断感知的价值自举。}
+对上下文截断轨迹赋予零奖励会混淆“截断”与“任务失败”，无法区分未完成与错误结果，从而惩罚长链条推理。
+为此，我们将零奖励替换为终止状态的自举价值估计，等价于把截断视为视野中断而非终止失败。轨迹 $\tau_i$ 的修正奖励定义为：
+\begin{align}
+    \hat{R_i} &= \begin{cases} V_\phi(s_T) & \text{若响应被截断，} \\ R_i & \text{否则。} \end{cases}
+\end{align}
+
+
+实证表明，该截断感知自举即使在 20\% 的截断率下也能稳定训练，避免不完整轨迹常引发的奖励退化~\cite{deepscaler2025,yu2025dapo}。消融实验验证该技术对竞赛级基准尤为有效，因为长程推理使截断效应更常见。
+
+
+\paragraph{路由置信度作为稳定性代理。}
+
+
+近期研究~\cite{zheng2025group,ma2025stabilizing} 将 RL 稳定性与 MoE 路由一致性关联起来。
+在此基础上，我们提出\textbf{路由置信度}（$\Sigma_k$）作为稳定性代理，它是被激活专家的平均概率质量。
+较低的 $\Sigma_k$ 意味着更高的路由不确定性，会放大训练—推理失配。
+通过初步实验，我们发现明显的稳定性相变：低路由置信度的模型更脆弱，需要极端稳定化（\textit{例如}，Router Replay~\cite{zheng2025group,ma2025stabilizing,deepseekai2024deepseekv32}、严格 on-policy 更新~\cite{hu2025openreasonerzero}）。
+相比之下，高路由置信度的模型更为稳健，可在无需复杂干预的情况下进行离策略训练。
+
+
+\paragraph{RL 训练动态。}
+为全面展示方法，我们在图~\ref{fig:rlvr_curve} 中给出带可验证奖励的 RL（RLVR）训练动态及 \ourmodel 的下游评测提升。训练奖励稳步上升，表明学习过程稳定有效。此外，\ourmodel 在多种基准上取得一致提升：IMO-AnswerBench~\cite{luong2025towards} +3.2\%，CF-Div2-Stepfun-cpp~（附录~\ref{cf-div2-step}：自定义 CodeForces\footnote{https://codeforces.com/} Div.2 基准）+6.1\%，ARC-AGI-1~\cite{chollet2019measure} +10.6\%，$\text{HLE}_\text{text}$~\cite{phan2025humanitysexam} +3.4\%。
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{src/img/pdf/tb_plots_sd0116_k3_i2_eval_gain.pdf}
+    \caption{\textbf{\ourmodel 的 RL 训练动态与跨域提升。} RL 使奖励稳步增长（左），并在多项基准上带来一致的准确率提升（右）。}
+    \label{fig:rlvr_curve}
+\end{figure}
+
+
+\subsubsection{奖励系统}
+我们将 RL 框架解耦为可验证奖励的 RL（RLVR~\cite{grporlvr}）与不可验证奖励的 RL（\textit{例如} RLHF~\cite{openairlhf}），分别配备与监督特性匹配的奖励模型。
+
+
+\paragraph{可验证奖励。}
+在 RLVR 中，每个提示都配有任务特定验证器输出奖励。基于规则的检查器用于逻辑、指令遵循与代码任务，基于模型的验证器用于 STEM 任务。
+在内部模型上进行 450 步 RL 训练的消融实验表明，STEM 任务使用模型验证器比直接的数学验证平均高 2.0\%；更多细节见附录~\ref{sec:rl_reward}。
+
+
+\paragraph{不可验证奖励。}
+对不可验证任务，我们使用成对生成式奖励模型（GenRM~\cite{genrm}），将回答与固定参考进行对比。
+GenRM 为推理模型，输出回答获胜的置信度分数。
+该分数随后被转换为 Bradley–Terry 胜率~\cite{bradley1952rank} 作为奖励信号。
+长度控制在 GenRM 内建模为置信度惩罚，并传递到胜率奖励，从而抑制 RL 训练中的过度长度增长。
+我们进一步通过对伪造引用、过度自信陈述或语言不一致的回答赋零奖励，提升鲁棒性。
+
+
+\paragraph{智能体奖励。}
+搜索任务使用基于实体匹配分数的 LLM 进行评估。
+在报告生成中，基于 rubric 的 LLM 裁判会评估研究问题、rubric 规格与候选报告，输出三值判断（\emph{满足}、\emph{部分满足}、\emph{不满足}）~\cite{hu2025stepdeepresearchtechnicalreport}。由于中间类别常与专家偏好不一致，我们将其映射为非对称二值奖励，以获得更清晰的学习信号并加速向专家偏好对齐的收敛。
+
+
+\paragraph{GenRM 训练与 MetaRM。}
+我们通过使用 RM 专用提示对 SFT 模型进行微调来初始化 GenRM。
+在 RL 训练中，使用整理后的成对偏好数据，并采用与标量奖励模型类似的 logsigmoid 损失。
+为提升 GenRM 鲁棒性，我们引入 MetaRM（额外验证器）以惩罚含有伪推理（\textit{即} 以错误逻辑得到正确偏好）的回答，从而在检测到此类模式时降低训练奖励。
+在内部模型上跨 200 步 RL 训练的消融实验中，加入 MetaRM 的 GenRM 在所有基准上均比原始 GenRM 高 0.5\%–3\%。
+
+\subsubsection{超参数}
+\label{sec:rl_hyperparameter}
+在 rollout 中，我们将采样温度与 top-$p$ 均设为 1.0，最大序列长度 128k token。
+每次生成：推理任务采样 256 个不同提示，每个提示 16 个响应；人类偏好任务采样 512 个提示，每个提示 8 个响应；工具使用任务采样 128 个提示，每个提示 8 个响应。
+rollout 后将完成样本划分为 mini-batch，并以单 epoch 训练：actor 使用 4 个 mini-batch，critic 使用 12 个 mini-batch。优化采用 Muon，权重衰减 0.1。actor 学习率 $2 \times 10^{-6}$，预热 20 步；critic 学习率 $5 \times 10^{-6}$，预热 50 步。遵循 ORZ~\cite{hu2025openreasonerzero}，我们设置 $\gamma$ 与 $\lambda$ 均为 1。最后阶段使用无偏 KL 损失~\cite{liu2025deepseek}，系数 0.001。对公式~(\ref{eq:mispo_loss})，token 级与轨迹级掩码区间分别设为 $[0.5, 2]$ 与 $[0.996, 1.001]$。
+
+
+\subsection{数据合成与整理}
+我们通过聚合开源数据、合成生成与用户轨迹，构建多样且难度均衡的提示池。采用统一的合成与整理流水线，将严格的全局过滤与领域特化精炼结合，以最大化推理密度。数据质量通过规则启发式与模型一致性检查的混合方式保障。最终数据集包含 871k 样本（7.23B token），详细统计见表~\ref{tab:sft_data_statistics}。
+
+
+\begin{table}[t!]
+    \centering
+    \setlength{\tabcolsep}{4.0pt}
+    \begin{tabular}{lrrr}
+    \toprule
+    \rowcolor{header_gray} \textbf{领域} & \textbf{样本数} & \textbf{Token} & \textbf{语料占比} \\
+    \midrule
+    数学    & 68055 & 0.98B & 11.19\% \\
+    代码    & 86421 & 1.23B & 21.10\% \\
+    STEM    & 120399  & 0.55B & 6.31\% \\
+    逻辑   & 93323  & 0.81B & 13.87\% \\
+    通用 & 314495 & 0.80B & 9.16\% \\
+    代码智能体     & 37240 & 0.90B & 17.70\% \\
+    工具使用 & 114507 & 0.76B & 8.72\% \\
+    搜索智能体
+    & 20256 & 0.50B & 8.75\% \\
+    长上下文 & 15565 & 0.70B & 4.00\% \\
+    \midrule
+    总计   & 870687 & 7.23B & 100.00\% \\
+    \bottomrule
+\end{tabular}
+\caption{第一阶段 SFT 的数据统计。}
+\label{tab:sft_data_statistics}
+\end{table}
+\subsubsection{通用与推理}
+我们的训练语料汇集了社区提示、专家回答与多源开源合成数据，包括 \textbf{数学}~\cite{li2024numinamath,albalak2025bigmath,mitra2024orcamath,aslawliet2024olympiads,aslawliet2024cnk12,openr12025math220k,deepmath2025deepmath103k,yu2025dapoopensourcellmreinforcement,hu2025openreasonerzero,guha2025openthoughts,muennighoff2025s1simpletesttimescaling,ji2025amthinkingv1advancingfrontierreasoning,limo2025lessismore}、\textbf{编程}~\cite{li2023tacotopicsalgorithmiccode,deepcoder2025,wang2025codecontestshighqualitytestcase}，以及 \textbf{科学与开放式问答}~\cite{li2023camel,bercovich2025llamanemotronefficientreasoningmodels,fan2025megascience,zhao2024wildchat}。
+为最大化推理密度，我们采用统一流水线，将严格的全局过滤与领域特化精炼结合，并通过规则启发式与模型一致性检查的混合方式保障质量。具体而言，在数学中，我们通过专家引导的拒绝采样与大数算术合成来保证数值稳定；在编程中，我们优先选择严格的算法挑战以确保离线可执行性，并严格清除与 RAG 相关的幻觉。
+尤其是，我们抑制模型虚假声称可访问外部搜索引擎或伪装检索在线解的倾向。此外，我们将科学数据限制为答案明确、可唯一确定的问题。
+
+为在实际场景中增强泛化，我们扩展了开源检查器\footnote{https://github.com/allenai/open-instruct/tree/main/open\_instruct/IFEvalG}，并为样本加入若干真实世界约束。
+同时，我们从开源、合成与用户轨迹中收集通用提示，形成多样且难度均衡的池。
+该流程产出包含数百万样本、规模达十亿 token 的高保真数据集。
+
+
+\subsubsection{通用化工具学习}
+我们提出一种以执行为驱动的数据生成框架，用于学习可靠的工具使用行为，解决现有合成流水线的数据不一致、不可验证与模型幻觉等关键问题。不同于随机探索~\cite{liu2025webexplorer,li2025websailor} 或模型模拟~\cite{kimi_k2,li2025simulating}，我们将工具使用行为分解为原子意图，并用有限状态机（FSM）建模，显式分离抽象的工具调用逻辑与参数化执行约束。数据通过“采样—执行—验证”的拒绝采样闭环生成：所有候选轨迹均在真实环境中执行，并由确定性反馈验证，从而确保真实性并消除幻觉。通过组合式合成原子意图，该框架可规模化生成复杂、可控的工具使用场景。
+基于该范式，我们构建了超过 10 万条高质量轨迹，总计数十亿 token，为工具规划、推理与执行提供精确监督。
+
+\subsubsection{代码智能体}
+代码智能体可通过可验证的\textbf{环境构建}与\textbf{解答生成}之间的闭环干预实现自我提升，执行反馈会持续改进两项能力。
+我们将环境构建与修复 bug、实现特性并列为一等能力，并在可验证奖励信号下进行合成。
+为此，我们构建了从 SWE-factory~\cite{guo2026swefactoryautomatedfactoryissue} 演化而来的专用智能体流水线，包含跨任务记忆池（检索历史构建成功作为 few-shot 示范）与循环检测机制以避免冗余探索。
+该流水线实现了 40\% 的环境构建成功率，并通过包含 shell 命令与错误恢复的构建轨迹提供密集监督，形成模型自我演化的正反馈回路。
+为进一步提升信号质量，我们对环境构建轨迹进行规范化，抽象并掩盖与最终解决无关的短暂失败与冗余执行模式。
+这些自举环境作为动态测试床，结合执行反馈与单元测试生成高质量合成数据与奖励信号以进行持续对齐。实证显示存在双向迁移：构建专长加速编码性能，而在这些环境中编码又进一步提升构建准确率，如 DockSmith~\cite{zhang2026docksmithscalingreliablecoding} 所示。
+借助该演化流水线，我们整理了 50k 个已验证环境，覆盖 15k+ GitHub 仓库与 20+ 编程语言。该多样化集合覆盖广泛的真实场景，为训练通用代码智能体提供坚实基础。此外，我们还纳入多项知名开源环境，包括 SWE-smith~\cite{yang2025swe}、SWE-Gym~\cite{pan2024training}、R2E-Gym~\cite{jain2025r2e}、SWE-rebench~\cite{badertdinov2025swe} 与 SETA~\cite{seta}。
+
+
+\subsubsection{搜索与研究智能体}
+
+
+为促进高级信息检索，我们的流水线引入图结构与多文档综合以强化多跳推理。通过对知识图谱（\textit{例如} Wikidata5m~\cite{wang2021kepler}）进行拓扑扩展并模拟跨网站浏览轨迹，我们生成反映真实研究复杂性的样本。关键在于，为保证外部检索的必要性，我们使用 DeepSeek-R1~\cite{Guo_2025} 对生成查询进行校验，系统性剔除无需工具即可由强推理模型解答的实例。随后，轨迹通过结构化报告生成流水线~\cite{hu2025stepdeepresearchtechnicalreport} 进行精炼，确保严格指令遵循与结构完整性。
+具体而言，我们强制遵循预设研究计划，丢弃任何偏离结构的轨迹。随后对有效输出使用基于模型的判别器与启发式规则进行迭代清理，以解决非正式写作、时间幻觉与中英混杂等细粒度问题。
+该端到端方法在 \textsc{ResearchRubrics}~\cite{sharma2025researchrubrics} 基准上达到业界领先表现。
+
+
+\subsection{智能体基础设施}
+\paragraph{推理与工具使用模板设计。}
+为将推理与智能体能力有效整合到单一基础模型中，必须确定合适的思考过程与工具使用模板。针对推理模板，我们评估了三种管理策略。
+每轮都丢弃推理历史~\cite{Guo_2025} 虽鼓励独立生成，但在长时程任务中会导致失败（\textit{例如} 超过 100 轮的编码会话）。相反，保留完整推理历史会造成极高上下文消耗，迅速耗尽模型容量并阻塞后续工具调用。为此，我们采用选择性保留策略：仅保留由最近一条用户指令触发的工具使用轨迹中的推理痕迹。
+该设计在推理连贯性与上下文效率之间取得最优权衡，与近期前沿模型实践一致~\cite{yang2025qwen3technicalreport,liu2025deepseek}。
+对于工具使用模板，我们比较了常见的 JSON 与 XML 格式。
+JSON 的严格语法（转义与分隔符）在小模型或训练不足时容易导致解析错误；而 XML 允许扁平字符串输出，语法开销显著更低。因此，我们选择 XML 以确保复杂现实场景下智能体编码的鲁棒性。
+
+
+\paragraph{可扩展代码智能体基础设施。}
+我们的集成架构聚焦于可扩展会话管理与跨框架泛化，以支持高吞吐智能体编码。核心是自研 Session-Router，通过 Kubernetes 协调容器生命周期，并借助 Tmux 保持交互一致性。该架构支持数千并发环境的无缝状态持久化，无需为每个脚手架手工配置 Docker。
+为确保在多样智能体工作流中的高泛化，我们训练模型适配广泛交互框架，从学术标准（\textit{例如} OpenHands~\cite{wang2024openhands}、SWE-agent~\cite{yang2024swe}、Terminus-2~\cite{terminalbench2025}）到企业级协议（\textit{例如} Kilocode~\cite{kilocode}、Roocode~\cite{roocode}、ClaudeCode~\cite{claudecode}）。在训练中暴露于这些不同交互范式，有效防止模型过拟合特定流水线模式，使其在不同执行环境下均保持稳健。
+
+
+\begin{comment}
+\subsection{Scaling Parallel Coordinated Reasoning}
+We further investigate the test-time scaling properties of Step 3.5 Flash by adopting the \textbf{Parallel Coordinated Reasoning (PaCoRe)} paradigm ~\cite{hu2026pacorelearningscaletesttime}, leveraging Step 3.5 Flash's extreme inference efficiency. 
+This approach decouples reasoning capacity from context limitations by launching parallel reasoning trajectories and synthesizing their insights into higher-fidelity solutions. 
+We evaluate Step 3.5 Flash under \textbf{PaCoRe-Low} and \textbf{PaCoRe-Medium} settings, corresponding to single-round coordinated reasoning with trajectory configurations of $\vec{K}=[4]$ and $\vec{K}=[16]$, respectively. As demonstrated in Table (add table), this targeted scaling of test-time compute yields significant gains across both reasoning and general benchmarks.
+\end{comment}

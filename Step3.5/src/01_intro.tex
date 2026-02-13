@@ -1,0 +1,17 @@
+\newpage
+\section{引言}
+\label{sec:intro}
+尽管开源大语言模型（LLM）~\cite{deepseekai2024deepseekv32, zeng2025glm, xiao2026mimov2flashtechnicalreport, team2025longcat, kimi_k2, minimax_m2p1} 已在可验证任务~\cite{10.5555/3524938.3525416,hmmt25,jain2024livecodebench} 上迅速缩小与闭源前沿系统~\cite{gpt_5p2,gemini_3,opus} 的性能差距，随着智能体系统的重要性上升，新的挑战随之出现。尤其是在复杂推理方面，开源模型仍落后于闭源前沿模型。此外，关键的效率瓶颈限制了其在长上下文智能体任务中的应用~\cite{swe_verified,yang2025swesmith,tau2bench2025,terminalbench2025,wei2025browsecomp,zhou2025browsecompzhbenchmarkingwebbrowsing,mialon2023gaiabenchmarkgeneralai,chen2025xbench,sharma2025researchrubrics}，更难在边缘或资源受限环境中部署。
+
+
+在设计 \ourmodel 的架构时，我们聚焦于两个核心方面：效率与容量。我们采用稀疏 Mixture-of-Experts（MoE）~\cite{fedus2021switchtransformers,zoph2022stmoedesigningstabletransferable,pmlr-v162-du22c,lepikhin2020gshardscalinggiantmodels,dai2024deepseekmoeultimateexpertspecialization} 架构，总参数量 196B，但每个 token 仅激活 11B；同时使用 3:1 的滑动窗口注意力（SWA）~\cite{DBLP:journals/corr/abs-1904-10509} 与全注意力混合比例，以及多 Token 预测（MTP-3）~\cite{gloeckle2024better,deepseek2024deepseekv3,xiaomi2025mimo,xiao2026mimov2flashtechnicalreport} 以降低长上下文时延。为在混合注意力下以最小开销提升容量，我们将 SWA 层的 query 头数从 64 提升到 96，并引入按头门控注意力~\cite{qiu2025gatedattentionlargelanguage}。该设计支持大规模线上部署，在 OpenRouter 首周于 Hopper GPU 上可稳定达到约 170 tokens/s 的速度\footnote{https://openrouter.ai}。
+
+
+在预训练方面，我们将稳定性视为第一优先级，并通过轻量级异步指标服务器与微批级持续日志构建了完整的可观测与诊断栈。该基础设施可系统识别并缓解大规模 MoE 训练的失效模式（\textit{例如}，Muon 相关的精度敏感、专家塌陷~\cite{step3blog}、激活爆炸~\cite{kimi_k2,openai2025gptoss120bgptoss20bmodel}）。结合改进的 Muon 优化器~\cite{jordan2024muon}，我们在 17.2T 高质量且多样的 token 上实现稳定训练，仅出现一次短暂的损失峰值。在这一稳定训练机制下，\ourmodel Base 在数学、代码与知识基准上与更大规模模型（如 DeepSeek-V3.2-Exp Base~\cite{deepseekai2024deepseekv32} 与 Kimi-K2-Base~\cite{kimi_k2}）保持竞争力。尤其在 SimpleQA~\cite{wei2024measuring} 上达到 31.6\%，尽管参数仅为其三分之一，仍超过 DeepSeek-V3.2-Exp Base。
+
+
+面向前沿级智能，当前的后训练系统面临两项紧密耦合的挑战：自蒸馏所需的领域专家迭代效率低~\cite{deepseekai2024deepseekv32, zeng2025glm, xiao2026mimov2flashtechnicalreport, team2025longcat}，以及强化学习（RL）在 MoE 模型上的长程推理可扩展性受限。训练单一通用模型以覆盖多领域，往往牺牲领域专长；而维护多个专家模型又会造成碎片化与不可持续的多模型迭代成本。同时，随着推理轨迹加深，离策略采样中的细微 token 概率差异会累积为高方差梯度，这在 MoE 模型中尤为显著，因为专家路由引入更大的分布漂移并在前沿性能区间内破坏优化稳定性~\cite{zheng2025group,yao2025offpolicy,ma2025stabilizing,deepseekai2024deepseekv32}。
+
+为解决上述问题，我们提出基于共享 SFT 基座的统一大规模 RL 后训练方案。该框架在领域专精与全局综合之间交替，既能高效迭代专家，又保持单一高性能通用模型。专门的中期训练阶段将上下文窗口扩展至 128k，并通过合成数据强化核心智能体与推理能力，为下游后训练提供更强初始化。为在该统一框架内实现稳定可扩展的 RL，我们提出 Metropolis Independence Sampling-Filtered Policy Optimization（MIS-PO）~\cite{metropolis1953equation,hastings1970monte}，在 token 与轨迹层面采用离散分布过滤替代连续重要性加权。通过将优化限制在稳定的信任区域内，MIS-PO 显著降低梯度方差并保留有效学习信号，使 RL 能可靠扩展到长程推理与智能体行为。
+
+尽管只有 11B 活跃参数，\ourmodel 仍在广泛的推理与智能体基准上与前沿模型和系统具有竞争力。标准推理设置下，在 IMO-AnswerBench~\cite{luong2025robustmathematicalreasoning} 上达 85.4\%，在 LiveCodeBench-v6（2024.08–2025.05）~\cite{jain2024livecodebench} 上达 86.4\%；同时在长程、工具增强能力上表现稳健：$\tau^2$-Bench~\cite{tau2bench2025} 为 88.2\%，BrowseComp（含上下文管理）~\cite{wei2025browsecomp} 为 69.0\%，Terminal-Bench 2.0~\cite{terminalbench2025} 为 51.0\%。在 PaCoRe~\cite{hu2026pacorelearningscaletesttime} 深度思考推理下，\ourmodel 在需要更长推理与多轮综合的基准上进一步提升。综合来看，\ourmodel 在推理与智能体场景中显著缩小了开源模型与前沿专有系统之间的差距。
