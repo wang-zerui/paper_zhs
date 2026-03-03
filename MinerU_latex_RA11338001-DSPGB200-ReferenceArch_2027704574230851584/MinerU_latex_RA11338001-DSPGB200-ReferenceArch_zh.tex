@@ -1,0 +1,547 @@
+% 使用 XeLaTeX 编译
+\documentclass[10pt]{article}
+\usepackage[margin=2cm,includehead=true,includefoot=true,centering]{geometry}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage[version=4]{mhchem}
+\usepackage{stmaryrd}
+\usepackage{bbold}
+\usepackage{fontspec}
+\usepackage{ctex}
+\usepackage[export]{adjustbox}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{setspace}
+\usepackage{longtable,array,multirow}
+\usepackage{calc}
+\usepackage{etoolbox}
+\usepackage{graphicx}
+\usepackage{colortbl}
+\newcounter{none}
+
+\setstretch{1.2}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt plus 2pt minus 1pt}
+\setlength{\emergencystretch}{3em}
+
+\makeatletter
+\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
+\newsavebox\pandoc@box
+\newcommand*\pandocbounded[1]{%
+  \sbox\pandoc@box{#1}%
+  \Gscale@div\@tempa{\textheight}{\dimexpr\ht\pandoc@box+\dp\pandoc@box\relax}%
+  \Gscale@div\@tempb{\linewidth}{\wd\pandoc@box}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi
+  \ifdim\@tempa\p@<\p@\scalebox{\@tempa}{\usebox\pandoc@box}%
+  \else\usebox{\pandoc@box}%
+  \fi
+}
+\def\fps@figure{htbp}
+\makeatother
+
+\definecolor{table-rule-color}{HTML}{999999}
+\arrayrulecolor{table-rule-color}
+\setlength{\aboverulesep}{0pt}
+\setlength{\belowrulesep}{0pt}
+
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=cyan}
+\urlstyle{same}
+
+\title{NVIDIA DGX SuperPOD：面向 AI 领导力的下一代可扩展基础设施\\参考架构（基于 NVIDIA DGX GB200）}
+\author{}
+\date{最新发布版\\NVIDIA Corporation\\2025-09-03}
+
+\begin{document}
+\maketitle
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/d079ea90faf002ff29d6d955d968923718c19f29218193ce750da21bae99e057.jpg}}
+
+\section{参考架构目录}
+
+1 摘要\\
+2 DGX SuperPOD 架构\\
+3 DGX SuperPOD 关键组件\\
+\quad 3.1 NVIDIA DGX GB200 机柜系统\\
+\quad 3.1.1 DGX GB200 计算托盘\\
+\quad 3.1.2 NVLink 交换托盘\\
+\quad 3.1.3 DGX 电源托架\\
+\quad 3.2 NVIDIA InfiniBand 技术\\
+\quad 3.3 NVIDIA Mission Control\\
+\quad 3.4 组件清单\\
+\quad 3.5 设计要求\\
+4 网络 Fabric\\
+\quad 4.1 多节点 NVLink Fabric（NVL5）\\
+\quad 4.2 计算 Fabric\\
+\quad 4.3 存储与带内以太网 Fabric\\
+\quad 4.4 以太网分段\\
+\quad 4.5 客户边缘连接\\
+5 存储架构\\
+6 DGX SuperPOD 软件\\
+\quad 6.1 Run:ai\\
+7 总结\\
+8 声明
+
+文档编号：RA-11338-001 V01\\
+发布日期：2025-06-16
+
+\section{提示}
+《NVIDIA DGX SuperPOD：面向 AI 工厂的下一代可扩展基础设施参考架构（基于 NVIDIA DGX GB200）》亦提供 PDF 版本。
+
+\section{第 1 章：摘要}
+NVIDIA DGX SuperPOD 架构旨在为下一代 AI 工厂提供卓越性能、可扩展性与创新能力，服务企业、高校、科研机构与公共部门用户。该架构与 NVIDIA 内部核心研发系统保持“物理孪生”关系，即 NVIDIA 的基础设施软件、应用与支持流程会先在同构架构上完成验证。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/92730ca277f1bd734c5bb9568ee0dc179ac2712a2d70b8c5c6fbbd894119f97e.jpg}}
+
+本 DGX SuperPOD 参考架构（RA）基于搭载 Grace CPU 与 Blackwell GPU 的 DGX GB200 系统。本文介绍了定义 DGX SuperPOD 可扩展、模块化架构的关键组件。DGX SuperPOD 采用可扩展单元（SU）理念：每个 SU 包含 8 套 DGX GB200 系统，可实现任意规模的快速部署。文档还给出 SU 设计细节，以及 InfiniBand、NVLink、以太网 Fabric 拓扑、存储规格、推荐机柜布局与布线指导。
+
+该 RA 融合多项 NVIDIA 前沿技术，帮助企业和行业构建自有 AI 工厂。为实现最佳扩展性，DGX SuperPOD 主要依赖以下关键技术与方案：
+
+\begin{itemize}
+\item NVIDIA DGX GB200 系统：AI 与 HPC 的高性能计算基石。
+\item NVIDIA NDR（400Gbps）InfiniBand：高性能、低时延、可扩展互联网络。
+\item NVIDIA Spectrum-4（800Gbps）以太网：面向存储连接的高性能低时延网络。
+\item 第五代 NVIDIA NVLink：为加速计算中的 CPU/GPU 提供高速互联，支撑高强度通信模式。
+\item NVIDIA Mission Control：统一的 AI 工厂运维与编排软件栈。
+\end{itemize}
+
+\section{第 2 章：DGX SuperPOD 架构}
+DGX SuperPOD 架构由 DGX 系统、InfiniBand 与以太网网络、管理节点和存储共同组成。图 2.1 展示单个 SU（可扩展单元）的机柜布局。每个 SU 的热设计功耗（TDP）约为 1.2 兆瓦（MW）。通常建议数据中心满足或高于 Uptime Institute Tier 3，或 TIA942-B Rated 3、EN50600 Availability Class 3 等级标准，且具备并行可维护性与无单点故障能力。
+
+每套 DGX GB200 采用液冷与风冷结合的混合散热设计，以应对机柜高热密度。由于 DGX SuperPOD（DGX GB200）是交钥匙级 AI 数据中心规模产品，NVIDIA 提供了数据中心设计指导，并将运行技术（OT）与 NVIDIA Mission Control 软件栈完成端到端集成。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/ce4bc0aebe6376661f87290d304fc49f1630c48f8aff62fd1cf1ea79038e7910.jpg}}
+
+图 2.1：单排完整机柜布局
+
+本参考架构聚焦单个 SU（8 套 DGX GB200 机柜系统）的设计。DGX SuperPOD 可扩展到更大规模，最高可达并超过 128 个机柜、9216 张 GPU。
+
+如需四个 SU 及以上方案，请联系 NVIDIA 代表。
+
+\section{第 3 章：DGX SuperPOD 关键组件}
+DGX SuperPOD 面向推理时代 AI 工厂的高需求而设计。AI 工厂需要高性能 GPU/CPU、先进网络与散热系统来支撑高强度计算负载，并在 AI 推理场景中实现更快、更精准决策。依托 NVIDIA 端到端加速计算平台，DGX SuperPOD 在提升推理性能的同时兼顾能效，帮助企业部署安全、面向未来的 AI 基础设施。
+
+DGX SuperPOD 集成 NVIDIA 核心组件与经过认证的合作伙伴存储方案。借助可扩展单元（SU）理念，可将 AI 工厂部署周期由“月级”压缩至“周级”，从而缩短方案落地与产品上市时间。
+
+DGX SuperPOD 面向本地部署（on-premises）：客户拥有并管理硬件，可部署在自有或托管数据中心中，并对集群基础设施与服务运行负责。
+
+关键组件包括：
+\begin{itemize}
+\item NVIDIA DGX GB200 NVL72 机柜系统
+\item NVIDIA InfiniBand
+\item Mission Control 软件平台
+\end{itemize}
+
+\subsection{3.1 NVIDIA DGX GB200 机柜系统}
+NVIDIA DGX GB200（图 3.1）是企业级 AI 算力平台，支持业务创新与优化。每套 DGX GB200 在机柜级提供 72 GPU 配置与突破性 AI 性能。NVIDIA Blackwell GPU 架构可将大规模 AI/ML 任务的计算周期从数月压缩到数天乃至数小时。
+
+为适应高算力密度并提高机房空间利用率，DGX GB200 采用复杂的混合散热系统。GPU、CPU 等高功耗部件采用液冷，其余组件采用风冷。
+
+NVIDIA 基础设施专家团队可提供从数据中心规划、系统部署到上电调试的端到端支持。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/b9a1fb139dbd4a8bfe6a299e128182591b8fcd891ef7f3139cd3b43ce105ef11.jpg}}
+
+图 3.1：DGX GB200（示例展示 4 个机柜）
+
+\subsection{3.1.1 DGX GB200 计算托盘}
+DGX GB200 机柜系统的计算节点采用 72x1 NVLink 拓扑，即单一 NVLink 域内包含 72 张 GPU。每个机柜共有 18 个计算节点（托盘）。每个托盘包含两颗 GB200 Superchip，每颗 Superchip 含两张 B200 GPU 与一颗 Grace CPU。两颗 Superchip 通过 NVLink-C2C 芯粒互联桥接，可作为单一逻辑单元，由单一操作系统实例统一管理。
+
+计算托盘集成四张 ConnectX-7（CX-7）网卡，用于跨机柜计算网络的 InfiniBand NDR（400Gbps）互联；并集成两张 BlueField-3（BF3）网卡，用于带内管理与存储网络的 2x200Gbps 连接。网络端口位于机柜前侧（冷通道一侧）。
+
+每个计算托盘还提供 4x3.84TB E1.S NVMe（RAID0）本地存储，以及 1x1.92TB M.2 NVMe 系统盘。
+
+图 3.2 与图 3.3 分别展示计算托盘前后视图，图 3.4 展示其框图。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/b74e264be2372395ac2b69739415cb7f86f29696bf19f4957ded047b8767f2a4.jpg}}
+
+图 3.2：GB200 计算托盘（前）
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/4acadea3feeb1e856a4462eb4a46afc4d4aa548849067a7acd7c09ca4b27c5cc.jpg}}
+
+图 3.3：GB200 计算托盘（后）
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/094a6ee21126b9e9415800ccb7e6af64479888014f3ae4878f73b3a8d5691670.jpg}}
+
+图 3.4：GB200 计算托盘框图
+
+\subsection{3.1.2 NVLink 交换托盘}
+每个 DGX GB200 NVL72 机柜配备 9 个 NVLink 交换托盘。所有 NVLink 互联通过机柜后侧盲插连接器接入线缆盒完成。每个交换托盘提供 2 个 COMe RJ45（用于 NVOS）和 1 个带 RJ45 接口的 BMC（用于带外管理）。图 3.5 展示 NVLink 交换托盘前视图。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/e0dbc324d6ae62d8592a8c29550fdafaf5263e32fd5088d995092fa53d84452c.jpg}}
+
+图 3.5：NVLink 交换托盘示意
+
+\subsection{3.1.3 DGX 电源托架}
+DGX GB200 SuperPOD 使用的电源托架内置 6 个 5.5kW PSU，按 N 冗余配置，单托架最高可输出 33kW。单个 DGX GB200 NVL72 机柜共 8 个电源托架。托架后部 RJ45 端口用于电源制动与电流共享（级联连接），前部提供 BMC 接口。图 3.6 展示电源托架。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/3e3a679097d071daaa08a6182df18534570b74e3078ed3439420930e0fd71407.jpg}}
+
+图 3.6：电源托架
+
+\subsection{3.2 NVIDIA InfiniBand 技术}
+InfiniBand 是高性能、低时延、支持 RDMA 的网络技术，已在高强度计算场景中验证超过 20 年。最新一代 NDR 单向峰值 400Gbps，端口到端口时延极低，并向后兼容前代规范。
+
+InfiniBand 不仅具备高带宽与低时延，还提供自适应路由（AR）、SHARP 集合通信加速、SHIELD 动态网络自愈等能力，并支持 fat-tree、Dragonfly、多维 Torus 等拓扑，可构建超大规模网络 Fabric 与计算系统。
+
+\subsection{3.3 NVIDIA Mission Control}
+DGX GB200 SuperPOD 参考架构体现了构建高性能 AI 工厂的最佳实践。系统交付形式可按客户和用户需求灵活调整，统一由 NVIDIA Mission Control 进行管理。
+
+NVIDIA Mission Control 是全栈软件解决方案。作为 DGX SuperPOD 体验的核心组成，它可优化开发者负载性能与韧性，通过自动故障处理保障连续可用性，并提供统一的集群级可观测与可管理能力。其关键能力包括：全栈韧性、预测性维护、统一错误上报、数据中心优化、集群健康检查与自动化节点管理。
+
+Mission Control 融合 NVIDIA 管理海量系统的成熟技术，可帮助组织快速迈向 TOP500 级超级计算能力。
+
+\subsection{3.4 组件}
+DGX SuperPOD 硬件组件见表 3.1，软件组件见表 3.2。
+
+\textbf{表 3.1：NVIDIA 提供的 DGX SuperPOD 硬件组件}
+
+{\def\LTcaptype{none}
+\begin{longtable}{|p{0.2\linewidth}|p{0.22\linewidth}|p{0.5\linewidth}|}
+\hline
+\textbf{组件} & \textbf{技术} & \textbf{说明} \\
+\hline
+8 组计算机柜 & NVIDIA DGX GB200 NVL72 & 面向 AI 的机柜级系统，搭载 Grace-Blackwell GB200 模块、NVL72 规模互联与集成 NVLink 交换托盘。 \\
+\hline
+NVLink Fabric & NVIDIA NVLink 5 & 支持同机柜内 GPU 间高速、直接内存访问。 \\
+\hline
+计算 Fabric & NVIDIA Quantum QM9700 InfiniBand 交换机 & 面向 rail 优化的无阻塞 fat-tree 网络，每系统 8 路 NDR400 跨机柜 GPU 通信连接。 \\
+\hline
+存储与带内管理 Fabric & NVIDIA Spectrum-4 SN5600 以太网交换机 & 按存储阵列峰值性能优化，64 端口 800Gbps 交换机，兼顾高端口密度与高性能。 \\
+\hline
+InfiniBand 管理 & NVIDIA UFM Enterprise & 实时网络遥测 + AI 驱动分析，管理大规模 InfiniBand 数据中心。 \\
+\hline
+NVLink 管理 & NVIDIA NMX & 负责 NVLink 交换网络的运维管理与遥测。 \\
+\hline
+带外管理网络 & NVIDIA SN2201 & 48\,x\,1Gbps 铜缆以太网交换机，简化部署复杂度。 \\
+\hline
+\end{longtable}
+}
+
+\textbf{表 3.2：DGX SuperPOD 软件组件}
+
+{\def\LTcaptype{none}
+\begin{longtable}{|p{0.26\linewidth}|p{0.16\linewidth}|p{0.5\linewidth}|}
+\hline
+\textbf{组件} & \textbf{类别} & \textbf{说明} \\
+\hline
+Mission Control & 平台控制 & 面向 DGX SuperPOD（DGX GB200/B200）的全栈数据中心软件，集成运维与管理能力，并整合 Run:ai 工作负载编排。 \\
+\hline
+NVIDIA AI Enterprise & 企业平台 & 云原生端到端软件平台，加速数据科学流程与生产级 LLM/生成式 AI 应用开发部署。 \\
+\hline
+Magnum IO & I/O 栈 & 提升 AI/HPC I/O 性能。 \\
+\hline
+NVIDIA NGC & 容器目录 & 提供 AI/HPC 的 GPU 优化容器集合。 \\
+\hline
+Slurm & 调度器 & 经典批处理型多节点作业管理系统。 \\
+\hline
+\end{longtable}
+}
+
+\subsection{3.5 设计要求}
+DGX SuperPOD 通过紧耦合系统设计尽量降低全链路瓶颈，以获得最佳性能与应用扩展性；同时在整体层面保持灵活，便于融入既有数据中心环境。
+
+\subsubsection{3.5.1 系统设计}
+\begin{itemize}
+\item 基于 SU（8 套 DGX GB200 NVL72）的模块化架构。
+\item 经过完整验证的系统可扩展至 2 个 SU，更大部署可按客户需求定制。
+\item 机柜级一体化设计，支持液冷高密度机柜快速安装与上线。
+\item 采用通过 DGX SuperPOD 认证的合作伙伴存储设备。
+\item NVIDIA Enterprise Support（NVEX）提供计算、存储、网络、软件全栈支持。
+\end{itemize}
+
+\subsubsection{3.5.2 计算 Fabric}
+\begin{itemize}
+\item 计算 Fabric 在顶层进行 rail 优化。
+\item 采用均衡的全 fat-tree 架构。
+\item 基于当前高性能低时延交换平台，并面向未来网络代际演进。
+\item 全网使用可管理 NDR 交换机提升运维能力。
+\item 支持最新 SHARPv3 特性。
+\end{itemize}
+
+\subsubsection{3.5.3 存储 Fabric（高速存储）}
+\begin{itemize}
+\item 与计算 Fabric 解耦，分别保证应用与存储性能。
+\item 为每个 DGX GB200 计算托盘提供 2x200Gbps 线速能力。
+\item 通过 RoCE 提供存储访问，降低 CPU 开销并提升性能。
+\item 提供用户可访问管理节点对接共享存储。
+\end{itemize}
+
+\subsubsection{3.5.4 带内管理网络}
+\begin{itemize}
+\item 基于以太网，用于节点装配、数据传输、互联网访问和用户可达服务。
+\item 计算/管理节点带内连接运行在 200Gbps，并通过绑定提升韧性。
+\end{itemize}
+
+\subsubsection{3.5.5 带外管理网络}
+带外网络连接 BMC、BlueField BMC、NVSwitch 管理口（COMe）及其他需与用户物理隔离的设备。
+
+\subsubsection{3.5.6 存储需求}
+DGX SuperPOD 计算架构需与高性能、均衡存储系统配套，通常包括高速存储（HPS）与用户存储两类，分别针对吞吐/并行 I/O 及高 IOPS/元数据场景优化。
+
+\paragraph{3.5.6.1 高速存储}
+高速存储通过 RoCEv2 接入，来自 DGX SuperPOD 认证存储伙伴，建议具备：
+\begin{itemize}
+\item 面向多节点多线程读写优化的高性能、高可用 POSIX 文件系统；
+\item 对 Grace 平台认证支持；
+\item 原生 RoCE 支持；
+\item 基于本地内存的透明缓存；
+\item 基于本地闪存的透明读写缓存。
+\end{itemize}
+具体拓扑、容量与部件由认证存储伙伴在设计阶段确定。
+
+\paragraph{3.5.6.2 用户存储}
+用户存储区别于高速存储，通常通过带内网络暴露 NFS 共享，用于 home 目录、运维临时空间、以及高可用组件（如 Mission Control）所需日志与配置文件等。
+
+其要求包括：
+\begin{itemize}
+\item 偏重元数据性能、IOPS 与企业级能力（不同于 HPS 的并行 I/O 优化）；
+\item 基于以太网与 NFS 协议通信；
+\item 100GbE DR1 连通性。
+\end{itemize}
+
+\section{第 4 章：网络 Fabric}
+按 SU 构建系统可获得最高效率。若受预算或机房约束需部署非标准节点规模，仍建议按完整 SU 预留 Fabric（含叶交换机与叶-脊链路），将未使用部分留空，以保证最优流量路由与一致性能。
+
+DGX SuperPOD 包含 5 类网络：
+\begin{itemize}
+\item NVLink 5
+\item 计算 Fabric
+\item 存储 Fabric
+\item 带内管理网络
+\item 带外管理网络
+\end{itemize}
+
+对应 4 类物理 Fabric：
+\begin{itemize}
+\item 多节点 NVLink Fabric（MN-NVL）
+\item 计算 InfiniBand Fabric
+\item 存储与带内以太网 Fabric
+\item 带外网络
+\end{itemize}
+
+\subsection{4.1 多节点 NVLink Fabric（NVL5）}
+每个 DGX GB200 机柜包含 18 个计算托盘与 9 个 NVLink 交换托盘。每个交换托盘配置 2 颗 NVLink 交换芯片，负责机柜内 72 张 GPU 的全互联。每张 B200 GPU 提供 18 条 NVL5 链路，分别连接至 18 颗交换芯片，合计可提供 1.8TB/s 低时延带宽。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/c36aabcd75c5c02a63f5d016185acb16e19398b4fa3f720e652b23814b355c7d.jpg}}
+
+图 4.1：多节点 NVLink 拓扑
+
+\subsection{4.2 计算 Fabric}
+图 4.2 展示完整 GB200 SuperPOD SU（8 套 DGX GB200）的计算 Fabric。每个计算机柜按 rail 对齐；同一 SU 内同 rail 通信通常为单跳，不同机柜或不同 rail 之间流量通过 spine 层。
+
+对于大于 1 个 SU 的规模，采用基于 Spine-Leaf-Group（SLG）的扩展设计，最多支持 16 个 SU。每个 SU 含 4 个 SLG（与 IB rail 数一致），每个 SLG 包含 8 个 leaf（对应 8 个计算机柜）和 6 个 spine，形成无阻塞 fat-tree，并连接到 6 个 core group。
+
+\textbf{表 4.1：大规模 SuperPOD 组件数量（示例）}
+
+{\def\LTcaptype{none}
+\begin{longtable}{@{}lllllllll@{}}
+\toprule
+\#GPU & \#SU & \#Core Group & 每组交换机数 & Core 交换机总数 & IB Leaf/SU & IB Leaf 总数 & IB Spine/SU & IB Spine 总数 \\
+\midrule
+1152 & 2 & 6 & 3 & 18 & 32 & 64 & 24 & 48 \\
+2304 & 4 & 6 & 6 & 36 & 32 & 128 & 24 & 96 \\
+4608 & 8 & 6 & 12 & 72 & 32 & 256 & 24 & 192 \\
+9216 & 16 & 6 & 24 & 144 & 32 & 512 & 24 & 384 \\
+\bottomrule
+\end{longtable}
+}
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/ba8e6a5cae7de2117acbc1e6db2edce6e79f1c8b4119ed3e78fe81bdc19a6857.jpg}}
+
+图 4.2：576 GPU DGX SuperPOD 计算 Fabric
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/9a6b8aaa195a111ff65bf1fc4803d34f7929436dfd889100b89024b41ec295c5.jpg}}
+
+图 4.3：最多 16 SU 的扩展计算 Fabric
+
+\subsection{4.3 存储与带内以太网 Fabric}
+DGX GB200 引入新一代以太网 Fabric，以更高性价比维持大规模训练集群所需的高性能存储与带内网络。
+
+该 Fabric 采用 SN5600 与 SN2201 交换机（见图 4.4、图 4.5）。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/115024adf61771de76194b12efd1a1d39c17afabb9ed276ab37ae27d25839df7.jpg}}
+
+图 4.4：SN5600 交换机
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/973c8f888305e799c625da10c89d3baa24795d32c8aab28dcb78be9c4f98d5d2.jpg}}
+
+图 4.5：SN2201 交换机
+
+图 4.6 展示单 SU 的物理布局：每个 SU 使用两台 SN5600 作为聚合/脊层，汇聚面向 DGX、存储和 OOB 的叶层交换机；DGX 计算托盘通过 BlueField-3 以 4x200GbE 连接叶层。另有一对 SN5600 作为存储设备与控制平面节点接入点；再一对 SN2201 连接需要 RJ45 或 QSFP 上联的传统设备。
+
+为扩展至最多 16 SU，引入第三层“超级脊（super spine）”。设计分为 2 组，每个 spine 预期提供 28x800GbE 上联，以在可扩展参考架构中维持无阻塞特性。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/b60361e214c964a5d0ab49cee25bfa69bb8a598cf3e29770486bb583d907fec0.jpg}}
+
+图 4.6：存储与带内以太网 Fabric 逻辑设计
+
+\textbf{表 4.2：扩展所需 Spine 与 Super Spine 交换机数量（示例）}
+
+{\def\LTcaptype{none}
+\begin{longtable}{@{}lllllllll@{}}
+\toprule
+\#GPU & \#SU & Super Spine 组数 & 每组 Super Spine 数 & Super Spine 总数 & Spine/SU & Spine 总数 & IB Spine/SU & IB Spine 总数 \\
+\midrule
+2304 & 4 & 2 & 2 & 4 & 8 & 64 & 24 & 48 \\
+4608 & 8 & 2 & 4 & 8 & 16 & 128 & 24 & 96 \\
+9216 & 16 & 2 & 7 & 14 & 32 & 256 & 24 & 192 \\
+\bottomrule
+\end{longtable}
+}
+
+\subsection{4.4 以太网 Fabric 分段}
+SuperPOD 中以太网 Fabric 分为：
+\begin{itemize}
+\item 存储网络
+\item 带内网络
+\item 带外管理网络
+\end{itemize}
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/20a49f6c57780d006eab82ca76eddeabbd89be69cdb9b247d3e3df1ac2dac3ef.jpg}}
+
+图 4.7：存储与带内以太网 Fabric 扩展设计
+
+\subsubsection{4.4.1 存储网络}
+为兼顾高性能与高可用，每个 BlueField-3 DPU 的 4 个端口中有 2 个专用于存储访问。物理以太网通过专用 VXLAN 承载存储流量，终结于 DGX 存储网卡对应的 SN5600 叶交换机。每个 SU 另有一对 SN5600 叶交换机连接存储设备。
+
+存储设备需支持 RoCE，并受益于拥塞控制、自适应路由等高级 Fabric 管理能力，从而实现低时延与高带宽。每个 SU 设计为到存储设备侧提供 16x800Gbps 无阻塞带宽；DGX 侧为轻度阻塞，阻塞比约 5:3。
+
+\subsubsection{4.4.2 带内管理网络}
+带内管理网络承担：
+\begin{itemize}
+\item 连接并承载所有集群管理服务；
+\item 访问低速 NFS 存储层；
+\item 为 Mission Control、BCM、Slurm、Kubernetes 等提供对外上联；
+\item 提供用户访问 Slurm 头节点与 Kubernetes 服务入口。
+\end{itemize}
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/e5a75abc83f4788ce925ad7d0656c0f91e2b0ef7232a4d69f1f05162e8d4dd76.jpg}}
+
+图 4.8：存储 Fabric Underlay
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/04a8b2685e679efebbd792e10599982182fd53669b20a48a20e5dc341c4b1935.jpg}}
+
+图 4.9：带内 Fabric Underlay
+
+带内网络内部再分为 3 段：
+\begin{itemize}
+\item 上联专用 VTEP：默认与客户边缘通过 BGP 对等；
+\item OOB 专用 VTEP：用于 NMX/BCM 对 OOB 设备遥测与管理访问；
+\item 带内 VTEP：承载用户访问、NFS、服务流量与控制流量。
+\end{itemize}
+
+\subsubsection{4.4.3 带外管理网络}
+OOB 以太网连接所有设备管理口，包括计算托盘、交换托盘、管理服务器、存储、网络设备、机柜 PDU 等。该网络与用户流量隔离，不向普通用户直接开放。
+
+OOB 网络承载 IPMI 控制流量，同时用于计算 InfiniBand Fabric 与 NVLink Fabric 的管理。其在每个 SU 的聚合层以专用 VXLAN 汇聚，采用 SN2201 交换机。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/16bea45b9452267f759964b9f30f63da6ad598d13d012ddfcbfdc76d712d9865.jpg}}
+
+图 4.10：OOB 管理网络逻辑布局
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/e5367555bf80199b66aa8c36c07a636e408faee104dd23673fc466b516422cfd.jpg}}
+
+图 4.11：SN2201 交换机
+
+\subsection{4.5 客户边缘连接}
+建议 DGX SuperPOD 至客户边缘至少部署 2x100GbE（DR1 单模）链路，以满足高速数据进出需求。针对 DGX GB200 的复杂供电与散热，新增与楼宇管理系统（BMS）的连接需求，作为数据中心 OT 管理平面。
+
+路由交接采用 eBGP，对内外网段（带内、带外、BMS）进行路由通告。图 4.12 展示示例。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/0d82310442100df3be03c61b64e287673edf524a4f004121b018b0626c466260.jpg}}
+
+图 4.12：客户边缘连接示例
+
+\section{第 5 章：存储架构}
+海量数据是高精度深度学习模型开发的核心。数据规模持续增长，单模型训练数据量也在增加；不仅数据量，数据格式同样会影响访问效率，因此存储性能必须同步扩展。
+
+DL 训练中的关键 I/O 行为是反复读取（re-read）。数据会在迭代训练中被重复使用。某些模型（如推荐系统）可在极少轮次内训练完成，推理阶段也可能高度 I/O 密集，因此读取性能非常关键。写性能同样重要：大模型训练周期长，需要周期性写入 TB 级 checkpoint 以实现容错，且该同步写入会阻塞训练前进。
+
+理想情况下，首次读取后数据可被缓存，避免反复跨网访问。共享文件系统通常以内存作为首层缓存，从缓存读取可比远端存储快一个数量级。DGX GB200 还提供本地 NVMe，可用于缓存与数据暂存。
+
+DGX SuperPOD 面向多类工作负载，不同模型/数据集对存储性能需求不同。高速存储应向所有节点提供共享数据视图，并针对小随机 I/O、单节点峰值与全局聚合性能优化。虽然 DL 训练多为读密集，写入 checkpoint 的峰值能力也不可忽视。对于 NLP/LLM 大模型，建议写性能至少达到推荐读性能的 $\frac{1}{2}$。
+
+在最终确定性能与容量前，建议先完成工作负载画像。表 5.1 与表 5.2 给出参考。
+
+\textbf{表 5.1：存储性能分级要求}
+
+{\def\LTcaptype{none}
+\begin{longtable}{|p{0.18\linewidth}|p{0.38\linewidth}|p{0.36\linewidth}|}
+\hline
+\textbf{级别} & \textbf{工作负载描述} & \textbf{数据集规模特征} \\
+\hline
+标准（Standard） & 多个并发 LLM/微调任务与周期性 checkpoint，计算需求明显高于 I/O 需求。 & 多数数据集可在训练期间放入本地内存缓存；单模态数据集，模型参数规模通常在百万级。 \\
+\hline
+增强（Enhanced） & 多个并发多模态训练任务与周期性 checkpoint，I/O 性能对端到端训练时间影响显著。 & 数据集过大，无法完全驻留本地缓存，需要更频繁 I/O；多模态数据集，模型参数规模通常在十亿级及以上。 \\
+\hline
+\end{longtable}
+}
+
+\textbf{表 5.2：存储性能建议}
+
+{\def\LTcaptype{none}
+\begin{longtable}{|l|l|l|}
+\hline
+\textbf{性能指标} & \textbf{标准（GBps）} & \textbf{增强（GBps）} \\
+\hline
+单 SU 聚合读 & 40 & 125 \\
+\hline
+单 SU 聚合写 & 20 & 62 \\
+\hline
+4 SU 聚合读 & 160 & 500 \\
+\hline
+4 SU 聚合写 & 80 & 250 \\
+\hline
+\end{longtable}
+}
+
+\section{第 6 章：DGX SuperPOD 软件}
+NVIDIA Mission Control 提供面向企业基础设施部署（如 DGX SuperPOD）的全栈数据中心软件方案，集成关键管理与运维能力，实现大规模统一控制。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/ba1ed79f5a9846920ca96d94f42b6ff3b4146113788c09d9f32d948ba380e074.jpg}}
+
+图 6.1：NVIDIA DGX GB200 SuperPOD 软件栈
+
+Mission Control 软件栈由五层架构组成，从系统健康与诊断逐层扩展到高级集群管理能力。其基于 NVIDIA Base Command Manager（BCM）与 Run:ai，提供 SLURM 与 Kubernetes 的调度编排。遥测与可观测层提供系统洞察；验证与诊断层提供自治恢复能力，实现故障快速恢复。
+
+Mission Control 还承担部署优化与系统健康监控，并与 BCM 协同完成集群装配和运维。软件栈中还包含 NMX，用于 NVLink 交换托盘的监控与控制。
+
+Mission Control 带来的直接价值包括：
+\begin{itemize}
+\item 自动故障检测与自恢复：显著缩短停机时间，提高 GPU 利用率。
+\item 负载迁移与资源分配优化：持续将任务调度到健康节点，提升吞吐与交付速度。
+\item 基础设施与应用统一诊断：大幅缩短故障定位时间，降低 SRE/DevOps 运维负担。
+\item 内存检查点与无缝恢复：自动从最近有效检查点恢复训练进程，减少重训损失。
+\end{itemize}
+
+\subsection{6.1 Run:ai}
+Run:ai 作为 Mission Control 的组成部分，采用“控制平面 + 集群”分布式架构。控制平面支持跨组织多集群统一编排。在 BCM 管理安装中，控制平面部署在控制节点，集群组件部署在客户 Kubernetes 基础设施中，实现集中管理与就近执行。
+
+\pandocbounded{\includegraphics[keepaspectratio]{images/63d9e6477c5ec00630f1c36c4b8213c06ee53d73eeadc540a52a705296434a7f.jpg}}
+
+图 6.2：NVIDIA Run:ai 架构
+
+\section{第 7 章：总结}
+搭载 NVIDIA DGX GB200 的 DGX SuperPOD 代表了面向 AI 训练与推理需求增长的新一代数据中心级架构。本参考架构体现了 NVIDIA 内部 AI 模型与 HPC 研发所采用的系统方案。
+
+DGX SuperPOD 在高性能基础上持续演进，支持超大 NLP 模型训练、汽车等视觉场景训练、推荐模型扩展等需求，并提供硬件与软件一体化系统，缩短部署周期、简化运维、提前发现问题。该平台既可支撑当前工作负载，也面向未来应用持续扩展。实际项目组件需结合具体设计最终确定，可联系 NVIDIA 代表完成选型。
+
+\section{第 8 章：声明}
+\subsection{8.1 声明}
+本文件仅供参考，不构成对产品特定功能、条件或质量的保证。NVIDIA 不对文件信息的准确性、完整性作任何明示或暗示担保，也不对其中可能存在的错误承担责任。NVIDIA 可随时对文档进行修订、修改与改进，恕不另行通知。
+
+客户应在下单前获取并核验最新信息。NVIDIA 产品销售受其标准销售条款约束，除非双方另有书面签署协议。本文件不构成任何直接或间接的合同义务。
+
+NVIDIA 不保证基于本文件的产品适用于任何特定用途。客户应自行评估适用性并完成必要测试。因客户设计缺陷导致的质量与可靠性问题，或因不当使用产生的风险与损失，NVIDIA 不承担责任。
+
+本文件不授予任何明示或默示的专利、著作权或其他知识产权许可。涉及第三方产品/服务的信息不构成对其授权或担保。复制本文件信息需经 NVIDIA 书面同意，并遵守适用出口法律法规与相关限制条款。
+
+除法律禁止外，NVIDIA 对因使用本文件产生的任何直接、间接、特殊、附带、惩罚性或后果性损害不承担责任。客户可获得的累计责任上限以销售条款约定为准。
+
+\subsection{8.2 商标}
+NVIDIA、NVIDIA 标识、NVIDIA DGX、NVIDIA DGX SuperPOD 为 NVIDIA Corporation 在美国及其他国家/地区的商标或注册商标。其他公司及产品名称归其各自所有者所有。
+
+\subsection{8.3 版权}
+© 2024--2025 NVIDIA Corporation。保留所有权利。
+
+\end{document}
