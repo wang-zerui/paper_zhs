@@ -1,0 +1,181 @@
+\section{后训练}
+
+GLM-5 的后训练阶段旨在将基座模型转化为具备强大推理、编码与智能体能力的高性能助手。如图~\ref{fig:overall_pipeline} 所示，我们的流程采用渐进式对齐策略：先进行多任务监督微调（SFT）以引入复杂的交错思考模式，随后进行面向推理与智能体任务的专项强化学习（RL）阶段，最后以面向人类风格对齐的通用 RL 收尾。通过将 on-policy 跨阶段蒸馏作为最终精炼步骤，GLM-5 在充分吸收各阶段收益的同时，有效缓解了能力回退。
+
+\subsection{监督微调}
+
+\begin{figure}[!t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/glm5_tr_thinking_mode_v2.pdf}
+    \caption{交错思考（Interleaved Thinking）与保留思考（Preserved Thinking）示意图。}
+    \label{fig:thinking_mode}
+\end{figure}
+
+与 GLM-4.5 相比，GLM-5 在 SFT 阶段显著扩大了 \emph{Agent} 与 \emph{Coding} 数据规模。GLM-5 的 SFT 语料覆盖三大类别：
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+    \item \textbf{通用对话（General Chat）}：问答、写作、角色扮演、翻译、多轮对话以及长上下文交互；
+    \item \textbf{推理（Reasoning）}：数学、编程与科学推理；
+    \item \textbf{编码 \& 智能体（Coding \& Agent）}：前后端工程代码、工具调用、编码智能体、搜索智能体与通用智能体。
+\end{itemize}
+
+此外，GLM-5 在 SFT 期间将最大上下文长度扩展至 202,752 tokens。结合更新后的聊天模板，模型支持三种不同思考特性（见图 \ref{fig:thinking_mode}），包括：
+
+
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+    \item \textbf{交错思考（Interleaved Thinking）}：模型在每次回复与每次工具调用前进行思考，提升指令遵循与生成质量\footnote{Interleaved thinking 最早由 \url{https://platform.claude.com/docs/en/build-with-claude/extended-thinking\#interleaved-thinking} 引入。}。
+    \item \textbf{保留思考（Preserved Thinking）}：在编码智能体场景中，模型会在多轮对话中自动保留全部思考块，复用已有推理而非从头重推，减少信息丢失与不一致，特别适用于长时程复杂任务\footnote{Preserved thinking 也在 Claude Opus 4.5 起采用。见 \url{https://platform.claude.com/docs/en/build-with-claude/extended-thinking\#thinking-block-preservation-in-claude-opus-4-5-and-later}。}。
+    \item \textbf{轮级思考（Turn-level Thinking）}：模型支持会话内按轮控制推理；对轻量请求可关闭思考以降低延迟/成本，对复杂任务可开启思考以提升准确性与稳定性。
+\end{itemize}
+
+通过在动作间思考并跨轮保持一致性，GLM-5 在复杂任务上实现了更稳定、可控的行为。
+
+对于 \textbf{通用对话}，我们将回复风格优化得比 GLM-4.5 更具逻辑性且更简洁。针对角色扮演任务，我们采集并构建了覆盖多语言和多角色配置的更广泛、更丰富数据集。特别地，我们定义了若干评估维度——包括指令遵循、语言表现力、创造性、逻辑连贯性和长对话一致性——并结合自动与人工过滤进行数据筛选与精炼。
+
+对于 \textbf{推理} 任务，我们进一步提升了模型推理深度。具体而言，在逻辑推理方面，我们构建了可验证问题，并通过拒绝采样合成高质量数据；在数学与科学问题方面，我们采用基于难度的过滤流程，仅保留对 GLM-4.7 具有挑战性的题目。
+
+对于 \textbf{编码} 与 \textbf{智能体} 任务，相较 GLM-4.5，GLM-5 构建了大量执行环境来获取高质量轨迹，并特别强调真实场景与长时程任务。我们进一步使用专家强化学习与拒绝采样改进 SFT 数据。轨迹中的错误片段会被保留，但在 loss 中屏蔽，使模型学习纠错行为而不强化错误动作。
+
+\subsection{推理 RL}
+
+\paragraph{RL 算法骨干。}
+我们的 RL 算法基于 GRPO~\cite{shao2024deepseekmath}，并引入 IcePop 技术~\cite{IcePop2025} 以缓解 \emph{训练-推理失配}，即 RL 优化中推理分布与训练分布不一致的问题。我们显式区分用于梯度更新的 \emph{训练策略} $\pi^{\text{train}}$ 与用于轨迹采样的 \emph{推理策略} $\pi^{\text{infer}}$。相比原始 IcePop 公式，我们移除了 KL 正则项以加速 RL 提升。
+最终优化损失为：
+\begin{equation}
+\begin{aligned}
+\mathcal{L}(\theta)=
+-\mathbb{E}_{
+x \sim \mathcal{D},
+\{y_i\}_{i=1}^{G} \sim \pi^{\text{infer}}_{\theta_{\text{old}}}(\cdot \mid x)
+}
+&\Bigg[
+\frac{1}{G}
+\sum_{i=1}^{G}
+\frac{1}{|y_i|}
+\sum_{t=1}^{|y_i|}
+\operatorname{pop}
+(\rho_{i,t}, 1/\beta, \beta) \\
+&\cdot
+\min\!\left(
+r_{i,t}\hat{A}_{i,t},
+\operatorname{clip}\!\left(
+r_{i,t},
+1-\epsilon_{\text{low}},
+1+\epsilon_{\text{high}}
+\right)
+\hat{A}_{i,t}
+\right)
+\Bigg],
+\label{icepop}
+\end{aligned}
+\end{equation}
+其中训练-推理失配比定义为
+\begin{align*}
+\rho_{i,t}
+=
+\frac{
+\pi_{\theta_{\text{old}}}^{\text{train}}(y_{i,t} \mid x, y_{i,<t})
+}{
+\pi_{\theta_{\text{old}}}^{\text{infer}}(y_{i,t} \mid x, y_{i,<t})
+}.
+\end{align*}
+
+算子 $\operatorname{pop}(\cdot)$ 会抑制失配比偏离过大的样本：
+\begin{align*}
+\operatorname{pop}(\rho_{i,t}, 1/\beta, \beta)
+=
+\begin{cases}
+\rho_{i,t}, & 1/\beta \le \rho_{i,t} \le \beta, \\
+0, & \text{otherwise}.
+\end{cases}
+\end{align*}
+
+PPO 风格重要性比与组归一化优势沿用 GRPO 原始定义：
+\begin{align*}
+r_{i,t}
+=
+\frac{
+\pi_\theta^{\text{train}}(y_{i,t}\mid x,y_{i,<t})
+}{
+\pi_{\theta_{\text{old}}}^{\text{train}}(y_{i,t}\mid x,y_{i,<t})
+},
+\quad
+\hat{A}_{i,t}
+=
+\frac{
+R_i - \operatorname{mean}(R_1,\dots,R_G)
+}{
+\operatorname{std}(R_1,\dots,R_G)
+}.
+\end{align*}
+
+训练中我们设置超参 $\beta=2, \epsilon_{\text{low}}=0.2, \epsilon_{\text{high}}=0.28$。训练完全采用 on-policy，group size 为 32，batch size 为 32。
+
+\paragraph{DSA RL 观察。}
+我们在基于 DSA 架构的模型上进行了大规模 RL 训练。相较 MLA，DSA 引入额外的 indexer，用于检索最相关的 top-k key-value 条目，并仅在检索子集上稀疏计算注意力。
+检索得到的 top-k 结果对 RL 稳定性至关重要。这类似于 MoE 模型中使用 routing replay~\cite{zheng2025group} 保留被激活的 top-k 专家，以确保训练-推理一致性。
+但若直接迁移该策略到 indexer replay，即在每个 token 位置存储 indexer 的 top-k 索引，则明显不可行：indexer 使用的 $k = 2048$ 远大于 MoE 常见的 $k$，存储这些索引将产生巨大的存储成本和训练引擎与推理引擎之间的通信开销。
+
+我们发现采用确定性 top-k 算子可有效解决 DSA indexer token 选择中的训练-推理失配。与 SGLang 的 DSA Indexer 中使用的非确定性 CUDA top-k 实现相比，直接使用朴素的 \texttt{torch.topk} 虽略慢但具确定性。它能产生更一致输出，并带来显著 RL 增益。相反，其他非确定性 top-k 算子（如 CUDA 或 TileLang 实现）在 RL 仅数步后即出现性能骤降并伴随熵急剧下降。因此，在我们的 RL 阶段中，训练引擎内 DSA Indexer 默认使用 \texttt{torch.topk}。此外，我们在 RL 期间默认冻结 indexer 参数，以加速训练并避免 indexer 不稳定学习。
+
+\paragraph{混合域推理 RL。} 在推理 RL 阶段，我们在四个领域上进行混合 RL 训练：数学、科学、代码以及工具集成推理（TIR）。对于数学与科学，我们从开源数据集~\cite{du2025nemotron, moshkov2025aimo} 与外部标注商共建数据中整理样本。我们还施加难度过滤，聚焦于 GLM-4.7 极少答对或持续失败、但更强教师模型（如 GPT-5.2 xhigh 与 Gemini 3 Pro Preview）可解的问题。代码方面，我们覆盖竞赛编程风格任务与科学编程任务：前者主要来自 Codeforces 及 TACO~\cite{li2023taco}、SYNTHETIC-2-RL~\cite{synthetic2_blog_2025} 等代表性数据集；后者由内部题库构建，通过将问题拆解为正确解所需的最小代码实现。TIR 方面，我们复用更具挑战性的数学/科学 RL 数据子集，并与标注商共建明确需借助外部工具作答的 STEM 问题。训练过程中，我们按领域与来源为数据分配特定 judge 模型或评估系统，产出二元结果奖励。我们在四域间维持大致均衡配比，并持续观察到混合 RL 设置下各域稳定且显著提升。
+
+\subsection{智能体 RL}
+为提升 GLM-5 的智能体能力，我们开发了完全异步、完全解耦的 RL 框架，并在编码与搜索智能体任务上优化 GLM-5。朴素同步 RL 在长时程智能体 rollout 中存在严重 GPU 空闲。通过中心化 Multi-Task Rollout Orchestrator 将推理与训练引擎解耦，我们在多样智能体工作负载上实现了高吞吐联合训练。
+
+为在异步 off-policy 条件下维持训练稳定性，我们引入两项关键机制。第一，Token-in-Token-out（TITO）网关通过保留精确动作级对应，消除了重分词失配。第二，我们采用 Direct Double-sided Importance Sampling，对 rollout log-probabilities 施加 token 级裁剪（$[1-\epsilon_\ell, 1+\epsilon_h]$），无需追踪历史策略检查点即可有效控制 off-policy 偏差。我们还采用 DP-aware 路由，在大规模 MoE 长上下文推理中最大化 KV-cache 复用以提速。为扩展智能体环境规模，我们在三个领域扩展了可验证训练环境：超过 10K 个真实软件工程（SWE）任务、终端任务与高难多跳搜索任务。智能体 RL 细节见后续第 4 节。
+
+\subsection{通用 RL}
+
+\paragraph{多维优化目标。}
+我们将通用 RL 的优化目标分解为三个互补维度：\emph{基础正确性}、\emph{情绪智能} 与 \emph{任务特定质量}。
+
+\emph{基础正确性} 维度是回复质量的基石。它针对会损害模型输出可用性的广泛错误类型，包括指令遵循失败、逻辑不一致、事实错误、知识幻觉与语言不流畅。目标是最小化错误率，使回复达到 \emph{可用} 基线。我们将其视为后续优化前提：如果回复包含事实错误或误解用户意图，即使措辞再优雅，也会误导用户。
+
+\emph{情绪智能} 维度在核心正确性之上优化用户体验。它旨在生成更具共情、更有洞察、风格更接近自然人类沟通的回复，让与模型的交互更自然、更有吸引力。
+
+\emph{任务特定质量} 维度面向各类具体任务进行细粒度优化。在基础正确性保障可用性的前提下，它将回复从“仅正确”提升到“高质量”。该维度覆盖写作、文本处理、主客观问答、角色扮演与翻译等多类任务。不同任务域需要不同奖励信号，因此必须采用混合奖励系统。
+
+\paragraph{混合奖励系统。}
+为监督上述多样目标，我们构建了融合三类互补奖励信号的混合奖励系统：\emph{规则奖励函数}、\emph{结果奖励模型}（ORM）与 \emph{生成式奖励模型}（GRM）。三者各有优劣，组合使用是实现稳定、高效、可扩展通用 RL 训练的关键。
+
+规则奖励精确且可解释，但仅适用于可由确定性规则表达的方面。ORM 信号方差低、训练效率高，但更易遭受奖励作弊，即策略利用表面模式而非真正提升核心能力。GRM 利用语言模型产出标量或结构化评估，对此类利用更鲁棒，但往往方差较高。融合三类信号后，我们得到在精确性、效率与鲁棒性之间更平衡的奖励系统，缓解任一单一组件的短板。
+
+\paragraph{Human-in-the-loop 风格对齐。}
+我们通用 RL 流水线的一项显著特征，是显式纳入高质量人工撰写回复。我们不只依赖模型生成回复，而是将专家人工回复作为风格与质量锚点。动机在于：纯模型自生成优化往往收敛到明显“模型味”的模式——常见问题包括冗长、模板化、缺乏熟练人类写作的细腻度。通过接触人工示例，模型会学习更自然、更符合人类偏好的回复模式。
+
+\subsection{On-Policy 跨阶段蒸馏}
+在多阶段 RL 流水线中，按顺序优化不同目标会导致此前能力累积退化。为缓解该问题，我们将 on-policy 跨阶段蒸馏作为\textbf{最终阶段}，采用 on-policy 蒸馏算法~\cite{guminillm,qwen3,xiao2026mimov2flashtechnicalreport,lu2025onpolicydistillation} 快速恢复早期 SFT 与 RL 阶段（推理 RL 与通用 RL）获得的技能。具体地，前序训练阶段的最终 checkpoint 作为教师模型；训练提示从相应教师的 RL 训练集采样，并按合适比例混合。训练损失可通过将式~\ref{icepop} 中优势项替换为下式得到（`sg' 表示 stop gradient 操作，例如 \texttt{.detach()}）：
+
+\begin{equation}
+    \hat{A}_{i,t} = \text{sg}\left[\log\frac{\pi_{\theta_{\text{teacher}}}^{\text{infer}}(y_{i,t}\mid x,y_{i,<t})}{\pi_\theta^{\text{train}}(y_{i,t}\mid x,y_{i,<t})}\right].
+\end{equation}
+
+目前我们使用推理引擎获取教师 logits。未来计划将推理后端迁移至训练引擎，并在推理中统一采用 MLA 的 Multi-Query Attention（MQA）模式（$\pi_{\theta_{\text{teacher}}}^{\text{infer}}\rightarrow\pi_{\theta_{\text{teacher}}}^{\text{train}}$）。
+训练中，GRPO 的 group size 设为 1 以提升数据吞吐，batch size 设为 1024。之所以可行，是因为该阶段不再需要每个 prompt 的大样本组来估计优势；优势可直接由与教师模型的差距计算得到。
+
+\subsection{RL 训练基础设施：\emph{slime} 框架}
+
+我们继续使用 slime 作为 GLM-5 统一后训练基础设施，支持端到端大规模强化学习（RL）。GLM-5 并未引入新的系统组件，而是\emph{充分利用} slime 的能力：(1) 通过自由可定制 rollout 与服务化执行模型扩展任务覆盖；(2) 通过混合精度训练/rollout 与 MTP、Prefill-Decode（PD）解耦显著提升吞吐——尤其适用于多轮 RL 工作负载；(3) 通过心跳驱动的 rollout 容错与路由层服务生命周期管理提升鲁棒性。
+
+\subsubsection{横向扩展：通过高度可定制 Rollout 实现灵活训练}
+GLM-5 后训练覆盖多样目标。为在不做任务分叉的前提下支持这种多样性，GLM-5 利用 slime 的高度可定制 rollout 接口与服务化 rollout 执行能力。
+
+\textbf{高度可定制 Rollout。} slime 提供灵活接口以实现任务特定 rollout 逻辑——包括多轮交互循环、工具调用、环境反馈处理与 verifier 引导分支——且无需修改底层基础设施。GLM-5 利用这一能力，在统一训练栈中支持推理 RL、通用 RL、智能体 RL 与 on-policy 蒸馏等广泛域与训练范式。
+
+\textbf{基于 HTTP API 的服务化 Rollout。} slime 通过标准 HTTP API 暴露 rollout server 与 inference router，用户可像调用常规推理引擎一样与其服务层交互。这使 rollout 逻辑与训练流程边界解耦：外部智能体框架与环境可直接调用 server/router 端点，而优化后端在短时程单轮训练与长时程多轮轨迹中保持不变。
+
+\subsubsection{纵向扩展：RL Rollout 的尾延迟优化}
+对于 RL rollout，优化目标不是总吞吐，而是\emph{端到端时延}，其主要由每步最慢（长尾）样本主导。实践中，一个拖尾轨迹即可阻塞同步点（如 batch 完成、buffer 就绪、trainer 更新），直接决定墙钟进度。因此 GLM-5 充分利用 slime 面向时延的服务与调度机制，最小化中位延迟，尤其是尾延迟。
+
+\textbf{通过多节点推理与 MLA 的 DP-attention 实现无队列服务。}
+为避免排队延迟，即使在突发流量下 rollout 请求也需被及时处理，这要求充足的 KV-cache 容量。GLM-5 采用多节点推理部署（如 8 节点上的 EP64 与 DP64）来提供足够分布式 KV-cache。引入 DP-attention 的主要目的，是避免在不同 rank 间复制 KV。
+
+\textbf{通过 FP8 rollout 与 MTP 降低尾延迟。}
+GLM-5 在 rollout 推理中使用 FP8，以降低逐 token 时延并缩短长轨迹完成时间。此外，GLM-5 利用 slime 对 Multi-Token Prediction（MTP）的支持，这在 RL rollout 常见的小 batch 解码场景中尤为有效。由于尾延迟常由小 BS 拖尾样本驱动（如罕见超长上下文、复杂多轮推理、工具密集轨迹），MTP 对长尾具有不成比例的收益，可提升最慢样本完成时间并降低 step 级阻塞。
+
+\textbf{PD 解耦防止多轮 RL 中 prefill-decode 相互干扰。}
+在多轮设置中，长前缀 prefill 很常见（会话历史、工具轨迹、代码上下文）。在 DP-attention 下，若 prefill 与 decode 混用同一服务资源，会产生严重干扰：重 prefill 可能抢占或打断服务器上的 decode，阻碍其他样本持续推进并显著恶化尾延迟。因此 GLM-5 利用 slime 的 Prefill--Decode（PD）解耦，将 prefill 与 decode 运行在独立资源上，保证 decode 稳定不中断，使长时程样本可持续推进，从而显著改善多轮智能体 RL 的尾部行为。
+
+\subsubsection{Rollout 鲁棒性：心跳驱动容错}
+
+在大规模场景中，瞬时故障（如单机崩溃、网络问题或性能退化）不可避免。GLM-5 利用 slime 的心跳驱动容错机制，在此类事件下确保训练连续性：rollout server 周期性发送心跳，由编排层监控；不健康服务器会被主动终止并从 inference router 注销。因而重试请求会自动绕开故障或退化服务器路由到健康节点，避免单机事件中断 rollout，保障端到端 RL 训练不中断。

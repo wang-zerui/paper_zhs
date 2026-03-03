@@ -1,0 +1,51 @@
+\section{背景}
+\label{sec:background}
+
+\subsection{FlashAttention}
+\label{sec:flashattention}
+
+FlashAttention~\cite{dao2022flashattention} 是一种在降低内存开销的同时精确计算注意力的高效算法。在前向传播中，它使用在线 softmax 技巧~\cite{milakov2018onlinesoftmax}，在常量级片上内存中在线更新注意力输出，从而避免在 GPU 全局内存中物化完整注意力矩阵。FlashAttention2\&3~\cite{dao2023flashattention2,jay2024flashattention3} 通过针对 Ampere 与 Hopper GPU 优化循环顺序与流水线设计进一步提升性能。\sys 建立在这些进展之上。
+
+FlashAttention 的操作强度为 $O\left(\frac{1}{1/l_{qo} + 1/l_{kv}}\right)$，其中 $l_{qo}$ 与 $l_{kv}$ 分别表示 query 长度与 key-value cache 长度。在 LLM 服务中，query 长度通常等于（prefill）或小于（decode/增量 prefill）KV cache 长度，因此可近似简化为 $O(l_{qo})$。批处理等技术~\cite{yu2022orca} 并不会改变这一操作强度。
+多查询注意力（MQA）~\cite{shazeer2019mqa} 与分组查询注意力（GQA）~\cite{ainslie2023gqa} 通过将多个 query 组共享同一组 KV 条目来优化 KV-Cache 大小。记 query 头数与 KV 头数比值为组大小 $g = \frac{H_{qo}}{H_{kv}}$，则操作强度可提升为 $O(g \cdot l_{qo})$。
+
+\subsection{注意力组合}
+\label{sec:attention-composition}
+
+Block-Parallel Transformer（BPT）~\cite{liu2023blockparalleltransformer} 表明：对于同一 query 与不同 key/value 的注意力输出，可以在保留注意力输出与其尺度信息的前提下进行组合。设 \(\mathbf{q}\) 为一个 query，\(\mathcal{I}\) 为索引集合。我们将 \(\mathcal{I}\) 上的\emph{注意力尺度}定义为注意力分数上的 log-sum-exp：
+
+\begin{equation}
+    \mathbf{LSE}(\mathcal{I}) = \log \sum_{i \in \mathcal{I}} \exp(\mathbf{q} \cdot \mathbf{k}_i)
+\end{equation}
+
+其中 \(\mathbf{k}_i\) 为第 \(i\) 个 key 向量。对应的\emph{注意力输出} \(\mathbf{O}(\mathcal{I})\) 为
+
+
+\begin{equation}
+    \mathbf{O}(\mathcal{I}) = \sum_{i \in \mathcal{I}} \frac{\exp(\mathbf{q} \cdot \mathbf{k}_i)}{\exp(\mathbf{LSE}(\mathcal{I}))} \cdot \mathbf{v}_i
+\end{equation}
+
+我们将 \(\mathcal{I}\) 的\emph{注意力状态（Attention State）}定义为\emph{注意力输出}与\emph{注意力尺度}组成的二元组：
+\(\begin{bmatrix}\mathbf{O}(\mathcal{I}) \\ \mathbf{LSE}(\mathcal{I}) \end{bmatrix}\)。关键在于，\(\mathcal{I}\cup\mathcal{J}\) 的注意力状态可由 \(\mathcal{I}\) 与 \(\mathcal{J}\) 的状态组合得到。具体地，引入算子 \(\oplus\)：
+
+\vspace{-1em}
+\begin{eqnarray*}
+   \begin{bmatrix} \mathbf{O}(\mathcal{I \cup J}) \\ \mathbf{LSE}(\mathcal{I \cup J}) \end{bmatrix} & \!\!\!\!\!\!=\!\!\!\!\!\! &
+    \begin{bmatrix} \mathbf{O}(\mathcal{I}) \\ \mathbf{LSE}(\mathcal{I}) \end{bmatrix} \oplus \begin{bmatrix} \mathbf{O}(\mathcal{J}) \\ \mathbf{LSE}(\mathcal{J}) \end{bmatrix} \\ \ & \!\!\!\!\!\! = \!\!\!\!\!\! & 
+    \begin{bmatrix} 
+        \frac{\exp(\mathbf{LSE}(\mathcal{I})) \mathbf{O}(\mathcal{I}) + \exp(\mathbf{LSE}(\mathcal{J})) \mathbf{O}(\mathcal{J})}{\exp(\mathbf{LSE}(\mathcal{I})) + \exp(\mathbf{LSE}(\mathcal{J}))}
+        \\ \log(\exp(\mathbf{LSE}(\mathcal{I})) + \exp(\mathbf{LSE}(\mathcal{J}))) \end{bmatrix}
+\end{eqnarray*}
+\vspace{-1em}
+
+由于 \(\oplus\) 具有结合律与交换律，多个注意力状态可按任意顺序组合。Ring-Attention~\cite{liu2023ring} 与 Flash-Decoding~\cite{dao2023flash-decoding} 利用这一性质卸载部分注意力计算，以降低内存开销并提升硬件效率。在 \sys 中，\emph{注意力状态}被采用为注意力操作的规范输出，\(\oplus\) 则作为这些状态上的标准归约算子（类似 GEMM 中的求和）。
+
+\subsection{块/向量稀疏}
+
+\label{sec:block-sparse}
+
+Block Compressed Sparse Row（BSR）是一种硬件友好的稀疏格式：它将非零元素组织为大小为 $(b_r, b_c)$ 的连续子矩阵，而不是非结构化稀疏中的随机分散模式。相较标准 CSR，BSR 具有多项优势：可提升寄存器复用效率~\cite{im2004blocksparsity, buluc2009bsr}，并与 GPU/NPU 上的硬件矩阵乘单元有更好兼容性~\cite{narang2017bsr-rnn,gray2017gpu-bsr}；此外还能跳过空块，降低计算开销。当子计算与硬件矩阵乘指令（如 NVIDIA 的 \texttt{mma}）对齐时，BSR 的效率优势尤为明显。
+传统上，Tensor Core 指令的最小维度通常为 16（新架构更大），因此多数块稀疏内核使用 $(16,16)$ 的倍数作为块大小。但这对细粒度稀疏场景并非总是最优~\cite{wang2023tcgnn}。很多注意力库将块稀疏注意力的块大小限制在 $(128,128)$ 的倍数。
+
+近期研究~\cite{chen2021tensorcoressparsity, li2022magicube} 表明，即便在更小块大小下也能高效利用 Tensor Core，例如 GEMM 中矩阵 $B$ 采用 $(16,1)$，或矩阵 $A$ 采用 $(1,16)$（即向量稀疏）。其方法是先将行/列 gather 到连续共享内存，再在该连续数据上执行稠密 Tensor Core 计算。这对细粒度稀疏应用尤为有利。
+\sys 在此基础上进一步支持任意列块大小 $B_c$，从而在多样稀疏模式下获得更高灵活性与效率。

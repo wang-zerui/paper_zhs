@@ -1,0 +1,21 @@
+\section{相关工作}
+\label{sec:related-work}
+
+\subsection{注意力优化}
+
+多头注意力（MHA）~\citep{vaswani2017transformer} 面临计算与 IO 双重挑战。FasterTransformer~\citep{fastertransformer} 通过融合多头注意力（FMHA）降低全局内存占用，但其共享内存开销随序列长度线性增长，因此难以扩展到长上下文。ByteTransformer~\citep{zhai2023bytetransformer} 则针对变长输入优化了 FMHA。
+FlashAttention~\citep{dao2022flashattention} 采用在线 softmax~\citep{milakov2018onlinesoftmax} 将共享内存占用降为常量，从而支持长上下文。FlashAttention2\&3~\citep{dao2023flashattention2,jay2024flashattention3} 进一步通过改进循环结构、重叠 softmax 与 GEMM 来提升性能。FlashDecoding~\cite{dao2023flash-decoding} 将 Split-K 用于解码注意力内核。LeanAttention~\cite{sanovar2024lean} 使用 StreamK~\citep{osama2023streamk} 缓解固定长度注意力中的 wave-quantization~\citep{wave-quantization}。\sys 在 FlashAttention2\&3 模板上扩展以支持稀疏注意力，并在变长序列场景下采用类 StreamK 优化。Nanoflow~\citep{zhu2024nanoflow} 引入 GEMM、注意力与通信的横向融合，POD-Attention~\citep{kamath2024podattention} 则专注优化 chunked-prefill 注意力。\sys 的 JIT 框架可扩展生成支持这类融合的内核。FlashDecoding++~\citep{flashdecodingpp} 利用注意力尺度统计预定义统一最大值，将注意力组合（第 \ref{sec:attention-composition} 节）转化为求和，从而可通过 TMA Store Reduce~\citep{tma-store-reduce} 异步更新全局\textit{attention state}。该方向与 \sys 贡献正交，我们将其留作未来工作。
+
+RelayAttention~\citep{zhu2024relayattention}、Hydragen~\citep{juravsky2024hydra}、ChunkAttention~\citep{ye2024chunkattention}、Parrot~\citep{lin2024parrot} 等工作探索了共享前缀解码注意力，但通常需要为前缀与后缀维护独立 KV-Cache。相比之下，\sys 的可组合格式支持多层级、多前缀解码，并统一页表管理，因此可在不改动内存管理模块的情况下无缝集成到 LLM 服务框架。
+
+\subsection{GPU 上的稀疏优化}
+
+FusedMM~\citep{rahman2021fusedmm} 探索了稀疏-稠密矩阵乘（SpMM）融合，但未覆盖 softmax 计算，难以直接用于注意力加速。\citet{zhang2022fusedgat} 研究图注意力网络（GAT）内核融合，SAR~\citep{mostafa2022sar} 则序列化稀疏注意力聚合，思路类似 FlashAttention，但二者都未探索 Tensor Core 使用。Blocksparse~\citep{gray2017gpu-bsr} 通过 BSR GEMM 利用 Tensor Core。\citet{chen2021tensorcoressparsity}、TC-GNN~\citep{wang2023tcgnn} 与 Magicube~\citep{li2022magicube} 提出向量稀疏格式以高效利用 Tensor Core。\sys 在此基础上进一步支持 FlashAttention 下任意 $(b_r,b_c)$ 块大小。
+
+\subsection{注意力编译器}
+
+FlexAttention~\citep{he2024flexattention} 提供用户友好的注意力变体编程接口，并将其编译为基于 Triton~\citep{triton} 的块稀疏 flashattention；其使用 PyTorch Compiler~\citep{jason2024pytorch2} 自动生成反向传播。\sys 在此基础上扩展了接口以支持 query/key 变换，并聚焦 LLM 服务场景下的向量稀疏与负载均衡。由于 Triton 在不少场景仍落后于 CUDA \& CUTLASS，\sys 选择生成 CUDA 代码而非 Triton。\sys 也可作为 FlexAttention 前向阶段的后端。Mirage~\citep{wu2024mirage} 通过概率等价验证器优化 GEMM 与 FlashAttention 的 tiling 策略，依赖 Triton/CUTLASS 生成代码；但其不支持变长与稀疏数据结构，也不包含 safe-softmax。相比之下，\sys 可直接用于 LLM 服务。
+
+\subsection{LLM 服务系统}
+
+Orca~\citep{yu2022orca} 引入连续批处理以提升吞吐。PagedAttention~\citep{kwon2023vllm} 使用页表管理 KV-Cache。Sarathi-serve~\citep{agrawal2024sarathi} 通过将 decode 与 chunked-prefill 搭配执行提升效率，SGLang~\citep{zheng2023sglang} 则用 RadixTree 提升前缀缓存与 KV 管理。\sys 通过块稀疏注意力内核为这些机制提供统一支持。vAttention~\citep{prabhu2024vattention} 证明 GPU 虚拟内存可在无需专用内核情况下处理 PageAttention 的地址转换；但动态 KV-Cache 稀疏等挑战依然存在（例如 Quest~\citep{tang2024quest}），此时 \sys 的块稀疏内核仍然有效。此外，\sys 也可与 vAttention 结合，通过生成连续 KV-Cache 内核来协同工作。

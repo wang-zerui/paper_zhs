@@ -1,0 +1,233 @@
+\section{\sysname：算法、并行性与工作划分}
+\label{sec:algo}
+
+我们介绍 \sysname 算法，其中包含了对 \sysnameone 的若干改动，以减少非矩阵乘 FLOPs 的数量。
+随后我们说明如何在不同 thread block 上并行计算，以充分利用 GPU 资源。
+最后我们说明如何在单个 thread block 内的不同 warp 之间划分工作，以减少共享内存访问量。
+这些改进带来了 2-3$\times$ 的速度提升，\cref{sec:experiments} 给出了验证结果。
+
+\subsection{算法}
+\label{subsec:algo}
+
+我们对 \sysnameone 的算法进行了调整，以减少非矩阵乘 FLOPs 的数量。
+原因在于现代 GPU 拥有专用计算单元（例如 Nvidia GPU 的 Tensor Cores），使矩阵乘显著更快。
+以 A100 为例，其 FP16/BF16 矩阵乘理论峰值吞吐为 312 TFLOPs/s，而非矩阵乘 FP32 仅为 19.5 TFLOPs/s。
+换个角度看，每个非矩阵乘 FLOP 的代价约为矩阵乘 FLOP 的 16$\times$。
+为了保持高吞吐（例如超过理论峰值 TFLOPs/s 的 50\%），我们希望尽可能把时间花在矩阵乘 FLOPs 上。
+
+\subsubsection{前向传播}
+
+我们回顾 \cref{subsec:flashv1} 中的在线 softmax 技巧，并做了两点小改动来减少非矩阵乘 FLOPs：
+\begin{enumerate}
+  \item 输出更新中不必将两项都乘以 $\diag(\ell^{(2)})^{-1}$：
+  \begin{equation*}
+    \vO^{(2)} = \diag(\ell^{(1)} / \ell^{(2)})^{-1} \vO^{(1)} + \diag(\ell^{(2)})^{-1} e^{\vS^{(2)} - m^{(2)}} \vV^{(2)}.
+  \end{equation*}
+  我们可以改为维护一个“未缩放”的 $\vO^{(2)}$，并保留统计量 $\ell^{(2)}$：
+  \begin{equation*}
+    \tilde{\vO}^{(2)} = \diag(\ell^{(1)})^{-1} \vO^{(1)} + e^{\vS^{(2)} - m^{(2)}} \vV^{(2)}.
+  \end{equation*}
+  仅在循环最后一步，再把最终的
+  $\tilde{\vO}^{(\mathrm{last})}$ 乘以 $\diag(\ell^{(\mathrm{last})})^{-1}$ 得到正确输出。
+
+  \item 在反向传播中无需同时保存最大值 $m^{(j)}$ 与指数和 $\ell^{(j)}$。
+  我们只需存储 logsumexp：$L^{(j)} = m^{(j)} + \log(\ell^{(j)})$。
+\end{enumerate}
+
+在 \cref{subsec:flashv1} 的 2 个块简化情形中，在线 softmax 现在可写为：
+\begin{align*}
+  m^{(1)} &= \mathrm{rowmax}(\vS^{(1)})  \in \mathbb{R}^{B_r}\\
+  \ell^{(1)} &= \mathrm{rowsum}(e^{\vS^{(1)} - m^{(1)}}) \in \mathbb{R}^{B_r} \\
+  \tilde{\vO^{(1)}} &= e^{\vS^{(1)} - m^{(1)}} \vV^{(1)} \in \mathbb{R}^{B_r \times d}\\
+  m^{(2)} &= \max(m^{(1)}, \mathrm{rowmax}(\vS^{(2)})) = m \\
+  \ell^{(2)} &= e^{m^{(1)} - m^{(2)}} \ell^{(1)} + \mathrm{rowsum}(e^{\vS^{(2)} - m^{(2)}}) = \mathrm{rowsum}(e^{\vS^{(1)} - m}) + \mathrm{rowsum}(e^{\vS^{(2)} - m}) = \ell \\
+  \tilde{\vP}^{(2)} &= \diag(\ell^{(2)})^{-1} e^{\vS^{(2)} - m^{(2)}} \\
+  \tilde{\vO}^{(2)} &= \diag(e^{m^{(1)} - m^{(2)}})^{-1} \tilde{\vO}^{(1)} + e^{\vS^{(2)} - m^{(2)}} \vV^{(2)} = e^{s^{(1)} - m} \vV^{(1)} + e^{s^{(2)} - m} \vV^{(2)} \\
+  \vO^{(2)} &= \diag(\ell^{(2)})^{-1} \tilde{\vO}^{(2)} = \vO.
+\end{align*}
+
+我们在 \cref{alg:flash2_fwd} 中给出完整的 \sysname 前向传播。
+
+\begin{algorithm}[H]
+  % \algsetup{linenosize=\tiny}
+  \caption{\small\label{alg:flash2_fwd}\sysname 前向传播}
+  \begin{algorithmic}[1]
+    \REQUIRE HBM 中矩阵 $\vQ, \vK, \vV \in \mathbb{R}^{N \times d}$，块大小 $B_c, B_r$。
+    \STATE \label{alg:stream_attn_split_qkv} 将 $\vQ$ 划分为 $T_r = \left\lceil\frac{N}{B_r} \right\rceil$ 个块 $\vQ_1, \dots, \vQ_{T_r}$，每块大小为 $B_r \times d$；
+    并将 $\vK, \vV$ 划分为 $T_c = \left\lceil \frac{N}{B_c} \right\rceil$ 个块 $\vK_1, \dots, \vK_{T_c}$ 与
+    $\vV_1, \dots, \vV_{T_c}$，每块大小为 $B_c \times d$。
+    \STATE 将输出 $\vO \in \mathbb{R}^{N \times d}$ 划分为 $T_r$ 个块 $\vO_i, \dots, \vO_{T_r}$，每块大小
+    为 $B_r \times d$；并将 logsumexp 向量 $L$ 划分为 $T_r$ 个块 $L_i, \dots, L_{T_r}$，每块大小
+    为 $B_r$。
+    \FOR{$1 \le i \le T_r$} \label{alg:stream_attn_outer_loop}
+      \STATE \label{alg:stream_attn_load_q} 将 $\vQ_i$ 从 HBM 读入片上 SRAM。
+      \STATE \label{alg:stream_attn_init} 在片上初始化 $\vO_{i}^{(0)} = (0)_{B_r \times d} \in \mathbb{R}^{B_r \times d}, \ell_{i}^{(0)} = (0)_{B_r} \in \mathbb{R}^{B_r}, m_{i}^{(0)} = (-\infty)_{B_r} \in \mathbb{R}^{B_r}$。
+      \FOR{$1 \le j \le T_c$}
+        \STATE \label{alg:stream_attn_load_kv} 将 $\vK_j, \vV_j$ 从 HBM 读入片上 SRAM。
+        \STATE \label{alg:stream_attn_qk} 在片上计算 $\vS_{i}^{(j)} = \vQ_i \vK_j^T \in \mathbb{R}^{B_r \times B_c}$。
+        \STATE \label{alg:stream_attn_statistics} 在片上计算
+        $m_{i}^{(j)} = \mathrm{max}(m_{i}^{(j-1)}, \mathrm{rowmax}(\vS_{i}^{(j)})) \in \mathbb{R}^{B_r}$，$\tilde{\vP}_{i}^{(j)} = \exp(\vS_{i}^{(j)} - m_{i}^{(j)}) \in \mathbb{R}^{B_r \times B_c}$（逐元素），
+        $\ell_{i}^{(j)} = e^{m_{i}^{j-1} - m_{i}^{(j)}} \ell_{i}^{(j-1)} + \mathrm{row\ sum}(\tilde{\vP}_{i}^{(j)}) \in \mathbb{R}^{B_r}$。
+        \STATE \label{alg:stream_attn_update} 在片上计算
+        $\vO_{i}^{(j)} = \diag(e^{m_{i}^{(j-1)} - m_{i}^{(j)}})^{-1} \vO_{i}^{(j-1)} + \tilde{\vP}_{i}^{(j)} \vV_j$。
+      \ENDFOR
+      \STATE 在片上计算 $\vO_{i} = \diag(\ell_{i}^{(T_c)})^{-1} \vO_{i}^{(T_c)}$。
+      \STATE 在片上计算 $L_{i} = m_{i}^{(T_c)} + \log(\ell_i^{(T_c)})$。
+      \STATE 将 $\vO_{i}$ 写回 HBM，作为 $\vO$ 的第 $i$ 个块。
+      \STATE 将 $L_{i}$ 写回 HBM，作为 $L$ 的第 $i$ 个块。
+    \ENDFOR
+    \STATE 返回输出 $\vO$ 与 logsumexp 向量 $L$。
+  \end{algorithmic}
+\end{algorithm}
+
+\paragraph{因果掩码。}
+
+注意力的一个常见应用是自回归语言建模，此时需要对注意力矩阵 $\vS$ 施加因果掩码（即任意 $j>i$ 的元素 $\vS_{ij}$ 被设为 $-\infty$）。
+\begin{enumerate}
+  \item 由于 \sysnameone 与 \sysname 本身按块计算，对于所有“列索引整体大于行索引”的块（当序列很长时大约占一半），我们可以直接跳过该块计算。
+  与不使用因果掩码的注意力相比，这可带来约 1.7-1.8$\times$ 加速。
+  \item 对于行索引严格小于列索引的块，不需要再显式应用因果掩码。
+  这意味着对每一行而言，我们只需在 1 个块上应用因果掩码（假设方形块）。
+\end{enumerate}
+
+\paragraph{正确性、运行时间与内存需求。}
+与 \sysnameone 一样，\cref{alg:flash2_fwd} 在无近似条件下返回正确输出
+$\vO = \softmax(\vQ\vK^\top)\vV$，使用 $O(N^2d)$ FLOPs，且除输入输出外仅需 $O(N)$ 额外内存（用于存储 logsumexp $L$）。
+其证明与 \citet[Theorem 1]{dao2022flashattention} 的证明几乎相同，这里省略。
+
+\subsubsection{反向传播}
+
+\sysname 的反向传播与 \sysnameone 基本一致。
+我们仅做了一个小改动：在 softmax 中仅使用按行 logsumexp $L$，而不再同时使用按行最大值与按行指数和。
+为完整起见，我们在 \cref{alg:flash_bwd} 中给出反向传播描述。
+\begin{algorithm}[h]
+  \caption{\small\label{alg:flash_bwd}\sysname 反向传播}
+  \begin{algorithmic}[1]
+    \REQUIRE HBM 中矩阵 $\vQ, \vK, \vV, \vO, \vdO \in \mathbb{R}^{N \times d}$，
+    HBM 中向量 $L \in \mathbb{R}^N$，块大小 $B_c, B_r$。
+    \STATE 将 $\vQ$ 划分为 $T_r = \left\lceil\frac{N}{B_r} \right\rceil$ 个块 $\vQ_1, \dots, \vQ_{T_r}$，每块大小为 $B_r \times d$；
+    并将 $\vK, \vV$ 划分为 $T_c = \left\lceil \frac{N}{B_c} \right\rceil$ 个块 $\vK_1, \dots, \vK_{T_c}$ 与
+    $\vV_1, \dots, \vV_{T_c}$，每块大小为 $B_c \times d$。
+    \STATE 将 $\vO$ 划分为 $T_r$ 个块 $\vO_i, \dots, \vO_{T_r}$，每块大小
+    为 $B_r \times d$；将 $\vdO$ 划分为 $T_r$ 个块 $\vdO_i, \dots, \vdO_{T_r}$，
+    每块大小为 $B_r \times d$；并将 $L$ 划分为 $T_r$ 个块 $L_i, \dots, L_{T_r}$，每块大小为
+    $B_r$。
+    \STATE 在 HBM 中初始化 $\vdQ = (0)_{N \times d}$，并将其划分为 $T_r$ 个块 $\vdQ_1, \dots, \vdQ_{T_r}$，每块大小为 $B_r \times d$。
+    将 $\vdK, \vdV \in \mathbb{R}^{N \times d}$ 划分为 $T_c$ 个块 $\vdK_1, \dots, \vdK_{T_c}$ 与
+    $\vdV_1, \dots, \vdV_{T_c}$，每块大小为 $B_c \times d$。
+    \STATE 计算 $D = \mathrm{rowsum}(\vdO \circ \vO) \in \mathbb{R}^d$（逐元素乘），将
+    $D$ 写回 HBM，并划分为 $T_r$ 个块 $D_1, \dots, D_{T_r}$，每块大小
+    为 $B_r$。
+    \FOR{$1 \le j \le T_c$}
+      \STATE 将 $\vK_j, \vV_j$ 从 HBM 读入片上 SRAM。
+      \STATE 在 SRAM 中初始化 $\vdK_j = (0)_{B_c \times d}, \vdV_j = (0)_{B_c \times d}$。
+      \FOR{$1 \le i \le T_r$}
+        \STATE 将 $\vQ_i, \vO_i, \vdO_i, \vdQ_i, L_i, D_i$ 从 HBM 读入片上 SRAM。
+        \STATE 在片上计算 $\vS_{i}^{(j)} = \vQ_i \vK_j^T \in \mathbb{R}^{B_r \times B_c}$。
+        \STATE 在片上计算 $\vP_{i}^{(j)} = \exp(\vS_{ij} - L_{i}) \in \mathbb{R}^{B_r \times B_c}$。
+        \STATE 在片上计算
+        $\vdV_j \leftarrow \vdV_j + (\vP_{i}^{(j)})^\top \vdO_i \in \mathbb{R}^{B_c \times d}$。
+        \STATE 在片上计算
+        $\vdP_{i}^{(j)} = \vdO_{i} \vV_j^\top \in \mathbb{R}^{B_r \times B_c}$。
+        \STATE 在片上计算 $\vdS_{i}^{(j)} = \vP_{i}^{(j)} \circ (\vdP_{i}^{(j)} - D_i) \in \mathbb{R}^{B_r \times B_c}$。
+        \STATE 将 $\vdQ_i$ 从 HBM 读入 SRAM，然后在片上更新
+        $\vdQ_{i} \leftarrow \vdQ_i + \vdS_{i}^{(j)} \vK_j \in \mathbb{R}^{B_r \times d}$，并
+        写回 HBM。
+        \STATE 在片上计算 $\vdK_{j} \leftarrow \vdK_j + {\vdS_{i}^{(j)}}^\top \vQ_i \in \mathbb{R}^{B_c \times d}$。
+      \ENDFOR
+      \STATE 将 $\vdK_j, \vdV_j$ 写回 HBM。
+    \ENDFOR
+    \STATE 返回 $\vdQ, \vdK, \vdV$。
+  \end{algorithmic}
+\end{algorithm}
+
+\paragraph{多查询注意力与分组查询注意力。}
+多查询注意力（MQA）~\citep{shazeer2019fast} 与分组查询注意力（GQA）~\citep{ainslie2023gqa} 是注意力的两种变体：多个 query 头共享同一个 key/value 头，以在推理时减小 KV cache 的大小。
+在计算中，我们无需显式复制 key/value 头，而是通过隐式操控头索引来实现等价计算。
+在反向传播中，需要对被隐式复制的不同头对应的梯度 $\vdK$ 和 $\vdV$ 进行求和。
+
+\subsection{并行性}
+\label{subsec:parallelism}
+
+\sysnameone 的第一版仅在 batch 大小与头数维度上并行。
+我们使用 1 个 thread block 处理 1 个注意力头，因此总 thread block 数为
+$\text{batch size} \cdot \text{number of heads}$。
+每个 thread block 会被调度到一个 SM 上执行；例如 A100 上共有 108 个 SM。
+当该数量较大（例如 $\geq 80$）时，这种调度效率较高，因为几乎能用满 GPU 的计算资源。
+
+在长序列场景下（通常意味着 batch size 或头数较小），为了更好利用 GPU 的多处理器，我们进一步沿序列长度维度并行。
+这在该场景下会带来显著加速。
+
+
+\paragraph{前向传播。}
+我们观察到外层循环（沿序列长度）是天然可并行的，可将其调度到彼此无需通信的不同 thread block 上。
+与 \sysnameone 一样，我们也在 batch 维度和头数维度并行。
+序列长度维度上的额外并行，在 batch size 和头数较小时可提升占用率（GPU 资源使用比例），从而带来加速。
+
+这些思想包括：交换循环顺序（外层遍历行块、内层遍历列块，而不是 \sysnameone 原论文中的相反顺序），以及沿序列长度维度并行。
+这些最早由 Phil Tillet 在 Triton~\citep{tillet2019triton}
+实现中提出并实现。\footnote{\url{https://github.com/openai/triton/blob/main/python/tutorials/06-fused-attention.py}}
+
+\paragraph{反向传播。}
+注意不同列块之间唯一共享的计算是在 \cref{alg:flash_bwd} 中更新 $\vdQ$：需要将 $\vdQ_i$ 从 HBM 读入 SRAM，然后在片上更新
+$\vdQ_{i} \leftarrow \vdQ_i + \vdS_{i}^{(j)} \vK_j$，再写回 HBM。
+因此我们同样沿序列长度维度并行，并在反向传播中为每个列块调度 1 个 thread block。
+我们使用原子加（atomic add）让不同 thread block 之间协同更新 $\vdQ$。
+
+我们在 \cref{fig:parallelism} 中展示并行化方案。
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figs/flashattention_fwd_bwd_parallel.png}
+  \caption{\label{fig:parallelism}前向传播（左）中，我们对 worker（thread block）并行化，每个 worker 负责注意力矩阵的一块行。
+    反向传播（右）中，每个 worker 负责注意力矩阵的一块列。}
+\end{figure}
+
+
+\subsection{Warp 间工作划分}
+\label{subsec:work_partitioning}
+
+\cref{subsec:parallelism} 介绍了 thread block 级别的调度；即使在每个 thread block 内，我们仍需决定如何在不同 warp 之间划分工作。
+我们通常在每个 thread block 中使用 4 或 8 个 warp，其划分方式见 \cref{fig:partitioning}。
+
+\paragraph{前向传播。}
+对每个块，\sysnameone 会将 $\vK$ 和 $\vV$ 分给 4 个 warp，而 $\vQ$ 对所有 warp 可见。
+每个 warp 先做乘法得到 $\vQ\vK^\top$ 的一个切片，再与 $\vV$ 的一个切片相乘，并通过通信把结果累加。
+这被称为 “split-K” 方案。
+但该方案效率不高，因为所有 warp 都需要把中间结果写到共享内存、同步，再把中间结果相加。
+这些共享内存读写拖慢了 \sysnameone 的前向传播。
+
+在 \sysname 中，我们改为将 $\vQ$ 在 4 个 warp 之间划分，而 $\vK$ 与 $\vV$ 对所有 warp 可见。
+每个 warp 在得到 $\vQ\vK^\top$ 的一个切片后，只需与共享的 $\vV$ 切片相乘，即可得到对应的输出切片。
+不再需要 warp 间通信。
+共享内存读写减少后可带来加速（\cref{sec:experiments}）。
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}{.53\textwidth}
+    \centering
+    \includegraphics[width=.95\linewidth]{figs/flash_partitioning.png}
+    \caption{\sysnameone}
+  \end{subfigure}%
+  \begin{subfigure}{.47\textwidth}
+    \centering
+    \includegraphics[width=.95\linewidth]{figs/flash2_partitioning.png}
+    \caption{\sysname}
+  \end{subfigure}
+  \caption{前向传播中不同 warp 之间的工作划分}
+  \label{fig:partitioning}
+\end{figure}
+
+\paragraph{反向传播。}
+在反向传播中同样地，我们也选择避免 “split-K” 的 warp 划分方式。
+不过由于各输入与梯度之间依赖关系更复杂
+$\vQ, \vK, \vV, \vO, \vdO, \vdQ, \vdK, \vdV$，
+仍需要一定同步。
+尽管如此，避免 “split-K” 仍可减少共享内存读写，并再次带来加速（\cref{sec:experiments}）。
+
+\paragraph{块大小调优}
+增大块大小通常会减少共享内存加载/存储次数，但会增加所需寄存器数量和共享内存总量。
+当块大小超过某个阈值后，寄存器溢出（register spilling）会导致明显降速，或者所需共享内存超过 GPU 可用容量，使 kernel 根本无法运行。
+我们通常选择大小为 $\{64, 128\} \times \{64, 128\}$ 的块，具体取决于头维度 $d$ 与设备共享内存大小。
+
+由于块大小本质上只有 4 种选择，我们针对每个头维度手工调优；但这类工作可受益于自动调优，以减少人工成本。
+这留作未来工作。

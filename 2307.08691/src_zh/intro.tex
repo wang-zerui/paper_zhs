@@ -1,0 +1,43 @@
+\section{引言}
+\label{sec:intro}
+
+% 问题是什么
+提升 Transformer~\citep{vaswani2017attention} 的上下文长度是一项挑战，因为其核心注意力层在运行时间和内存需求上都随输入序列长度二次增长。
+理想情况下，我们希望突破标准的 2k 序列长度限制，以训练能够理解长篇图书、高分辨率图像和长视频的模型。
+仅在过去一年中，就出现了多个上下文长度显著增加的语言模型：GPT-4~\citep{OpenAI2023GPT4TR} 的上下文长度为 32k，MosaicML 的 MPT 为 65k，Anthropic 的 Claude 为 100k。
+长文档查询、故事写作等新兴应用也表明，对此类长上下文模型存在明确需求。
+
+为了降低长上下文下注意力计算的开销，已有大量方法被提出用于近似注意力~\citep{kitaev2020reformer, roy2021efficient, wang2020linformer,
+  katharopoulos2020transformers, choromanski2020rethinking,
+  beltagy2020longformer, zaheer2020bigbird, scatterbrain}。
+尽管这些方法在一些场景中得到应用，但据我们所知，大规模训练仍主要使用标准注意力。
+受此启发，\citet{dao2022flashattention} 提出通过重排注意力计算，并结合经典技术（分块、重计算）来显著提速，同时将内存开销从随序列长度二次增长降到线性增长。
+这在不做近似的前提下，相对优化基线带来 2-4$\times$ 的端到端耗时加速和最高 10-20$\times$ 的内存节省，因此 \sysnameone 已在 Transformer 的大规模训练和推理中得到广泛采用。
+
+然而，随着上下文长度继续增加，\sysnameone 相比矩阵乘（GEMM）等其他基础算子仍不够高效。
+具体来说，尽管 \sysnameone 相比标准注意力实现已快 2-4$\times$，其前向传播仍只能达到设备理论最大 FLOPs/s 的 30-50\%（\cref{fig:benchmark_attn_fwd}），而反向传播更具挑战，在 A100 GPU 上仅达到最大吞吐的 25-35\%（\cref{fig:benchmark_attn_bwd}）。
+相比之下，优化后的 GEMM 可达到理论最大设备吞吐的 80-90\%。
+通过细致剖析，我们发现 \sysnameone 在 GPU 不同 thread block 与 warp 之间的工作划分仍然次优，导致要么占用率不足，要么出现不必要的共享内存读写。
+
+基于 \sysnameone，我们提出 \sysname，通过更好的并行策略和工作划分来解决这些挑战。
+\begin{enumerate}
+  \item 在 \cref{subsec:algo} 中，我们调整算法，在不改变输出的前提下降低非矩阵乘 FLOPs 数量。
+  尽管非矩阵乘 FLOPs 仅占总 FLOPs 的一小部分，但由于 GPU 具有矩阵乘专用单元，这部分操作执行更慢；矩阵乘吞吐可比非矩阵乘高至 16$\times$。
+  因此，减少非矩阵乘 FLOPs、尽量把时间用于矩阵乘 FLOPs 非常重要。
+
+  \item 我们提出在 batch 维度和头数维度之外，沿序列长度维度同时并行前向与反向传播。
+  当序列较长（因此 batch size 往往较小）时，这会提升占用率（GPU 资源利用率）。
+
+  \item 即使在单个注意力计算块内部，我们也在 thread block 的不同 warp 之间划分工作，以减少通信和共享内存读写。
+
+\end{enumerate}
+
+在 \cref{sec:experiments} 中，我们实证验证 \sysname 相较 \sysnameone 也能带来显著加速。
+在不同设置（是否使用因果掩码、不同 head dimension）下的基准结果表明，\sysname 相比 \sysnameone 约有 2$\times$ 加速，前向传播最高达到理论最大吞吐的 73\%，反向传播最高达到 63\%。
+当用于端到端 GPT 风格模型训练时，我们在每张 A100 GPU 上达到最高 225 TFLOPs/s 的训练速度。
+
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "../flash2"
+%%% End:

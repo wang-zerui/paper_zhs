@@ -1,0 +1,276 @@
+\appendix
+
+\section{超参数}
+
+与 GLM-5 模型架构相关的超参数见 \Cref{tab:model_arch_glm45_glm5}。
+
+在训练方面，我们沿用 GLM-4.5 的设置，包括 Muon 优化器、余弦衰减和 batch size warmup。学习率先经历从 0 到 2e-4 的 warmup 阶段，再衰减至 4e-5 直至预训练结束。在中期训练阶段，学习率从 4e-5 线性下降到 1e-5。其余超参数与 GLM-4.5 相同。对于 DSA warmup 阶段，学习率从 5e-3 下降到 2e-4。对于 DSA 稀疏适配阶段，我们使用恒定学习率 1e-5。
+
+\begin{table}[!ht]
+    \centering
+    \caption{GLM-4.5 与 GLM-5 的模型架构。参数统计中，所有模型均计入 MTP 层参数，但不计入词嵌入与输出层参数。}
+    \label{tab:model_arch_glm45_glm5}
+    \begin{tabular}{l|cc}
+    \toprule
+       Model & \textbf{GLM-4.5} & \textbf{GLM-5} \\
+    \midrule
+       \# Total Parameters & 355B & 744B \\
+       \# Activated Parameters & 32B & 40B \\
+       \# Dense Layers & 3 & 3 \\
+       \# MoE Layers & 89 & 75 \\
+       \# MTP Layers & 1 & 1 \\
+       Hidden Dim & 5120 & 6144 \\
+       Dense Intermediate Dim & 12288 & 12288 \\
+       MoE Intermediate Dim & 1536 & 2048 \\
+    \midrule
+       QK Head Dim & 128 & 192 \\
+       V Head Dim & 128 & 256 \\
+       Q LoRA Dim & -- & 2048 \\
+       KV LoRA Dim & -- & 512 \\
+       \# Attention Heads & 96 & 64 \\
+       \# Key-Value Heads & 8 & -- \\
+       \# Indexer Attn Heads & -- & 32 \\
+       \# Indexer Head Dim & -- & 128 \\
+    \midrule
+       \# Experts (total) & 160 & 256 \\
+       \# Routed Experts & 8 & 8 \\
+       \# Shared Experts & 1 & 1 \\
+    \midrule
+       Vocabulary Size & 151552 & 154880 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{评测细节}
+\subsection{基座模型评测}
+我们在 \Cref{tab:base_benchmark} 中使用英文、中文、代码和数学基准评测 GLM-5 基座模型。
+
+\begin{table}[!ht]
+  \centering
+  \caption{GLM-5-Base、GLM-4.5-Base 与其他代表性开源基座模型对比。}
+  \resizebox{\textwidth}{!}{
+  \begin{tabular}{lcccc|c}
+    \toprule
+     & \textbf{Benchmark (Metric)} & \textbf{DeepSeek-V3} & \textbf{Kimi-K2} & \textbf{GLM-4.5} & \textbf{GLM-5} \\
+    & & \textbf{Base} & \textbf{Base} & \textbf{Base} & \textbf{Base} \\
+    \midrule
+    \multirow{3}{*}{} & Architecture & MoE & MoE & MoE & MoE \\
+    & \# Activated Params & 37B & 32B & 32B & 40B \\
+    & \# Total Params & 671B & 1043B & 355B & 744B \\
+    \midrule
+    \multirow{6}{*}{\textbf{English}} & SimpleQA (EM) & 26.6 & 35.3 & 30.0 & 36.0 \\
+    & BBH (EM) & 88.4 & 88.7 & 86.2 & 87.4 \\
+    & MMLU (EM) & 87.2 & 87.8 & 86.1 & 88.3 \\
+    & HellaSwag (EM) & 88.9 & 94.6 & 87.1 & 88.1 \\
+    & PIQA (EM) & 84.7 & - & 85.3 & 84.6 \\
+    & TriviaQA (EM) & 82.9 & 85.1 & 80.0 & 80.9 \\
+    \midrule
+    \multirow{2}{*}{\textbf{Code}} & EvalPlus (Pass@1) & 65.6 & 80.3 & 78.1 & 87.0 \\
+    & LiveCodeBench-Base (Pass@1) & 24.6 & 26.3 & 28.1 & 34.4 \\
+    \midrule
+    \multirow{2}{*}{\textbf{Math}} & GSM8K (EM) & 87.6 & 92.1 & 79.4 & 68.8 \\
+    & MATH (EM) & 62.6 & 70.2 & 61.0 & 56.4 \\
+    \midrule
+    \multirow{4}{*}{\textbf{Chinese}} & CLUEWSC (EM) & 82.7 & - & 83.5 & 84.2 \\
+    & C-Eval (EM) & 90.1 & 92.5 & 86.9 & 88.8 \\
+    & C3 (EM) & 78.6 & - & 83.1 & 80.3 \\
+    & Chinese-SimpleQA (EM) & 72.1 & 77.6 & 70.1 & 74.6 \\
+    \bottomrule
+  \end{tabular}
+  }
+  \label{tab:base_benchmark}
+\end{table}
+
+\subsection{ARC 基准评测}
+\label{sec:eval_details_arc}
+Humanity’s Last Exam（HLE）与其他推理任务：我们设置最大生成长度为 $131,072$ tokens（$temperature=1.0, top\_p=0.95, max\_new\_tokens=131072$）。默认报告文本子集；标记 * 的结果来自全量集合。我们使用 GPT-5.2（medium）作为 judge 模型。对 HLE-with-tools，最大上下文长度设为 $202,752$ tokens。
+
+SWE-bench \& SWE-bench Multilingual：我们在 OpenHands 中使用定制指令提示运行 SWE-bench 套件。设置为：$temperature=0.7, top\_p=0.95, max\_new\_tokens=16384$，上下文窗口 200K。
+
+BrowseComp：不使用上下文管理时，保留最近 5 轮细节。使用上下文管理时，采用与 DeepSeek-V3.2 和 Kimi K2.5 相同的 discard-all 策略。
+
+Terminal-Bench 2.0（Terminus 2）：我们使用 Terminus 框架评测，设置为 $timeout=2h, temperature=0.7, top\_p=1.0, max\_new\_tokens=8192$，上下文窗口 128K。资源上限为 16 CPUs 与 32 GB RAM。
+
+Terminal-Bench 2.0（Claude Code）：我们在 Claude Code 2.1.14（think mode）中评测，设置为 $temperature=1.0, top\_p=0.95, max\_new\_tokens=65536$。我们移除墙钟时限，同时保留单任务 CPU 与内存约束。我们修复了 Claude Code 引入的环境问题，并额外报告修复歧义指令的 verified Terminal-Bench 2.0 数据集结果（见：\url{https://huggingface.co/datasets/zai-org/terminal-bench-2-verified}）。分数取 5 次运行均值。
+
+CyberGym：我们在 Claude Code 2.1.18（think mode，无 web 工具）中评测，设置为（$temperature=1.0, top\_p=1.0, max\_new\_tokens=32000$），每任务超时 250 分钟。结果为 1,507 个任务的单次 Pass@1。
+
+MCP-Atlas：全部模型均在 think mode 下于 500 任务公开子集上评测，单任务超时 10 分钟。我们使用 Gemini 3 Pro 作为 judge 模型。
+
+$\tau^2$-Bench：我们在 Retail 和 Telecom 中加入小幅提示调整，以避免过早用户终止导致失败。对于 Airline，采用 Claude Opus 4.5 system card 提出的领域修复。
+
+Vending-Bench 2：运行由 Andon Labs 独立完成\footnote{\url{https://andonlabs.com/evals/vending-bench-2}}。
+
+
+\subsection{$\tau^2$-Bench 的优化用户模拟器}
+\label{sec:tau_user_prompt}
+我们在 Telecom 与 Retail 中加入小幅提示调整，以避免过早用户终止导致失败。优化后的提示见图~\ref{fig:tau2-prompt-telecom} 与图~\ref{fig:tau2-prompt-retail}。这些优化提示被如下集成到系统提示中：
+
+\begin{tcolorbox}[left=0mm,right=0mm,top=0mm,bottom=0mm,boxsep=1mm,arc=0mm,boxrule=0pt, frame empty, breakable]
+\begin{lstlisting}
+SYSTEM_PROMPT = """"
+{global_user_sim_guidelines}
+
+<scenario>
+{instructions}
+</scenario>
+
+{optimized_user_prompt}
+"""".strip()
+\end{lstlisting}
+\end{tcolorbox}
+
+\begin{tcolorbox}[left=0mm,right=0mm,top=0mm,bottom=0mm,boxsep=1mm,arc=0mm,boxrule=0pt, frame empty, breakable]
+\footnotesize
+\begin{lstlisting}
+# Note:
+- Do not generate the '###TRANSFER###' before agent clearly tells "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.".
+    Example:
+    Case1:
+        - agent: "Would you like me to transfer you to a human agent who can assist you with these options and help get your service restored?"
+        - user: "Yes, please transfer me to a human agent.".
+    Case2:
+        - user: "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
+        - user: "###TRANSFER###"
+\end{lstlisting}
+\end{tcolorbox}
+\noindent\begin{minipage}{\textwidth}
+\captionof{figure}{$\tau^2$-Bench Telecom 的优化用户提示。}
+\label{fig:tau2-prompt-telecom}
+\end{minipage}
+
+\begin{tcolorbox}[left=0mm,right=0mm,top=0mm,bottom=0mm,boxsep=1mm,arc=0mm,boxrule=0pt, frame empty, breakable]
+\footnotesize
+\begin{lstlisting}
+# Rules:
+- Just generate one line at a time to simulate the user's message.
+- Do not give away all the instruction at once. Only provide the information that is necessary for the current step.
+- Do not hallucinate information that is not provided in the instruction. Follow these guidelines:
+    1. If the agent asks for information NOT in the instruction:
+        - Say you don't remember or don't have it
+        - Offer alternative information that IS mentioned in the instruction
+    2. Examples:
+        - If asked for order ID (not in instruction): "Sorry, I don't remember the order ID, can you search for it? My name/email/phone number/zipcode is ..."
+        - If asked for email (not in instruction): "I don't have my email handy, but I can give you my name and zip code which are..."
+- Do not repeat the exact instruction in the conversation. Instead, use your own words to convey the same information.
+- Try to make the conversation as natural as possible, and stick to the personalities in the instruction.
+# Constraint Handling:
+- Provide requests strictly based on what is explicitly stated in the instruction.
+- Do not assume, extend, substitute, or generalize in any form.
+- Do not modify or relax constraints on:
+- Time / Date
+- Budget
+- Specific terms (e.g., "same" must not be replaced with "similar")
+- Core Rule: Any attribute NOT mentioned in the instruction can be either changed or kept the same
+- Examples:
+    - If instruction says "exchange red item to blue": Only color must change, other attributes (size, material, etc.) are flexible
+    - If instruction says "exchange red item to blue, keep the same size": Both color must change AND size must stay the same
+- Exception: Only follow additional constraints when explicitly stated in the instruction
+# Domain-Specific Rules:
+## For Retail scenarios:
+- Focus on product attributes and exchange/return processes as specified in instructions.
+- During confirmations: Always respond based strictly on the original instruction, never deviate to match agent's provided options. Restate your requirement from the instruction rather than selecting from agent's choices.
+    - Example: If the agent provides specific options (A/B/C) but the instruction states a general requirement (e.g., "same as pending order"), always restate or confirm based on what the instruction says, not by directly selecting from the agent's provided options.
+# When NOT to finish the conversation:
+- Do not end until you have clearly and completely expressed all your requirements and constraints.
+- Do not end until the agent has completed all tasks mentioned in the instruction and verified no operations were missed.
+- Do not end if the agent's execution results do not match your expectations or are incorrect/incomplete.
+# When you CAN finish the conversation:
+- Only when all above conditions are satisfied AND all tasks are completed correctly.
+- OR when you have clearly expressed complete requirements but the system explicitly states it cannot complete them due to technical limitations - in this case, accept transfer to human.
+# How to finish the conversation:
+- If the agent has completed all tasks, generate the '###STOP###' token to end the conversation.
+# Note:
+- You should carefully check if the agent has completed all tasks mentioned in the instruction before generating '###STOP###'.
+\end{lstlisting}
+\end{tcolorbox}
+\noindent\begin{minipage}{\textwidth}
+\captionof{figure}{$\tau^2$-Bench Retail 的优化用户提示。}
+\label{fig:tau2-prompt-retail}
+\end{minipage}
+
+\subsection{真实智能体工程体验评估}
+
+\subsubsection{前端评估}
+
+\label{sec:frontend_eval_data_cons}
+
+\paragraph{数据。}
+我们的数据集包含 7 类前端场景，用于评估模型在不同功能域下的工程能力：Business Management Systems、Web Games、SVG/Canvas Rendering、Creative Tools \& Editors、Showcase Pages、Forms \& Tables、Data Visualization。
+% \begin{itemize}
+% \item Business Management Systems: Applications for enterprise or personal data/workflow management.
+% \item Web Games: Interactive, real-time rendering-focused entertainment applications.
+% \item SVG/Canvas Rendering: Graphics-intensive applications based on low-level drawing APIs.
+% \item Creative Tools \& Editors: Utility applications supporting content creation and complex state management.
+% \item Showcase Pages: Layout-oriented pages emphasizing visual expression and responsiveness.
+% \item Forms \& Tables: Applications centered on structured data entry, validation, and processing.
+% \item Data Visualization: Graphical representation and analytical tools for complex datasets.
+% \end{itemize}
+
+
+\begin{table}[h]
+\centering
+\small
+\caption{前端应用场景分布。}
+\begin{tabular}{lp{7cm}rr}
+\toprule
+\textbf{Category} & \textbf{Description} & \textbf{\# Tasks} & \textbf{\# Checkitems} \\
+\midrule
+Business Systems & 企业/个人数据与流程管理。 & 42 & 167 \\
+Web Games & 以交互与娱乐为核心的游戏应用。 & 40 & 163\\
+SVG/Canvas & 图形渲染与交互可视化。 & 32 & 166\\
+Creative Tools & 内容创作与在线编辑工具。 & 28 & 160\\
+Showcase Pages & 视觉表达与信息展示页面。 & 27 & 115\\
+Forms \& Tables & 结构化数据录入与处理。 & 26 & 93\\
+Data Visualization & 图形化数据表达与分析。 & 25 & 85\\
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+\subparagraph{按编程技术栈的数据分布}
+该基准完整覆盖三类主流范式：Vanilla Web Stack（HTML/CSS/JS）、React 组件化框架、Vue 3 + Vite 渐进式方案。
+\begin{table}[h]
+\centering
+\caption{技术栈与评估单元统计。}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Category} & \textbf{Description} & \textbf{\# Tasks} & \textbf{\# Checkitems} \\
+\midrule
+HTML & 原生 HTML/CSS/JS 开发。 & 113 & 490 \\
+React & 组件化框架开发。 & 58 & 249 \\
+Vue & Vue 3 + Vite 渐进式方案。 & 49 & 210 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subparagraph{数据样例}
+每个测试样例由三部分组成：\textbf{Task}、\textbf{Checklist} 与 \textbf{专用环境}。下方是一个代表性样例：
+\begin{tcolorbox}[left=0mm,right=0mm,top=0mm,bottom=0mm,boxsep=1mm,arc=0mm,boxrule=0pt, frame empty, breakable]
+\footnotesize
+\begin{lstlisting}
+    Task: Develop an online drawing tool that includes a brush, an eraser, a white canvas, and a save button.
+        The brush color and thickness should be selectable via buttons on the left. Users can draw on the canvas by clicking and dragging the mouse.
+        The eraser size should be selectable via buttons on the left. Users can erase content by clicking and dragging the mouse over the canvas.
+        Once the drawing is complete, clicking the "Save" button should allow the user to save the image locally.
+        Please implement this using the React framework in the current directory.
+
+    Checklist:
+        The user can select the brush color and thickness using the left-hand buttons, and drawing is functional via mouse click-and-drag on the canvas.
+        The user can select the eraser size using the left-hand buttons, and erasing is functional via mouse click-and-drag on the canvas.
+        Upon clicking the "Save" button, the generated image is successfully saved to the local machine.
+\end{lstlisting}
+\end{tcolorbox}
+\noindent\begin{minipage}{\textwidth}
+\end{minipage}
+
+
+\subparagraph{\textbf{数据构建与验证}}
+
+我们实现了严格的四阶段流程以确保数据质量：
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+\item 阶段 1：任务合成。由资深前端专家设计任务，确保贴近真实工程挑战，同时在场景与技术上保持分布均衡。
+\item 阶段 2：检查项生成与精炼。我们先使用 Claude Sonnet 4.5 基于任务规格 $T$ 合成候选 checklist，再由专家细致审核与整合。经多轮打磨，确保每个 check-item 语义无歧义、客观可判，并对用户需求形成充分覆盖。
+\item 阶段 3：基于执行的纠偏。我们在 Agent-as-a-Judge 框架与人工专家之间进行交叉验证。任何判定分歧都会触发底层数据复评与修正，以消除潜在噪声。
+\item 阶段 4：动态基准迭代。为维持区分度，我们迭代更新测试集，移除已无法挑战 SOTA 编码智能体的简单任务。该专家主导整理流程最终形成 220 个高质量前端编码任务及其对应 checklist。
+\end{itemize}

@@ -1,0 +1,28 @@
+\section{GLM-5 对国产芯片基础设施的适配}
+\label{sec:chinese}
+
+由于硬件生态异构性高、常常增加高性能部署复杂度，将 GLM-5 适配到多样国产芯片基础设施面临显著挑战。尽管如此，我们已与华为昇腾、摩尔线程、海光、寒武纪、昆仑芯、沐曦、燧原七大主流国产芯片平台紧密协作，成功实现 GLM-5 全栈适配。本节以昇腾 Atlas 系列为案例，围绕三大核心支柱介绍我们的适配方法：极限量化、高性能 kernel 融合与先进推理引擎调度。
+
+\paragraph{混合精度 W4A8 量化。}
+为将 750B 参数规模的 GLM-5 部署到单台 Atlas 800T A3 机器上，我们实现了复杂的 W4A8 混合精度量化策略。借助 msModelSlim~\footnote{\url{https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/80RC3alpha003/devaids/auxiliarydevtool/modelslim_0001.html}} 工具，我们对不同组件施加不同精度：标准 Attention 与 MLP block 使用 W8A8（INT8），而 MoE experts 压缩为 W4A8（INT4），在几乎不损失精度的前提下大幅降低内存占用。我们还采用 QuaRot~\cite{ashkboos2024quarotoutlierfree4bitinference} 进行离群值抑制，并使用 \texttt{Flex\_AWQ\_SSZ} 做缩放校准，以维持低比特部署稳定性。
+
+\paragraph{高性能融合 kernel。}
+为突破昇腾 NPU 上稀疏注意力计算瓶颈，我们开发了一套定制融合 kernel：Lightning Indexer、Sparse Flash Attention、MLAPO（Multi-head Latent Attention Pre-processing Optimization）。
+Lightning Indexer 将分数计算、ReLU 与 TopK 操作融合为单一 kernel，使 NPU 能够重叠计算与访存。
+对于 Sparse Flash Attention kernel，我们针对 GLM-5 的稀疏模式做了专项优化。该 kernel 可并行处理 KV cache 中 TopK token 选择与稀疏注意力计算。
+最后，MLAPO 将 13 个小型预处理算子融合为一个“超级算子”，并利用 Vector 与 Cube 单元并行处理以提升端到端效率。
+
+\paragraph{专用推理引擎优化。}
+我们改造了两款主流推理引擎 vLLM-Ascend 与 SGLang，以最大化硬件利用率：
+
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+    \item \textbf{异步调度：} 在 vLLM 中，我们实现了将 ``Device-to-Host''（D2H）采样拷贝与下一步 decode 准备重叠的机制，有效消除调度“气泡”。
+    
+    \item \textbf{上下文管理：} RadixCache（前缀共享）与 Prefix Cache（将 KV 存储扩展到系统内存）等特性可高效复用 KV 条目，这对长上下文性能至关重要。
+
+    \item \textbf{并行策略：} 我们采用 Attention Data Parallelism（DP）与 MoE Expert Parallelism（EP）的混合策略，并配合 FlashComm，通过拆分 AllReduce 操作将通信时延隐藏在计算之后。
+
+    \item \textbf{Multi-Token Prediction（MTP）：} 通过每步推理生成多个 token，我们显著提升了 NPU 计算密度并减少了总序列生成时间。
+\end{itemize}
+
+通过这些硬件层协同优化，GLM-5 在单个国产节点上的性能可比拟国际双 GPU 集群，同时在长序列场景下将部署成本降低 50\%。
