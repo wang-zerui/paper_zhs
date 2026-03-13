@@ -1,0 +1,16 @@
+# Summary
+
+* [首页](README.md)
+* [FlashAttention-2](papers/2307-08691.md)
+* [FlashInfer](papers/2501-01005.md)
+* [Paper 2601.06002](papers/2601-06002.md)
+* [Google Main](papers/2602-15322.md)
+* [GLM-5](papers/2602-15763.md)
+* [Baichuan M3](papers/baichuanm3.md)
+* [ByteCheckpoint](papers/bytecheckpoint.md)
+* [Elastic Attention](papers/elastic-attention.md)
+* [GatedAttn](papers/gatedattn.md)
+* [LLM Viewer](papers/llm-viewer.md)
+* [MinerU Reference Architecture](papers/mineru-latex-ra11338001-dspgb200-referencearch-2027704574230851584.md)
+* [Pangu Ultra](papers/pangu-ultra.md)
+* [Step3.5 Turbo 2026](papers/step3-5.md)
