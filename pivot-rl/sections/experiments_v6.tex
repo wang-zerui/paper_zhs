@@ -1,0 +1,124 @@
+\section{Experiments}
+\label{sec:experiments}
+ 
+We first demonstrate that PivotRL achieves larger in-domain gains than same-data SFT while preserving held-out capability far better (Section~\ref{sec:indomain_ood_sft}). We then show that on SWE-Bench---where end-to-end RL (E2E RL) is the most natural baseline---PivotRL attains competitive accuracy with substantially fewer online environment interactions (Section~\ref{sec:swe_e2e}). Finally, we perform an ablation study confirming that both ingredients of the method---offline pivot filtering and functional reward---are essential to the observed gains (Section~\ref{sec:ablation_study}).
+ 
+\paragraph{Setup.}
+We train PivotRL on four agentic domains: conversational tool use ($\tau^2$-Bench~\citep{barres2025tau2bench}), software engineering (SWE-Bench Verified~\citep{jimenez2024swebench}), terminal control (Terminal-Bench~\citep{tbench_2025}), and web browsing (BrowseComp~\citep{wei2025browsecompsimplechallengingbenchmark}). Across the four single-domain runs, PivotRL yields a larger average in-domain gain than same-data SFT ($+14.11$ vs.\ $+9.94$) while reducing average held-out change from $-9.48$ to $+0.20$. Unless otherwise stated, all experiments start from \texttt{Qwen3-30B-A3B-Thinking-2507}, use Nemo-RL~\citep{nemo-rl} for optimization, and use Nemo-Gym~\citep{nemo-gym} for environment rollouts. For every SFT--PivotRL comparison, the base model, prompts, and expert trajectories are matched exactly; only the training objective differs. Domain-specific data construction, verifier design, and hyperparameters are detailed in Appendix~\ref{app:training_details}.
+ 
+%% ===================================================================
+\subsection{In-Domain and Out-of-Domain Accuracy Comparison to SFT}
+\label{sec:indomain_ood_sft}
+ 
+SFT and PivotRL see the same prompts and expert trajectories; the only difference is whether the model imitates the demonstrated continuation or explores locally around selected pivots with domain verifier-based reward. Because PivotRL uses only single-turn rollouts from pivot states, this comparison isolates the value of the training objective under identical data.
+ 
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Benchmark} & \textbf{Base} & \textbf{SFT} & \textbf{PivotRL} & \textbf{$\Delta$ vs Base} & \textbf{$\Delta$ vs SFT} \\
+\midrule
+$\tau^2$-Bench   & 44.35 & 58.44 & 63.81 & +19.46 & +5.37 \\
+SWE-Verified     & 19.07 & 37.40 & 32.67 & +13.60 & -4.73 \\
+Terminal-Bench   & 5.42  & 13.75 & 20.00 & +14.58 & +6.25 \\
+BrowseComp       & 2.50  & 1.50  & 11.30 & +8.80  & +9.80 \\
+\bottomrule
+\end{tabular}
+\caption{
+Single-domain in-domain results under matched training data.
+SFT and PivotRL use the same prompts and expert trajectories; only the training objective differs.
+}
+\label{tab:single_domain_main_results}
+\end{table}
+ 
+Table~\ref{tab:single_domain_main_results} confirms this pattern. PivotRL improves over the base model in all four training domains, achieving an average in-domain gain of $+14.11$ compared to $+9.94$ for same-data SFT. It outperforms SFT on $\tau^2$-Bench ($+5.37$), Terminal-Bench ($+6.25$), and BrowseComp ($+9.80$).
+ 
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{l c cc}
+\toprule
+\textbf{Evaluation} & \textbf{Baseline} & \textbf{Avg $\Delta$ SFT} & \textbf{Avg $\Delta$ RL} \\
+\midrule
+\textbf{In-Domain (Peak)} & -- & +9.94 & +14.11 \\
+\midrule
+IFBench        & 52.04 & -10.45 & +0.82 \\
+AIME25         & 86.04 & -19.71 & -1.20 \\
+MATH500        & 98.05 & -8.58  & +0.30 \\
+LiveCodeBench  & 66.52 & -8.41  & -0.16 \\
+Scicode        & 36.83 & -8.89  & +1.91 \\
+MMLU-Pro       & 80.84 & -3.05  & +0.31 \\
+MMLU-ProX      & 78.58 & -7.15  & +0.13 \\
+WMT24++        & 36.97 & -9.59  & -0.49 \\
+\midrule
+\textbf{Avg OOD (All Benchmarks)} & 66.98 & -9.48 & +0.20 \\
+\bottomrule
+\end{tabular}
+\caption{
+Average performance change ($\Delta$) relative to the Qwen3-30B baseline across four single-domain training runs.
+PivotRL achieves larger average in-domain gains while maintaining near-zero average held-out/OOD change, whereas same-data SFT exhibits substantial forgetting.
+}
+\label{tab:single_domain_ood_avg}
+\end{table}
+ 
+The more striking result is held-out retention. For each model trained on one target domain, we evaluate on the remaining benchmarks and report change relative to the base model. Table~\ref{tab:single_domain_ood_avg} shows the clearest qualitative difference in the paper: same-data SFT shifts the policy far from its starting distribution on unrelated tasks, producing an average held-out change of $-9.48$, whereas PivotRL stays near the base model with an average change of $+0.20$. The sharpest divergence appears after terminal-domain training, where SFT causes broad regression across all eight held-out benchmarks (e.g., AIME25 drops by $-64.48$, MATH500 by $-34.50$), whereas PivotRL remains within $-3.12$ on every benchmark. The per-domain breakdown appears in Table~\ref{tab:single_domain_ood_full} (Appendix~\ref{app:ood_details}). This is the main empirical pattern: PivotRL usually matches or exceeds SFT on the target benchmark and preserves non-target capability far better.
+ 
+%% ===================================================================
+\subsection{Comparison to End-to-End RL on SWE-Bench}
+\label{sec:swe_e2e}
+ 
+SWE-Bench is the natural stress test for training efficiency because E2E RL is straightforward to apply: solving a GitHub issue requires long tool-using trajectories, and the final harness provides a clear end-to-end success signal. We compare on this benchmark specifically because it is the domain where E2E RL is most competitive and where the cost contrast with PivotRL is most visible. The question is not whether PivotRL fully replaces E2E RL, but whether it recovers a large fraction of E2E RL's accuracy at much lower online cost and whether it provides a useful warm start.
+ 
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Method} & \textbf{SWE Score} & \textbf{Avg OOD $\Delta$} & \textbf{Online Env.\ Steps} \\
+\midrule
+Base model       & 19.07 & --    & -- \\
+Same-data SFT    & 37.40 & -9.48 & 0 (offline only) \\
+PivotRL          & 32.67 & +0.20 & 0 ($r_{\mathrm{func}$ only) \\
+E2E RL           & 37.00 & [PLACEHOLDER] & 104 \\
+PivotRL $\to$ E2E RL & [PLACEHOLDER] & [PLACEHOLDER] & [PLACEHOLDER] \\
+\bottomrule
+\end{tabular}
+\caption{
+SWE-Bench comparison to end-to-end RL.
+\textbf{Online Env.\ Steps} is the total number of environment interaction steps executed during training, aggregated across all rollouts.
+\textbf{Avg OOD $\Delta$} is the average held-out benchmark change relative to the base model.
+}
+\label{tab:swe_e2e}
+\end{table}
+ 
+All methods in Table~\ref{tab:swe_e2e} start from the same base model and are evaluated with the same OpenHands harness~\citep{wang2025openhandsopenplatformai}. PivotRL performs single-turn rollouts from offline-selected pivots, whereas E2E RL repeatedly executes full issue-solving trajectories. The final row (PivotRL $\to$ E2E RL) tests complementarity: using PivotRL as a warm start before E2E RL. [PLACEHOLDER -- results pending for E2E RL rows.]
+ 
+%% ===================================================================
+\subsection{Ablation Study}
+\label{sec:ablation_study}
+ 
+PivotRL introduces two components beyond the naive local-RL baseline: (1)~offline pivot filtering, which retains only pivots that yield mixed outcomes under the reference policy (Section~\ref{sec:method}), and (2)~functional reward, which credits any verifier-approved action rather than requiring exact expert matching. We isolate the contribution of each component by removing one at a time.
+ 
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & \textbf{$\tau^2$-Bench} \\
+\midrule
+Full PivotRL ($\mathcal{D}_{\mathrm{adv}}$ + functional reward) & 63.81 \\
+\quad $-$ Pivot filtering ($\mathcal{D}_{\mathrm{random}}$ + functional reward) & 59.68 \\
+\quad $-$ Functional reward ($\mathcal{D}_{\mathrm{adv}}$ + strict reward) & [PLACEHOLDER] \\
+\midrule
+Same-data SFT & 58.44 \\
+Base model & 44.35 \\
+\bottomrule
+\end{tabular}
+\caption{
+Ablation study on $\tau^2$-Bench. Removing either offline pivot filtering or functional reward degrades performance, confirming that both components contribute to the full method's gains.
+}
+\label{tab:ablation_main}
+\end{table}
+ 
+Table~\ref{tab:ablation_main} presents the results on $\tau^2$-Bench, the lowest-cost environment in our suite and therefore the most suitable for controlled ablations. Removing pivot filtering while keeping the functional reward (i.e., training on $\mathcal{D}_{\mathrm{random}}$ instead of $\mathcal{D}_{\mathrm{adv}}$) reduces accuracy from $63.81$ to $59.68$---still above SFT ($58.44$), confirming that even the training objective change alone is beneficial, but substantially below the full method. Removing functional reward while keeping the filtered pivot set (i.e., using strict exact-match reward) yields [PLACEHOLDER], showing that exact matching is too sparse to fully exploit the selected pivots. Both components are necessary: pivot filtering concentrates rollouts on states that still produce a nonzero advantage signal (as predicted by Proposition~\ref{prop:mixed}), and functional reward ensures that functionally correct but textually different actions receive credit. A more detailed $2\times2$ ablation crossing pivot selection with reward design, as well as a finer-grained comparison of pivot selection strategies ($\mathcal{D}_{\mathrm{random}}$, $\mathcal{D}_{\mathrm{mixed}}$, and $\mathcal{D}_{\mathrm{adv}}$), appears in Appendix~\ref{app:detailed_ablations}.

@@ -1,0 +1,33 @@
+\section{附录}
+\subsection{利用率阈值敏感性分析}
+\label{appendix:sensitivity}
+
+\begin{table*}[t]
+\centering
+\caption{Qwen3-32B 在不同张量并行配置下，利用率阈值对推理时延（ms）的敏感性分析。最优配置 $(U_{\text{low}}, U_{\text{high}})=(0.2, 0.5)$ 已用粗体标出。}
+\label{tab:uhigh_sensitivity}
+\vspace{0.5em}
+\small
+\begin{tabular}{cc@{\hspace{0.8em}}ccc@{\hspace{1em}}|@{\hspace{1em}}cc@{\hspace{0.8em}}ccc}
+\toprule
+\multicolumn{5}{c}{变化 $U_{\text{high}}$（$U_{\text{low}}=0.2$）} & \multicolumn{5}{c}{变化 $U_{\text{low}}$（$U_{\text{high}}=0.5$）} \\
+\cmidrule(lr){1-5} \cmidrule(lr){6-10}
+$U_{\text{low}}$ & $U_{\text{high}}$ & TP8 & TP4 & TP2 & $U_{\text{low}}$ & $U_{\text{high}}$ & TP8 & TP4 & TP2 \\
+\midrule
+0.2 & 0.4 & 529  & 1089 & 1390 & 0.1 & 0.5 & 2894 & 2561 & 972 \\
+\textbf{0.2} & \textbf{0.5} & \textbf{362}  & \textbf{757}  & \textbf{846} & \textbf{0.2} & \textbf{0.5} & \textbf{362}  & \textbf{757}  & \textbf{846} \\
+0.2 & 0.6 & 386  & 775  & 945 & 0.3 & 0.5 & 779  & 1566 & 1008 \\
+0.2 & 0.8 & 1898 & 2300 & 2498 & 0.5 & 0.5 & 2763 & 2245 & 1451 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+我们进行了系统性的敏感性分析，以评估 KV 缓存使用率阈值对端到端时延的影响。如表~\ref{tab:uhigh_sensitivity} 所示，我们考察了两个维度：(1) 固定 $U_{\text{low}} = 0.2$，改变上界阈值 $U_{\text{high}}$；(2) 固定 $U_{\text{high}} = 0.5$，改变下界阈值 $U_{\text{low}}$。性能在 Qwen3-32B 的不同张量并行（TP）配置上测量。
+
+\textbf{$U_{\text{high}}$ 的影响。}
+在固定 $U_{\text{low}} = 0.2$ 时，我们观察到适中的 $U_{\text{high}}$（0.5--0.6）能够在所有 TP 配置下稳定地获得较低时延，且相互之间差异很小。例如，将 $U_{\text{high}}$ 从 0.5 调整到 0.6，只会带来 24 ms（TP8）、18 ms（TP4）和 99 ms（TP2）的时延增加，说明这一范围具有较好鲁棒性。相反，过于激进的阈值（如 $U_{\text{high}}=0.8$）会显著恶化性能，使时延增加 4--5$\times$，其原因在于控制器在触发窗口缩减前容忍了过高缓存使用率，导致过量准入并引发缓存抖动与重计算开销。另一方面，过于保守的阈值（如 $U_{\text{high}}=0.4$）又会过早响应缓存压力，提前限制准入，最终因缓存容量利用不足而带来 46--64\% 的额外时延。
+
+\textbf{$U_{\text{low}}$ 的影响。}
+在固定 $U_{\text{high}} = 0.5$ 时，系统对 $U_{\text{low}}$ 更敏感。如果 $U_{\text{low}}$ 过低（0.1），缓存使用率很难真正跌破这一阈值，控制器无法提升窗口，系统因此长期停留在低并发区间，使 TP8 与 TP4 配置的时延高出 7--8$\times$。相反，如果 $U_{\text{low}}$ 设得过高（0.3 或 0.5），控制器会在缓存使用率已不低时继续增长窗口，导致过量准入，并因缓存压力过大使时延增加 2--3$\times$。最优配置 $(U_{\text{low}}, U_{\text{high}}) = (0.2, 0.5)$ 则在“当缓存确实空闲时积极探测容量”和“当使用率已处于健康水平时避免过早增长”之间取得了恰当平衡。
+
+这些结果表明，$U_{\text{high}}$ 可以从较宽的工作区间（0.5--0.6）中选择，而 $U_{\text{low}}$ 则需要更仔细地校准，才能避免控制器在容量利用不足与过量准入之间摇摆。

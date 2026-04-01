@@ -1,0 +1,82 @@
+\section{实验细节}
+\label{app:experiment_details}
+
+本附录给出第~\ref{sec:experiments} 节实验所用的领域特定训练流程、术语约定以及更详细的消融分析。
+
+\subsection{术语约定}
+\label{app:terminology}
+
+在所有实验中，我们把从轨迹中抽取出的每个助手轮次都称为 \emph{pivot candidate}，而把经过离线筛选、真正用于 PivotRL 训练的子集称为 \emph{pivot}。一个 \emph{action} 指的是一次模型调用边界上的完整助手续写，而不是单个 token。具体到不同基准，这个完整续写可能是对话式工具使用轮次、编程智能体工具调用、bash 命令，或一次搜索/浏览步骤；若某个基准包含纯自然语言的助手轮次，它们同样也被视为动作。
+
+在单领域实验中，OOD change 表示模型在训练领域之外各个基准上的得分变化，相对于 base model 计算。
+
+对于 pivot 选择，我们使用两个子集：\emph{random}（$\mathcal{D}_{\mathrm{cand}}$），即直接使用全部 pivot candidate；以及 \emph{low-reward-mean}（$\mathcal{D}_{\mathrm{adv}}$），即同时要求奖励方差非零，并且演示动作与参考策略平均奖励之间存在明显差距。
+
+\subsection{领域特定训练细节}
+\label{app:training_details}
+
+在四个领域中，我们都会先从演示轨迹中一次性抽取 pivot candidate，离线分析后再筛选，RL 训练时只从保留下来的集合中采样。下面分别介绍各个领域中的动作定义、数据构建和局部 verifier。
+
+\paragraph{$\tau^2$-Bench。}
+我们使用一个合成数据生成流水线，构建了一个包含 281{,}774 条轨迹、覆盖 838 个 domain 的 SFT 轨迹数据集，做法与 ToolAce~\citep{liu2025toolacewinningpointsllm}、Kimi-K2~\citep{kimiteam2025kimik2openagentic} 和 DeepSeek-V3.2~\citep{deepseekai2025deepseekv32pushingfrontieropen} 类似。训练基座为 \texttt{Qwen3-30B-A3B-Thinking-2507}。轨迹中的每个助手轮次都先被视作 pivot candidate。在该领域中，一个动作是模型调用边界上的完整助手轮次，其中可能包含自然语言、工具调用，或二者兼有。随后，我们按第~\ref{sec:pivotrl_method} 节中的方式比较 random 与 low-reward-mean pivot 集合。我们将对话式工具使用环境与数据发布在 \href{https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison}{Nemo-Gym} 和 \href{https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1}{Nemotron-Post-Training-v3} 中。
+
+\paragraph{Terminal-Bench。}
+我们使用 Terminus-1 和 Terminus-2 智能体，从 \texttt{Qwen/Qwen3-Coder-480B-A35B-Instruct} 与 \texttt{moonshotai/Kimi-K2-Instruct} 收集已解决轨迹。每个助手 bash 动作都被视为 pivot candidate，而该领域中的动作就是模型调用边界上生成的下一个 bash 命令。我们从 low-reward-mean 集合 $\mathcal{D}_{\mathrm{adv}}$ 出发，并额外进行命令去重，以提高多样性。最终数据集约含 20{,}000 个样本。局部 verifier 用于判断采样命令是否与演示命令在局部上可互换：它结合了输出模式校验、归一化字符串相似度以及基于等价性的 LLM-as-judge 打分，针对命令本身及其直接效果进行判定。
+
+\paragraph{SWE-Bench Verified。}
+我们使用基于 OpenHands~\citep{wang2025openhandsopenplatformai}、OpenCode~\citep{opencode} 与 Codex~\citep{openaicodex_software} 生成的内部轨迹数据集；任务来自 SWE-Gym~\citep{pan2025trainingsoftwareengineeringagents} 和 R2E-Gym~\citep{jain2025r2egymproceduralenvironmentshybrid}，基座模型为 \texttt{MiniMaxAI/MiniMax-M2.5}~\citep{minimax2026m25}。我们使用 OpenHands harness 评测 mean@3。每个非错误的工具调用动作都视为 pivot candidate，而动作就是编程轨迹中的下一个助手工具调用。筛选到 $\mathcal{D}_{\mathrm{adv}}$ 后，最终训练集包含 87{,}718 个样本。局部 verifier 只匹配工具调用名称。这是一个刻意设计得较粗粒度的局部信号：它只检查模型是否在 pivot 点选择了正确类别的下一步操作（例如 search、open、edit 或 run），而不试图在每个轮次上评估工具参数或 patch 质量。最终任务成功与否仍完全由 SWE-Bench 的完整评测 harness 决定。
+
+对于第~\ref{sec:swe_e2e} 节中的 E2E RL 对比，PivotRL 使用 batch size 为 $1024$（$64$ 个 prompt $\times$ $16$ 个 generation），每个样本只 rollout $1$ 个 turn；在第 $130$ 步达到 $32.67\%$ 准确率时，累计 rollout turn 数约为 ${\sim}133$K。E2E RL 基线使用 batch size 为 $512$（$16$ 个 prompt $\times$ $32$ 个 generation），每条轨迹包含 $12$--$25$ 个 turn；在大约第 $72$ 步达到相同的 $32.67\%$ 准确率时，累计 rollout turn 数约为 ${\sim}542$K。在这一对齐准确率下，PivotRL 所需 rollout turn 约少 ${\sim}4\times$，墙钟时间约少 ${\sim}5.5\times$（见图~\ref{fig:swe_speedup}）。两种方法使用相同数量的计算节点。
+
+\paragraph{BrowseComp。}
+我们从一个多跳问答数据集出发，结合在线搜索引擎与 \texttt{DeepSeek-V3.2} 生成浏览轨迹。每个与搜索相关的助手步骤在模型调用边界上都被视为 pivot candidate；在该领域中，一个动作就是下一步浏览操作，例如发起搜索查询、打开搜索结果，或执行下一步证据收集动作。最终数据集包含 13{,}215 个样本。
+
+\subsection{详细消融分析}
+\label{app:detailed_ablations}
+
+\subsubsection{$\tau^2$-Bench 上轮次选择策略的影响}
+\label{app:pivot_selection}
+
+我们在 $\tau^2$-Bench 上比较了两种 pivot 选择策略：
+\begin{itemize}
+    \item random pivots（$\mathcal{D}_{\mathrm{cand}}$）：不做筛选；
+    \item low-reward-mean（$\mathcal{D}_{\mathrm{adv}}$）：先保留结果混合的 pivot，再进一步保留那些演示动作奖励与参考策略平均值差距较大的轮次，具体见式~\eqref{eq:dadv}。
+\end{itemize}
+表~\ref{tab:tau_pivot_selection} 表明，筛选越有针对性，收益越单调：random pivots 相比 SFT 已经有所提升（$59.68$ 对 $58.44$），而 low-reward-mean pivots 则取得最佳结果（$63.81$）。
+
+\begin{table*}[t]
+\small
+\centering
+\setlength{\tabcolsep}{6pt}
+\newcolumntype{F}{>{\centering\arraybackslash}p{0.8cm}}
+\newcolumntype{C}{>{\centering\arraybackslash}p{0.8cm}}
+\begin{tabular}{l|F|F|C|C}
+\toprule
+& \multicolumn{1}{c|}{\textbf{$\tau^2$-Airline}}
+& \multicolumn{1}{c|}{\textbf{$\tau^2$-Retail}}
+& \multicolumn{1}{c|}{\textbf{$\tau^2$-Telecom}}
+& \multicolumn{1}{c}{\textbf{$\tau^2$-Average}} \\
+\midrule
+gpt-oss-120b-high
+& 55.33 & 58.19 & 67.20 & 60.24 \\
+gpt-oss-20b-high
+& 43.33 & 50.20 & 52.63 & 48.72 \\
+Qwen3-235B-A22B-Thinking-2507
+& 50.00 & 66.08 & 46.78 & 54.29 \\
+\midrule
+Qwen3-30B-A3B-Thinking-2507
+& 50.00 & 54.39 & 28.65 & 44.35 \\
+\hdashline
+Qwen + SFT
+& 51.33 & 58.19 & 65.79 & 58.44 \\
+Qwen + Random Pivots ($\mathcal{D}_{\mathrm{cand}}$)
+& 58.00 & 63.74 & 57.31 & 59.68 \\
+Qwen + Low-Reward-Mean Pivots ($\mathcal{D}_{\mathrm{adv}}$)
+& 58.67 & 69.01 & 63.74 & 63.81 \\
+\bottomrule
+\end{tabular}
+\caption{
+$\tau^2$-Bench 上不同 pivot 选择策略的效果（训练过程中的最佳 checkpoint）。随机轮次相较基座模型已有提升，而 low-reward-mean pivots 表现更强。
+}
+\label{tab:tau_pivot_selection}
+\end{table*}

@@ -1,0 +1,283 @@
+\section{Introduction}
+\label{sec:intro}
+
+\noindent
+Recent years have seen rapid growth in applications powered
+by deep learning models like large language models (LLMs)~\cite{aws-rekognition,chatgpt,copilot,sora,stability-ai}.
+Due to the huge computation requirements,
+these models are typically served in model-serving-as-a-service systems ({\maas})~\cite{serverless-together-ai,serverless-ray,deepinfra,DBLP:conf/asplos/YangZLZLZCL22,ali-serverless-llm,aws-serverless-llm,DBLP:journals/corr/abs-2401-14351},
+which manage a cluster of accelerators (e.g., GPUs) 
+and provision an appropriate number of serving \emph{instances} containing GPUs
+to each model deployed.
+%Specifically, a serving instance is the set of
+%GPU(s) used that hold a full copy of a model's parameters.
+
+
+An {\maas} system has two design objectives:
+\emph{maximizing goodput}---the number of requests
+that meet the service level objective (SLO), and
+\emph{minimizing instances provisioned} to each model to improve hardware utilization.
+Achieving both is challenging
+ due to the unpredictable short-term fluctuations in a model's instance demands,
+ (5\,$\times$ required within 2 seconds),
+ because the request arrival rate bursts at seconds-level~\cite{alpaserve,DBLP:conf/nsdi/0025TKS23},
+ where the memory usage of each request is also unpredictable due to the
+ auto-regressive nature of LLMs~\cite{alpaserve,DBLP:conf/nsdi/0025TKS23,DBLP:journals/corr/abs-2401-14351} (see also {\fig{fig:problem-statement} and \textsection{\ref{sec:problem-statement}}}).
+\iffalse
+For example, when serving a \TODO{xx} model under an Azure real-world serving trace~\cite{}, 
+ the number of GPUs needed to process requests within SLO 
+ and store intermediate results (KVCache) varies \TODO{xx} with no clear pattern ({\fig{fig:problem-statement}}). 
+ These fluctuations can occur 
+ due to changes in either external request rates or internal processing needs. 
+ For instance, the processing time of a large language model depends on 
+ how it generates results (tokens)---which is difficult to predict due to the model's auto-regressive nature. 
+ \fi
+
+ Model autoscaling is a promising solution~\cite{DBLP:conf/asplos/YangZLZLZCL22,serverless-ray,DBLP:journals/corr/abs-2401-14351,kserve}.
+ With autoscaling,
+  a {\maas} system only provisions the average number of instances required
+  over the long term for each served model, which remains relatively stable~\cite{wang2024burstgpt}.
+  This improves utilization.
+  Upon bursts,
+  the system automatically scales new instances,
+  avoiding SLO violations due to request queueing caused by insufficient instances provisioned.
+
+Autoscaling speed is critical in minimizing SLO violations
+because the queued requests are not served until the instances are scaled.
+For instance, the inference time of a Llama3-8B is 80-900\,ms on commodity GPU (A800),
+while users expect a tight response time (< 1 second) for scenarios like chatbot~\cite{latency-study,DBLP:conf/osdi/ZhongLCHZL0024,aws-latency}.
+Meeting such tight SLO requires less than 500\,ms scaling time,
+but achieving this is challenging especially for LLMs
+with 10-400\,GB parameters.
+The key reason is
+the \textbf{slow data plane} of autoscaling---the process of loading the model parameters to instances' GPUs.
+While high bandwidth SSDs
+are utilized in current work~\cite{DBLP:journals/corr/abs-2401-14351},
+the speed provided by SSDs of GPU servers (2-10\,Gbps per GPU~\cite{googleinstance,awsinstance,volcanoinstance})
+is still far from ideal.
+For instance, loading Llama3-8\,B to a GPU takes 12.8 seconds with 10\,Gbps SSD.
+Another factor obstructing fast scaling is that existing scaling methods are
+\textbf{stop-the-world}:
+the scaled instances cannot serve requests until all parameters are loaded.
+This implies that autoscaling is directly bottlenecked by the data plane.
+
+To mitigate the above issues, state-of-the-art systems like ServerlessLLM
+further adopt a multi-tiered caching system
+by caching model parameters in the host (CPU) DRAM to accelerate the data plane~\cite{DBLP:conf/osdi/GujaratiKAHKVM20,DBLP:conf/eurosys/JeongBA23}.
+Under cache hit, they can leverage the fast CPU-GPU link (e.g., 256\,Gbps PCIe) to load parameters.
+However, achieving a high hit rate is unfeasible:
+ServerlessLLM reports a hit rate of 40--75\,\%,
+which is confirmed by us (see \textsection{\ref{sec:bg-motiv}}).
+The root cause is that a {\maas} typically hosts many models,
+thus achieving a 100\,\% cache hit requires caching all these models on the DRAM of each host,
+clearly impractical.
+Vendors typically host many models because
+there are hundreds of popular open-source model families designed for different purposes~\cite{huggingface}.
+Meanwhile,
+each model family has different scales for balancing the serving cost and accuracy~\cite{qwens}.
+Finally,
+developers can upload their customized fine-tuned models based on open-source models~\cite{aws-serverless-llm}.
+
+\iffalse
+so caching all models on all hosts is impractical especially when 
+a model must scale across multiple instances on multiple hosts.
+The hosted models come from a model zoo like
+HuggingFace~\cite{huggingface}, which offers 1,170,000 available models, 
+with 1,596 of them having over 15,000 downloads each.
+Storing these frequently downloaded models would demand 23\,TBs of memory,
+clearly exceeding the capacity of host memory and even SSDs. 
+\fi
+
+\iffalse
+The state-of-the-art system---ServerlessLLM~\cite{DBLP:journals/corr/abs-2401-14351} tackles 
+this problem by building a multi-tiered caching system.
+It always store all models on the SSD at each host to handle host cache misses.
+Unfortunately, 
+we found that SSD bandwidth of the serving infrastructure is still far 
+from ideal (2--10\,Gbps per GPU reported by the vendors~\cite{googleinstance,awsinstance,volcanoinstance}). 
+As a result, 
+we still observe a \TODO{xxx} SLO violations when serving a \TODO{xx} workload with \TODO{model}. 
+\fi
+
+
+
+\iffalse
+The auto scaling time is critical to minimize SLO violations:
+the state-of-the-art system ServerlessLLM~\cite{DBLP:journals/corr/abs-2401-14351}
+adopts a bandwidth-optimized SSD parameter loading technique, 
+but it still incurs \TODO{xx} SLO violations 
+when serving a \TODO{Xx} model on the \TODO{xx} workload (\textsection{\ref{sec:bg-motiv}}). 
+The scale is bottlenecked by the \textbf{data plane} of loading huge parameters to an instance: 
+First, the load is \emph{lengthy}: SSD takes \TODO{xxx} seconds for loading parameters 
+under common setups for serving clusters (2--10\,Gbps per GPU provided from vendors~\cite{googleinstance,awsinstance,volcanoinstance}). 
+For comparison, 
+the average time to first token is \TODO{xx} for \TODO{llama-2}. 
+More importantly, the scale is \emph{stop}: 
+only after all data have been loaded to an instance, a model can serve requests.
+The stop, in combined with the lengthy load, causing SLO violations to the the queued surge requests.
+
+A common solution is to cache the model parameters on hosts~\cite{DBLP:conf/osdi/GujaratiKAHKVM20,DBLP:conf/eurosys/JeongBA23},
+which leverages the faster host-GPU link (e.g., 256\,Gbps PCIe 4.0) to speed up the data plane.
+However,caching is not always feasible: 
+First, a model may require scaling across multiple instances (\TODO{Xx measured}) on \TODO{xx} machines, 
+but it is impractical to cache the model on all these machines.
+This is because modern {\maas} systems simultaneously host many models:
+Our private conversation with a top-3 cloud vendor revealed 
+that thousands of models are hosted on their {\maas}. 
+HuggingFace~\cite{huggingface}---a popular model zoo—contains over 1,170,000 available models, 
+with 1,596 models---each with at least over 15,000 downloads---that can potentially be served by {\maas}. 
+Storing these frequently used models would require 23\,TBs of memory, which clearly exceeds the host memory. 
+As a result, ServerlessLLM~\cite{DBLP:journals/corr/abs-2401-14351} reports that serving suffers up to 60\% cache miss,
+which is also confirmed by us. 
+Second, for some serving workloads, 
+even the host-GPU speed may be insufficient for efficient scaling (\textsection{\ref{sec:bg-motiv}}).
+\iffalse
+Thus, existing systems only adopt a conservative time-to-live caching policy~\cite{DBLP:journals/corr/abs-2401-14351},
+and we found near-zero hit rate when serving the BurstGPT workload even without colocated models,
+because the interval between bursts are high (\TODO{xx}). 
+\fi
+\fi
+
+To achieve fast model scaling without relying on cache hit,
+we make the following two key contributions:
+
+\stitle{1. Data plane made fast with $O(1)$ or no caching with compute network multicast.\,}
+First, a {\maas} is backed by fast GPU-GPU/CPU compute fabrics~\cite{nvidia-compute-network},
+which are 100--400\,Gbps RDMA and even 16\,Tbps NVLink~\cite{googleinstance,awsinstance,volcanoinstance}---much
+faster than SSD and comparable (or even faster than) CPU-GPU PCIe.
+The compute fabric is used for data transfer during serving
+and we found it largely under-utilized,
+i.e., up to 7.4\,\% of total bandwidth
+even in network-heavy workloads like serving LLMs with prefill and decode disaggregation~\cite{DBLP:conf/isca/PatelCZSGMB24, DBLP:conf/osdi/ZhongLCHZL0024,DBLP:journals/corr/abs-2401-11181,DBLP:conf/ppopp/CaiLMMMNS21,DBLP:journals/corr/abs-2404-09526} (\textsection{\ref{sec:bg-motiv}}).
+Thus, we can borrow such fast links for accelerating the data plane of autoscaling.
+
+Second, network-based data plane requires no or minimal caching to achieve fast scaling. 
+Specifically,
+if a model is already deployed on some instances,
+we can directly multicast the parameters from deployed instances through the network, 
+eliminating the need for caching.
+Such multicast is extremely efficient
+because a serial forwarding multicast~\cite{DBLP:conf/icpp/VerstoepLB96}
+can load bulk data (e.g., model parameters), regardless of the number of receivers. 
+Even if no instance is deployed, multicast can be done with $O(1)$ host caching by
+simply broadcasting the parameters from the host with the cached model. 
+This $O(1)$ caching per-model allows us to avoid all cache misses
+since the aggregated host memory of all machines is sufficient to cache all models served by a {\maas}. 
+
+\iffalse
+Thus, we first propose a global parameter pool to manages 
+the model parameters across all the GPU servers (\textsection{\ref{sec:design-plan}}),
+and leverage network-based multicast % extensively studied~\cite{DBLP:journals/jpdc/BhatRP03,DBLP:conf/asplos/CowanMMSX23,DBLP:conf/sc/GhazimirsaeedZR20,DBLP:conf/icpp/BanikazemiMP98,DBLP:conf/dsn/BehrensJBT18} 
+to accelerate the data plane of data loading. 
+\fi
+
+\iffalse
+Therefore, the first challenge we need to tackle 
+is to carefully coordinate different network flows to prevent interference. 
+{\sys} addresses this problem by co-designing parameter loading with model dataflow 
+as well as the bi-directional feature of modern networking (\textsection{\ref{sec:design-plan}}). 
+\fi
+
+
+Although fast networking can significantly accelerate the data plane
+with minimal caching,
+a stop-the-world loading remains a bottleneck in cases
+when the networking is not fast enough.
+For example,
+to achieve at most 40\,\% SLO violations when serving a BurstGPT workload with Qwen2.5-72B,
+the system needs to achieve a tight 500\,ms stop time.
+Achieving so requires 576\,Gbps per-GPU\footnote{\footnotesize{72\,B model requires at least four GPUs per-instance for serving.}}
+parameter transfer bandwidth,
+far exceeding
+the available bandwidth of typical compute network setups (e.g., 200\,Gbps per-GPU)
+and even when caching at the host (256\,Gbps PCIe).
+Thus, we argue that an ideal parameter loading should be \emph{live}:
+before the data loading finishes, the scaled instance should be able to serve requests.
+
+\stitle{2. Data plane made live with fine-grained scaling abstraction and cooperative execution. \,}
+Model scaling cannot be live using traditional
+on-demand data loading techniques commonly found in serverless computing~\cite{mitosis,DBLP:conf/eurosys/WangHW19,DBLP:conf/sosp/HuangZMLLCJLSZL24}
+or inference loading overlap in PipeSwitch~\cite{pipeswitch} (\textsection{\ref{sec:overview}}),
+because an instance can only emit results once all the parameters are loaded.
+This stop is rooted in the coarse-grained scaling abstraction of existing systems:
+they can only scale and serve at the instance level.
+To realize live scaling,
+our key insight is that
+\emph{models can be served in a fine-grained, layer-by-layer manner}.
+With this fine-grained layer-wise scaling,
+we can offload part of the layer's computation from overloaded instances to scaled instances
+with cooperative execution,
+thus improving the overall serving throughput
+even before the scaled instance has loaded all the parameters.
+
+
+\iffalse
+One problem when we derive the above model-aware 
+cooperative execution is that it requires careful request scheduling
+to decide which instance execute which layers: 
+unlike a distributed serving without autoscale, 
+where the load can be evenly distributed, 
+the load can be imbalanced due to partially loaded data. 
+As we will show, a simple best effort scaling that execute as much layers as possible
+on the new instances still result in \TODO{xx} SLO violations.
+Our model and load status-aware zigzag scheduling addresses this issue (\textsection{\ref{sec:design-pp}}).
+\fi
+
+\stitle{Challenges and solutions.\,}
+First,
+utilizing network-based multicast is non-trivial in our setup.
+Though the mechanism of multicast is simple, i.e.,
+simply forwarding parameters between instances with the network,
+the challenges lie in generating the multicast plan,
+i.e., determining how the data flows between instances.
+First, we need to quickly generate an efficient plan online on
+diverse network topologies since our sources and destinations are dynamically determined,
+but generating an optimal plan is NP-hard on
+heterogeneous networks in serving clusters~\cite{DBLP:journals/jpdc/BhatRP03}.
+Second, we need to avoid network interference between the scaling and serving,
+otherwise, we observed a 1.5\,$\times$ longer scale time and 50\% degraded tail TBT (\textsection{\ref{sec:overview}}).
+Current solutions~\cite{DBLP:conf/asplos/CowanMMSX23,DBLP:conf/ppopp/CaiLMMMNS21,DBLP:conf/sc/GhazimirsaeedZR20} mainly
+target offline scenarios like training,
+so they can tolerate long plan generation time and
+don't need to consider interference from serving workloads.
+To address the issue, we propose a
+model-aware multicast planner,
+which leverages the key features of compute network and the
+static data flow in model serving to quickly generate a near-optimal,
+interference-free multicast plan for scaling (\textsection{\ref{sec:design-plan}}).
+
+Second, it is challenging to schedule how requests are executed
+between deployed and live scaling instances,
+i.e., which instance executes which layers.
+The challenge lies in the fact that the serving capability of the scaling instances
+is limited---it can only execute layers with parameters loaded,
+and this capability is dynamically changing.
+A naive best-effort scaling that executes as many layers as possible
+cannot balance the load because at the beginning of autoscaling,
+the new instances can only execute few layers, 
+with requests still queued at the overloaded instances.
+A better solution is to adjust the load holistically by considering future incoming layers,
+and we realize this with a ZigZag pipeline scheduling
+and achieve 50\% tail latency reduction under bursty workloads
+(\textsection{\ref{sec:design-pp}}).
+
+
+\stitle{Demonstration with {\sys}. \,}
+We built {\sys}, an {\maas} system with the fastest autoscaling speed with $O(1)$ caching.
+We adopted a global parameter pool to cache the model parameters across all the machines,
+and integrated the aforementioned interference-free multicast plan for scaling
+and efficient ZigZag scheduling-based live scheduling.
+To show the effectiveness of {\sys}, 
+we evaluated {\sys} by running real-world traces
+(i.e., BurstGPT~\cite{wang2024burstgpt}, AzureCode and AzureConv~\cite{AzurePublicDataset})
+across a variety of recent models
+with different sizes and architectures, including Llama3-8B, Mistral-24B, and Qwen2.5-72B.
+First, {\sys} has 47--75\,\% shorter time-to-first token,
+and has up to 94\,\% shorter time-between-tokens 
+than the state-of-the-art work (ServerlessLLM~\cite{DBLP:journals/corr/abs-2401-14351}). 
+Second, compared to serving systems without autoscaling support,
+i.e., vLLM~\cite{vllm} and DistServe~\cite{DBLP:conf/osdi/ZhongLCHZL0024},
+{\sys} reduces the GPU used for serving a single model by 49\,\%
+with no SLO violations compared to an over-provisioning setup
+that provisions the GPUs based on the maximum request rate.
+{\sys} is open-sourced at \burl{https://github.com/blitz-serving/blitz-scale}. 

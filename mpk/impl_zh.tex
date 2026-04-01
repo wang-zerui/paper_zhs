@@ -1,0 +1,14 @@
+\subsection{实现细节}
+\label{sec:impl}
+
+我们将 \sys 实现为 PyTorch 的一个 kernel backend。用户只需在 PyTorch 的编译接口中指定 \sys 作为后端，即可通过 {\tt torch.compile(backend=\sys)} 把程序编译成一个 \sys mega-kernel。该调用会触发 \sys 编译器生成 mega-kernel，并将其作为可调用的 PyTorch 函数返回；执行该函数时，只会发起一次 mega-kernel 启动。当前 \sys 的实现包含约 4 万行 C++、8.4 万行 CUDA 和 1 万行 Python 代码。核内并行运行时由 CUDA 实现，并使用 device memory 中的 semaphore 来协调 worker 与 scheduler。 \sys 编译器使用 C++ 和 Python 编写，可自动将输入张量程序转换为面向特定 GPU 类型优化后的 \graph。对于计算任务，编译器会集成 Mirage superoptimizer~\cite{wu2025mirage} 自动生成高性能 CUDA 实现；对于核内跨 GPU 通信，则直接调用 NVSHMEM~\cite{nvshmem}。
+
+我们的实现还包含若干关键优化，用于降低运行时开销并高效支持动态工作负载。
+
+\paragraph{任务发射开销。}
+由于 \sys 会把计算分解为比传统 GPU kernel 更细粒度的任务，因此降低单任务开销对性能至关重要。为此，\sys 采用了多种轻量化实现。首先，运行时中的 worker 与 scheduler 都非常轻量：事件队列和任务队列都用 GPU device memory 中的环形缓冲区实现，入队与出队仅依赖低成本的 {\tt atomicAdd}。其次，\sys 当前采用去中心化调度，每个 scheduler 仅依据本地状态分配任务，从而避免了全局协调所带来的通信和同步开销。尽管当前实现使用的是去中心化策略，运行时本身仍保留了扩展到全局感知或分层调度策略的空间，未来可以进一步探索这些设计及其性能权衡。
+
+\paragraph{支持运行时动态性。}
+为了展示 \sys 对高度动态负载的支持能力，我们将系统扩展到能够支撑 LLM serving 所需的关键机制，包括 {\em continuous batching}~\cite{yu2022orca} 与 {\em paged attention}~\cite{kwon2023vllm}。在处理任务图的起始事件时，scheduler 会完成一个新的 decoding 迭代准备过程，包括：(1) 移除上一轮已经完成的请求；(2) 接纳新到达的请求；(3) 更新每个请求对应的 KV-cache 元数据。以上逻辑全部封装在单个任务中执行，而 KV-cache 元数据则存储在 device memory 中，供 paged-attention 任务直接访问。
+
+为了适应 LLM serving 中固有的动态 batch size，\sys 会为若干具有代表性的 batch size 生成多份专门优化的 \graph（具体为从 1 到最大 batch 的各个 2 的幂）。运行时根据当前 batch size 选择合适的任务图执行。这样既能让编译器针对特定 batch size 做激进优化，又能保持对动态工作负载的适应能力。

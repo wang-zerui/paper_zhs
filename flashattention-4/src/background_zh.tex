@@ -1,0 +1,61 @@
+\section{背景}
+\label{sec:background}
+
+\subsection{多头注意力}
+\label{subsec:multi_head_attn}
+
+设$\vQ, \vK, \vV \in \mathbb{R}^{N \times d}$为与单个注意力头相关的查询、键和值输入序列，其中$N$为序列长度，$d$为头维度。注意力输出$\vO \in \mathbb{R}^{N \times d}$的计算如下：
+\begin{align*}
+  \vS &= \alpha \vQ \vK^\top \in \mathbb{R}^{N \times N}, \\
+  \vP &= \softmax(\vS) \in \mathbb{R}^{N \times N}, \\
+  \vO &= \vP\vV \in \mathbb{R}^{N \times d},
+\end{align*}
+其中$\softmax$按行应用，$\alpha = 1/\sqrt{d}$为缩放因子。实践中，为了数值稳定性，我们从$\vS$中减去$\rowmax(\vS)$。
+对于多头注意力（MHA），每个头有自己的投影集合，该计算在多个头和批次上并行化。
+
+给定输出梯度$\vdO \in \mathbb{R}^{N \times d}$，后向传播计算：
+\begin{align*}
+  \vdV &= \vP^\top \vdO, \quad \vdP = \vdO \vV^\top, \\
+  \vdS &= \dsoftmax (\vdP), \\
+  \vdQ &= \alpha \vdS \vK, \quad \vdK = \alpha \vdS^\top \vQ,
+\end{align*}
+其中$\dsoftmax(\vdP)$表示逐行的softmax梯度$\mathbf{d}s = (\diag(p) - p p^\top)\mathbf{d}p$，其中$p = \softmax(s)$。
+
+\subsection{GPU硬件特性与执行模型}
+\label{subsec:hardware}
+
+我们描述GPU执行模型中与\faf相关的方面，重点关注NVIDIA Blackwell架构（B200 \& GB200）。我们着重介绍与之前Hopper架构的主要差异，这些差异推动了\faf中的优化设计。
+
+\paragraph{内存层次结构：}
+GPU的内存组织为一个数据位置的层次结构，容量与带宽成反比。
+全局内存（GMEM），也称为HBM，是所有流多处理器（SM）均可访问的片外DRAM。
+来自GMEM的数据被透明地缓存在片上L2缓存中。
+其次，每个SM包含一个小型的、程序员可管理的、高度分组的缓存，称为共享内存（SMEM）。
+最后是每个SM内的寄存器文件。
+
+Blackwell引入了一种新的内存层级，称为\emph{张量内存}（TMEM），这是每SM 256 KB的片上内存，专门用于存储张量核心操作的中间结果。与共享内存不同，TMEM是线程束同步的，与张量核心紧密耦合，使矩阵乘加（MMA）单元能够直接将输出写入TMEM而无需消耗寄存器。这缓解了困扰Hopper内核的极端寄存器压力，并支持更大的分块尺寸。TMEM以32列（16 KB）的粒度分配，需要程序员显式管理分配、释放和数据移动。
+
+\paragraph{线程层次结构：}
+GPU的编程模型围绕称为线程的执行单元的逻辑分组组织。
+从最细粒度到最粗粒度，线程层次结构由线程、线程束（32个线程）、线程束组（4个连续线程束）、线程块（即协作线程数组或CTA）、线程块集群和网格构成。
+同一CTA中的线程被协同调度在同一SM上，同一集群中的CTA被协同调度在同一GPC上。
+SMEM可由CTA内的所有线程直接寻址，而每个线程最多拥有256个寄存器（RMEM），这些寄存器对每个线程是私有的。
+
+\paragraph{张量核心与增强的异步性：}
+Blackwell配备了第五代张量核心，处理的分块比之前架构更大。每条MMA张量核心指令处理$128 \times N$的分块（通常$N = $ 128或256），而Hopper上为$64 \times N$。关键的是，Blackwell MMA异步地将输出直接写入TMEM，而Hopper MMA写入寄存器。这种完全的异步性使计算与其他操作之间有更好的重叠，因为MMA单元不再因寄存器回写而阻塞。
+
+硬件对异步性的支持使得线程束特化内核成为可能，CTA的线程束被划分为生产者或消费者角色，分别只发出数据移动或计算指令~\citep{warp-specialization-2011}。
+
+\paragraph{2-CTA张量核心：}
+Blackwell支持2-CTA张量核心MMA模式，其中同一线程块集群内的CTA对协同执行单个MMA，使该操作能够读写来自两个CTA的张量内存。CTA对中的一个线程发起MMA，但对端CTA在操作进行时必须已启动并保持活跃。与单CTA MMA将M维度限制在128相比，配对模式通过在M维度上跨CTA对划分A分块和累加器，并在N维度上跨两个CTA划分B分块，支持M = 128或256，使得每个CTA只需在自己的共享内存中装载B的一半，而硬件在乘法过程中处理组合后的B分块。这减少了冗余的共享内存容量和带宽，但由于这些操作跨CTA对访问张量内存，内核必须以固定对的方式启动CTA，并在整个内核中为张量内存和张量核心操作使用一致的2-CTA模式。
+
+\paragraph{性能瓶颈的转移：}
+Blackwell反映的一个关键趋势是张量核心吞吐量比其他功能单元增长更快。与Hopper相比，Blackwell将FP16/BF16张量核心吞吐量翻了一番（2.25 PFLOPS~\citep{nvidia2024nvidia} vs 1 PFLOPS~\citep{nvidia2022nvidia}每GPU），但共享内存带宽和指数运算单元吞吐量保持不变或扩展较慢。这种不平衡将性能瓶颈从矩阵乘法转移到了共享内存流量和非矩阵乘法操作（如softmax）。正如我们在\cref{sec:fwd,sec:bwd}中的屋顶线分析所示，这需要精心的内核设计来最大化MMA操作与这些瓶颈资源之间的重叠。
+
+B200（和GB200）上几个硬件组件的吞吐量如下所示。
+\begin{enumerate}[itemsep=0pt,topsep=0pt,leftmargin=*]
+  \item 张量核心：BF16 MMA的吞吐量为每时钟每SM 8192次操作，是Hopper的4096次的两倍。这可以从理论最大FLOPS推导：2.25 PFLOPS / 1850 MHz时钟速度 / 148 SMs = 每时钟每SM 8192次操作。
+  \item 指数运算单元。B200和GB200上的多功能单元（MUFU）每时钟每SM可执行16次操作，与Hopper相同~\citep{cuda}。值得注意的是，B300和GB300 GPU将指数吞吐量翻倍至每时钟每SM 32次操作，不过这些GPU在撰写本文时尚未广泛上市。
+  \item SMEM：读取吞吐量为每时钟每SM 128字节，与Hopper相同，通过微基准测试测得~\citep{luo2025dissecting}。
+\end{enumerate}
+我们看到，Blackwell上的MMA吞吐量是Hopper的两倍，但其他硬件单元不一定以相同速率变快。这反映了加速器设计的一个更广泛趋势：在相似功耗/硅片面积约束下，通过提高最重要组件（通常是矩阵乘法单元）的吞吐量来获得更高性能。

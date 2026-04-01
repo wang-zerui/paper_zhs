@@ -1,0 +1,99 @@
+智能体系统通常被建模为一个马尔可夫决策过程（MDP）$(s_t, a_t)$，其中 $s_t$ 表示状态，$a_t$ 表示智能体在第 $t$ 步采取的动作。
+这一模型具有很高的灵活性：动作既可以表示聊天机器人给出的回复，也可以表示要调用的工具，或者计算机使用型智能体点击的按钮，等等。
+
+从系统角度看，我们将智能体系统中的每个动作都建模为一次\emph{API 调用}；在返回响应前，这种调用可能会阻塞执行。这样的抽象有两个关键优势：(1) 它精确定义了什么构成“一个动作”；(2) 它为优化系统延迟提供了一个统一框架，后文将详细说明。
+值得注意的是，这一视角与智能体系统中近期出现的 MCP 服务器发展方向是一致的\citep{anthropic2024model}。
+
+形式化地，在每个时间步 $t$，策略 $\pi$ 会把当前状态 $s_t$ 映射为一次 API 调用：
+\[
+(h_t, q_t) \gets \pi(s_t),
+\]
+其中 $h_t$ 指明要调用的目标 API，$q_t$ 是对应参数。我们记
+\[
+\bar a_t \leftsquigarrow h_t(q_t)\qquad a_t \gets \mathrm{await}(\bar a_t)
+\]
+来表示一次异步 API 调用：它先返回一个\emph{future}（待决动作），随后在响应真正到达时再进行等待。我们用带横线的记号（如 $\bar a$）表示 future，并使用缓存 $\mathcal C:(h,q)\mapsto \bar a$，把某次 API 调用标识映射到其待决响应。左侧的波浪箭头表示一次具有不可忽略延迟的异步调用。
+
+随后，系统通过状态转移函数 $f$ 进入下一状态：
+\[
+s_{t+1} \gets f(s_t, a_t).
+\]
+以国际象棋为例，策略 $\pi$ 决定如何基于当前棋盘状态构造提示词；$a_t$ 对应于 LLM 响应中提出的走法；而 $f$ 则据此更新棋盘配置。注意，这里的 API 是 LLM 调用本身，而它的\textit{响应}才是走法 $a_t$。
+
+这一表述可以覆盖广泛的具体实现：
+\begin{itemize}[leftmargin=*]
+    \item \textbf{LLM 调用：} 智能体内部每一次 LLM 调用，都可以被视为一个动作。
+    \item \textbf{工具 / MCP 服务器调用：} 对内部或外部工具的每一次真实调用，也可视为动作，例如终端访问、网页搜索、深度研究 API、天气 API，或 browser-use MCP 等。
+    \item \textbf{将人类视为 API 的调用：} 进一步地，人类响应本身也可以被抽象成 API 调用，而其延迟往往比自动化工具还要更长。
+\end{itemize}
+
+基于这一抽象，执行智能体系统时的根本瓶颈就很清楚了：每一次 API 调用都必须完成，下一次调用才能发起。为打破这种串行依赖，我们提出在等待真实响应 $a_t$ 的同时，利用更快的模型去\textbf{推测一组 API 响应} $\{\hat a_t\}$。这样一来，第 $t+1$ 步对应的推测性 API 调用就能并行发起。在时刻 $t$，若 API 调用 $(h_t, q_t)$ 已经能在缓存中找到（即缓存命中），系统就可以跳过真实调用，只等待与该调用对应的待决动作返回（如果它尚未返回）。形式化算法如\cref{alg:speculative-k}所示。
+
+\begin{algorithm}
+\caption{具有 $k$ 路并行下一步调用的推测动作}
+\label{alg:speculative-k}
+\begin{algorithmic}[1]
+\Require 初始状态 $s_0$、时域长度 $T$、转移函数 $f$、策略 $\pi$、预测器 $\hat g$、缓存 $\mathcal{C}$。我们用 $\bar{a}$ 表示待决动作。
+\For{$t = 0$ \textbf{to} $T-1$}
+    \State \textbf{策略：} $(h_t,q_t) \gets \pi(s_t)$
+    \If{$(h_t,q_t) \in \mathcal{C}$} \Comment{缓存命中}
+        \State $\bar{a}_t \gets \mathcal{C}[(h_t,q_t)]$
+        \State $a_t \gets \text{await}(\bar{a}_t)$
+        \Comment{若该待决动作尚未返回，则等待}
+        \State $s_{t+1} \gets f\big(s_t,a_t\big)$
+        \State \textbf{continue}
+    \EndIf
+    \State \textbf{Actor：} 发起真实请求（返回 future）：$\bar{a}_t \leftsquigarrow h_t(q_t)$
+    \State \textbf{Speculator：}
+    $ \{\hat{a}_t^{(i)}\}_{i=1}^k \gets \text{await}(\hat g(s_t,(h_t,q_t)))$
+    \Comment{Actor 与 Speculator 并行执行}
+    \For{$i=1$ \textbf{to} $k$} \Comment{针对每个猜测执行一步推测展开}
+        \State $\hat s_{t+1}^{(i)} \gets f\big(s_t, \hat a_t^{(i)}\big)$
+        \State $(\hat{h}_{t+1}^{(i)},\hat{q}_{t+1}^{(i)}) \gets \pi(\hat s_{t+1}^{(i)})$
+        \State \textbf{预启动：} $\bar{\hat{a}}_{t+1}^{(i)} \leftsquigarrow \hat{h}_{t+1}^{(i)}\!\big(\hat{q}_{t+1}^{(i)}\big)$
+        \Comment{返回待决动作，因此非阻塞}
+        \State \hspace{58pt} $\mathcal{C}[(\hat{h}_{t+1}^{(i)},\hat{q}_{t+1}^{(i)})] \gets \bar{\hat{a}}_{t+1}^{(i)}$
+        \Comment{缓存推测得到的待决动作}
+    \EndFor
+    \State \textbf{等待 Actor 返回已解析的 $a_t$：} $a_t\gets \text{await}(\bar{a}_t)$
+    \State $s_{t+1} \gets f\big(s_t,a_t\big)$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+由此带来的加速依赖于两个关键假设：
+
+\begin{assumption}[推测准确性]\label{assum:guessing-accuracy}
+推测模型 $\hat g$ 能够足够准确地猜测当前步的响应 $a_t$，使得由此隐含的下一次调用 $(h_{t+1},q_{t+1})=\pi(f(s_t,\hat a_t))$ 以非零概率 $p>0$ 与真实的下一次调用一致。
+\end{assumption}
+
+正如后文所示，这一假设在实践中往往成立，因为 API 响应通常具有一定可预测性。
+
+\begin{assumption}[并发、可逆的预启动]\label{assum:concurent-API}
+多个 API 调用可以并发发起；而那些与实际轨迹不一致的预启动调用，不会产生对外可见的副作用（或其副作用可以回滚）。
+\end{assumption}
+
+在实践中，对于许多外部 API（如网页搜索、OpenAI LLM 查询、邮箱查找等），只要流量适中，这一假设通常是成立的。对于自托管 LLM，由于持续批处理（continuous batching）的存在，并发调用带来的额外成本也很小。
+
+于是我们可以得到如下结果（证明延后至附录）：
+
+\begin{proposition}
+\label{thm:improvement}
+在假设\ref{assum:guessing-accuracy}--\ref{assum:concurent-API}成立的前提下，设在每一步上，推测分支以概率 $p$ 推出\emph{正确的下一次调用} $(h_{t+1},q_{t+1})$，并且对 $t\in[1,T-1]$ 独立成立。设 $\hat g$ 的延迟服从 $\mathrm{Exp}(\alpha)$，真实 API 调用的延迟服从 $\mathrm{Exp}(\beta)$，且 $\beta < \alpha$。所有延迟与猜测相互独立。再假设状态转移 $f$ 和 API 参数构造 $\pi$ 的开销都可忽略不计。则\cref{alg:speculative-k} 的期望运行时间（记为 $\E[T_{\mathrm{s}}]$）与顺序执行期望运行时间（记为 $\E[T_{\mathrm{seq}}]$）之比为
+\begin{align*}
+    \frac{E[T_{\mathrm{s}}]}{E[T_{\mathrm{seq}}]}
+    \;=\;
+    1 - \frac{1}{T}\frac{\alpha}{\alpha+\beta}\left[\frac{(T-1)p}{1+p}+\frac{p^2}{(1+p)^2} - \frac{p^2}{(1+p)^2}(-p)^{T-1}\right]
+    \xrightarrow{\;\;T\to\infty\;\;}
+    1-\frac{p}{1+p}\cdot\frac{\alpha}{\alpha+\beta}
+\end{align*}
+\end{proposition}
+
+\cref{thm:improvement} 的证明见\cref{app:proof}。\cref{thm:improvement} 表明，在理想情况下若 $p=1$ 且 $\alpha=\infty$，端到端延迟下降的上界为 50\%；但这一上界还可以通过下文的多步扩展继续提升。
+
+\textbf{扩展。}\cref{alg:speculative-k} 只是推测动作思想的一个简单示范。举例而言，我们可以自然地把它扩展为\emph{多步推测}：Speculator 不仅预测下一步，还能向前预测多达 $s$ 步。这样就得到一个具有更深 rollout 的树搜索结构。它还可以进一步与\emph{自适应推测}结合：Speculator 不再对 $a_t$ 均匀地产生 $k$ 个猜测，而是同时为每个猜测估计置信度（例如通过 LLM 提示或不确定性量化方法）。随后，最有希望的分支就可以像束搜索那样被继续展开。上述思路共同表明，推测动作具有丰富的延展空间，我们将其留待未来进一步深入研究。尽管\cref{alg:speculative-k} 非常简单，但后续四个用例的结果已经相当鼓舞人心。
+
+\textbf{成本—延迟权衡。} 发起更多推测性 API 调用（例如增大 $k$）会提升准确率，但如果定价依据是调用次数或 token 数，那么成本也会随之上升。尽管成本不是本文重点，我们仍在附录\ref{app:additional_details}中给出了实验分析。对于自托管 LLM，这一成本增长在很大程度上会被批处理机制抵消。
+
+\textbf{副作用与安全性。}
+推测会执行一个假设的下一动作 $\hat a_{t+1}$，而这个动作可能是错的，因此安全性要求系统能够先模拟，再提交或回滚。在国际象棋这类领域中，回滚很容易；在其他场景里，覆盖写入也较容易处理（例如操作系统调优）。但很多系统都涉及不可逆或对外可见的效果（如删除记录、下单付款），这时朴素推测就会带来危害。因此，推测必须被限制在误判可逆的情形中，例如通过分叉、快照恢复，或前滚式修复（如退款/补发）来处理。

@@ -1,0 +1,26 @@
+\section{引言}
+\label{sec:intro}
+
+Transformer架构~\citep{vaswani2017attention}至今仍是几乎所有AI应用的主要基础架构，从大型语言模型~\citep{brown2020language}到视觉~\citep{dosovitskiy2020image}和多模态系统。对于Transformer而言，注意力机制构成了主要的计算瓶颈——查询（query）和键（key）之间计算的自注意力得分在序列长度上呈二次方扩展。将注意力扩展到更长的上下文可以解锁新的能力，例如跨多文档的推理~\citep{guo2021longt5,shaham2022scrolls}、对整个代码库的建模~\citep{roziere2023code}以及高分辨率视频处理~\citep{chen2022scaling,ho2022video}。与此同时，加速器硬件持续快速演进~\citep{nvidia2024nvidia}，每一代产品都提供了显著更高的峰值计算吞吐量。然而，这种演进是非对称的：矩阵乘法单元积极扩展，而其他功能单元（如内存带宽和专用计算单元）扩展较慢，造成了日益不平衡的硬件流水线，需要深入的算法协同设计。
+
+这引发了人们对通过深度整合GPU硬件特性来加速注意力的算法创新的持续关注。\citet{dao2022flashattention}提出了\fa，通过新颖的分块技术和算子融合消除了对慢速全局内存的中间读写操作。\citet{dao2023flashattention2}将其重构为\faa以并行化序列长度维度，提高了GPU占用率。\citet{shah2024flashattention3}进一步将算法适配到Hopper GPU成为\fat，通过线程束特化利用异步执行并加入了FP8支持。近期工作还探索了低精度注意力：SageAttention~\citep{sageattention}通过INT8量化实现加速，SageAttention2~\citep{sageattention2}使用INT4/FP8量化进一步扩展，SageAttention3~\citep{sageattention3}在Blackwell消费级GPU上实现了FP4量化。然而，这些方法主要针对消费级GPU，而大多数AI计算部署在数据中心GPU上。同时，\fat主要针对NVIDIA Hopper H100架构，而AI行业已迅速转向部署基于Blackwell的数据中心系统~\citep{nvidia2024nvidia}（如B200和GB200），这些GPU代表了具有根本不同性能特性的新一代架构。
+
+加速器演进的一个关键趋势是硬件单元的非对称扩展。尽管Blackwell B200的张量核心吞吐量比Hopper H100翻了一番（FP16/BF16达2.25 PFLOPS vs 1 PFLOPS），其他功能单元（共享内存带宽、指数运算单元以及整数/浮点ALU）的扩展较慢或保持不变。因此，非MMA资源成为瓶颈。我们的屋顶线分析（\cref{sec:fwd,sec:bwd}）显示，对于Blackwell上典型的注意力工作负载，出人意料地，共享内存流量和指数运算现在主导了执行时间，超过MMA计算的25--60\%。此外，Blackwell引入了新的架构特性：每SM拥有256 KB的张量内存（TMEM）用于存储张量核心运算的中间结果；128×128的MMA分块（是Hopper的64×128的两倍面积）；以及完全异步的张量核心操作，直接将结果写入TMEM。简单地将现有注意力算法移植到这个新硬件上，要么会留下显著的性能余量，要么由于Hopper MMA指令缺乏前向兼容性而根本无法实现。
+
+为此，我们提出了\faf，协同设计算法和内核实现，以解决现代GPU架构中不断变化的瓶颈。我们不把硬件视为均匀的计算资源，而是通过算法创新显式地识别并缓解非矩阵乘法单元的瓶颈：
+
+\begin{enumerate}[itemsep=0pt,topsep=0pt,leftmargin=*]
+\item \textbf{重新设计的流水线以实现最大重叠：}我们为前向传播和后向传播开发了新的软件流水线，充分利用Blackwell完全异步的MMA操作和更大的分块尺寸，以最大化张量核心、softmax计算和内存操作之间的重叠。
+
+\item \textbf{指数运算单元瓶颈缓解：}对于前向传播，我们使用FMA单元上的多项式近似实现软件模拟指数函数，提高指数运算吞吐量。我们还引入了条件式softmax重缩放，跳过不必要的重缩放操作。
+
+\item \textbf{共享内存流量减少：}对于后向传播，我们利用张量内存存储更多中间结果，减少共享内存流量。我们还利用Blackwell的2-CTA MMA模式，使每个CTA只需装载操作数B的一半，进一步减少共享内存流量，借此重构dQ步骤以将全局原子规约次数减半。我们还实现了性能开销极小的确定性执行模式，为强化学习应用提供可复现的训练。
+
+\item \textbf{改进的调度和资源分配：}我们针对Blackwell的资源约束和更大的分块尺寸开发了新的CTA调度策略和寄存器分配方案。
+\end{enumerate}
+
+除算法创新外，我们完全使用嵌入Python的CuTe-DSL实现了\faf，与传统基于C++模板的方法相比，编译时间缩短了20--30倍，同时保持了完整的表达能力。该框架显著提升了开发者的生产力，降低了入门门槛，使研究人员无需深厚的C++模板元编程专业知识即可快速原型化和部署新的注意力变体。
+
+为实证验证我们的方法，我们在B200 GPU上对\faf进行了基准测试，结果表明：(1) BF16精度下比cuDNN最高实现1.3倍加速，比Triton实现2.7倍加速；(2) 我们在性能瓶颈已转移的资源上达到接近峰值的利用率，最高达到$\sim$1600 TFLOPS（理论最大值的71\%）；(3) 对于长序列，\faf的性能优于其他注意力实现。
+
+我们以宽松许可证开源了\faf，并正在努力将其集成到主流库中，以惠及更多研究人员和开发者。代码可访问：\url{https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute}

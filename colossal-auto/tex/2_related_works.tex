@@ -1,0 +1,91 @@
+\section{Background}
+
+As the memory on common accelerators such as Nvidia GPU is limited, it is challenging to train a large-scale model on one device as the program can easily go out of memory. Thus, distributed training is a necessity to train models beyond the single-device memory limit. Researchers from industry and academia have proposed a wide array of techniques to speed up model training on a GPU cluster. We will discuss these techniques in the following sections.
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=1\textwidth]{img/new_overview.pdf}
+    \caption{Workflow of Colossal-Auto}
+    \label{fig: workflow}
+\end{figure*}
+\subsection{Data Parallelism}
+
+Data parallel training is the most common way to conduct distributed training due to its simplicity. In data parallel training with $N$ GPUs, the dataset is sharded into $N$ partition and the model is replicated over all $N$ GPUs. The model is trained with the local dataset partition and synchronizes the gradients during the backward pass. Tools such as Horovod~\cite{horovod} and PyTorch DistributedDataParallel~\cite{pytorch-distributed} allow the users to integrate data parallel training into their code with minimum code changes.
+
+One major drawback of data parallelism is memory redundancy since each GPU holds the full copy of the model weights. This restricts the model size scaling as having more GPUs does not allow the user to train larger models. To remove such redundancy, DeepSpeed~\cite{deepspeed} has proposed the Zero Redundancy Optimizer~\cite{rajbhandari2020zero} which partitions the optimizer states, gradients, and model parameters during data parallel training. As a result, the model scale can easily reach billions of parameters in data-parallel training.
+Besides, DeepSpeed also offers offloading~\cite{zero-infinity} to move tensors from GPU memory to CPU memory and even NVMe disks when not in use. This further enlarges the amount of available memory to accommodate larger-scale models.
+
+\subsection{Pipeline Parallelism}
+
+Besides sharding the dataset, other works such as GPipe~\cite{gpipe}, PipeDream~\cite{pipedream}, Chimera~\cite{chimera}, and Megatron-LM~\cite{shoeybi2019megatron} proposed to pipeline parallelism shard the model by layer. In pipeline parallelism, the model is split into chunks of consecutive layers and each chunk is allocated to one device. The layer activation and output gradients are passed between pipeline stages during the forward and backward pass respectively. As a result, the model scale can increase with the number of devices, supporting large-scale model training. However, one problem is that there will be bubble time where one device is engaged in computation while others stay idle during training. To tackle this problem, Megatron-LM~\cite{shoeybi2019megatron} proposed interleaved pipelining and Chimera proposed bidirectional pipelining, leading to a significant reduction in the bubble time. 
+
+\subsection{Tensor Parallelism}
+
+Tensor parallelism refers to the technique to shard the model weight and execute training in the SPMD fashion. GShard~\cite{gshard} allows the user to annotate the sharding plan for selected tensors in the computation graph and infer the sharding plan for other tensors using iterative data-flow analysis. Megatron-LM~\cite{shoeybi2019megatron} also proposed tensor parallelism, specifically targeted at the Transformer~\cite{transformer} architecture. Megatron-LM applied row-wise and column-wise sharding to the linear layers in the self-attention module and the feed-forward module. This reduces the memory footprint and the amount of computation on a single GPU, as a result, the model can be scaled up to billions of parameters.
+
+Tensor parallelism is orthogonal to data and pipeline parallelism and they can be used together for distributed training. As the amount of communication is generally smaller in pipeline parallelism and cross-node communication is significantly slower than that of intra-node communication, tensor parallelism is often restricted to intra-node training while pipeline parallelism is used for cross-node training to better utilize the hardware bandwidth~\cite{shoeybi2019megatron}.
+
+
+\subsection{Automatic Parallelism}
+
+While the techniques mentioned above use static strategies, another way to achieve parallelism is to search for a suitable parallelization strategy for the given model. FlexFlow~\cite{flexflow} and Tofu~\cite{tofu} have proposed different search strategies to parallelize model training. 
+
+However, they are not designed for large-scale model training and deliver sub-optimal performance. The recent advancement comes from Alpa~\cite{zheng2022alpa}, which generates a high-performance parallelization execution plan on a cluster. 
+Alpa sees parallelization from a different point of view. It considers both data and tensor parallelism as intra-operator parallelism and pipeline parallelism as inter-operator parallelism. 
+It formulates the intra-operator as an ILP problem and searches for the optimal sharding for tensors.
+Its inter-operator search is built on TeraPipe~\cite{terapipe} to find the optimal module partitioning using dynamic programming. 
+
+% There are some concepts 
+% \begin{itemize}
+%     \item \textit{Device mesh}~\cite{xu2021gspmd} is a logical multi-dimensional tensor used to describe physical devices.
+%     \item \textit{Sharding spec} describes the layout of a distributed tensor. 
+
+% For an N-dimensional Tensor, its sharding spec to be defined as $X_0X_1...X_{n-1}$, where $X_i$ belongs to {$S$, $R$}, and the representation of this $S$ has a subscript.
+% If the spec corresponding to $X_i$ is $S_j$, it means that the tensor will be shard along the $j$th axis of the device mesh in its $i$th dimension. 
+% In particular, if $S$ has two or more subscripts, it means that the shard will be performed along all subscript axes.
+% \end{itemize}
+
+
+% \subsubsection{Inter-Operator Parallelism}
+
+
+
+% \noindent\textbf{inter-op parallelism}~\cite{gpipe}, also known as pipeline parallelism, places operators on different devices and pipelines forward/backward passes using point-to-point communication.
+% There are options to manually combine the inter-op parallel and intra-op parallel approaches as 3D parallelism.
+% Since the manually designed parallel scheme does not consider the hardware and network structure changes, which may miss substantial performance opportunities.
+
+
+\subsection{Activation Checkpoint}
+
+Activation checkpoint~\cite{act-ckpt, dtr} is a technique to reduce the memory footprint on a single GPU by trading computing for memory. When an activation checkpoint is applied to a group of consecutive layers, only the output of the last layer is cached for the backward computation. All other intermediate outputs are not stored during the forward pass. During the backward pass, re-computation is triggered to obtain the intermediate outputs temporarily for gradient computation. As a result, the memory consumed by intermediate activations can be significantly reduced, making more memory available to accommodate larger models. As this technique does not shard tensors, it stays orthogonal to other parallelization techniques. To decide where to use activation checkpoint in the training pipelines, Rotor~\cite{herrmann2019optimal}, Pofo~\cite{beaumont2021efficient}, Checkmate~\cite{jain2020checkmate}, POET~\cite{patil2022poet} manage to automate this process, finding the best strategies for running time with given memory budget.
+
+
+% \subsection{Intra-op and inter-op parallism}
+% \noindent\textbf{Intra-op parallelism} partitions the computation of a specific operator, involving partitioning the activations and model data tensors.
+% There are some classic manually designed inter-op parallelism, such as Megatron-LM~\cite{shoeybi2019megatron} and ZeRO~\cite{rajbhandari2020zero}. 
+% Here list some basic concepts in intra-op parallelism:  
+% \begin{itemize}
+%     \item \textit{Device mesh}~\cite{xu2021gspmd} is a logical multi-dimensional tensor used to describe physical devices.
+%     \item \textit{Sharding spec} describes the layout of a distributed tensor. 
+% For an N-dimensional Tensor, its sharding spec to be defined as $X_0X_1...X_{n-1}$, where $X_i$ belongs to {$S$, $R$}, and the representation of this $S$ has a subscript.
+% If the spec corresponding to $X_i$ is $S_j$, it means that the tensor will be shard along the $j$th axis of the device mesh in its $i$th dimension. 
+% In particular, if $S$ has two or more subscripts, it means that the shard will be performed along all subscript axes.
+% \end{itemize}
+
+% \noindent\textbf{inter-op parallelism}~\cite{huang2019gpipe}, also known as pipeline parallelism, places operators on different devices and pipelines forward/backward passes using point-to-point communication.
+% There are options to manually combine the inter-op parallel and intra-op parallel approaches as 3D parallelism.
+% Since the manually designed parallel scheme does not consider the hardware and network structure changes, which may miss substantial performance opportunities.
+
+% \subsection{Automatic parallelism} 
+% In order to cope with the diversity of DNN structure and hardware configuration, automatic parallel systems came into being.
+% Alpa~\cite{zheng2022alpa} is a compiler built upon Jax that generates execution plans by hierarchically optimizing plan at intra-op and inter-op parallelism granularity.
+% At the inter-op level, alpa splits the model into stages and partitions devices into meshes, and maps them as stage-mesh pairs.
+% At the intra-op level, apla choose the locally minal execution cost using Integer Linear Programming (ILP) based on a cost model. 
+
+% \subsection{Model data offload and activation checkpoint} 
+% Besides parallel training, there are optimizations on the memory level in order to support a larger model.
+% The first line of work focuses on optimizing activation memory usage.
+% \citet{chen2016training} proposed to save memory consumption by recomputing forward pass and is able to rain a network in sublinear memory cost. 
+% After that, based on linearized graph assumption, studies \cite{herrmann2019optimal, beaumont2021efficient} showed that it is possible to find optimal activation checkpoint (and activation offload) strategy within polynomial complexity with dynamic programming. \cite{jain2020checkmate} and \cite{patil2022poet} address the above problem on random DAGs with integer linear programming (ILP). There are also dynamic solutions such as \cite{kirisame2020dynamic}, which provided dynamic tensor rematerialization that could achieve sublinear memory cost without ahead-of-time scheduling.
+% The second line of work focuses on storing model data in heterogenous memory space during training.
+% ZeRO-Offload~\cite{ren2021zero, rajbhandari2021zero} improves on this by offloading optimizer state data and gradients to the CPU and executing optimizer updating on the CPU and NVMe, which requires transmitting data between CPU and GPU before and after parameter updating.
+% PatrickStar~\cite{fang2022parallel} organizes the model data in memory chunks and dynamically distributes them in the heterogeneous memory by more timely adjusting the CPU-GPU layout of model data in before operator execution.

@@ -1,0 +1,54 @@
+\section{Preliminaries}
+\label{sec:pre}
+\noindent \textbf{Problem Setup.} 
+We study visually grounded question answering requiring complex reasoning over both image and text to derive a final prediction $\hat{y}$. 
+The model is equipped with a predefined, finite tool set (\ie, action space) \(\mathcal{A}\). 
+Formally, the objective is to synthesize a trajectory $U$ with interleaved reasoning steps $g_t$ and external tool invocations $a_t \in \mathcal{A}$. 
+The resulting solution path is defined as $U=(g_0, a_0, \dots, g_T, \hat{y})$, where $T$ denotes the number of tool-interaction turns required to reach the final answer $\hat{y}$.
+
+% We focus on VLM reasoning tasks, typically framed as Visually Grounded Question Answering, requiring complex inference over both visual and text inputs to derive a final prediction $\hat{y}$.
+% For assistance, the model is equipped with a predefined, finite tool set (\ie, action space) $\mathcal{A}$, where each action $a\in\mathcal{A}$ represents a specific tool call, consisting both function name and corresponding arguments.
+% Then, the core challenge is to generate a reasoning trajectory $U$, with an interleaved sequence of intermediate reasoning step $g_t$ and external tool invocations $a_t\in\mathcal{A}$.
+% Specifically, the objective is to produce a solution path $U$ of the form $U=(g_1,a_1,g_2,\cdots,g_T,\hat{y})$, where $T$ denotes the number of tool-use turns required. 
+
+
+% This formulation mandates that the VLM agent explicitly interleave complex reasoning with calls to the external tools in $\mathcal{A}$ to decompose and solve the complicated, multi-step problem, culminating in the answer $\hat{y}$.
+
+\noindent \textbf{Tool-Integrated Reasoning in VLMs.}
+% Deploying VLM agents for autonomous tasks necessitates capabilities in planning, reasoning, and external tool interaction to address complex challenges.
+Formally, we frame TIR in VLMs as a Partially Observable Markov Decision Process (POMDP) defined by the tuple $\langle\mathcal{S},\mathcal{O},\mathcal{A},\mathcal{I},\mathcal{P},\mathcal{R}\rangle$, where
+$\mathcal{I}$, $\mathcal{S}$, $\mathcal{O}$, $\mathcal{A}$, and $\mathcal{R}$ represent the spaces for instructions, environment states, agent observations, actions, and rewards, respectively.
+Let $\mathcal{P}: \mathcal{S}\times\mathcal{A}\to\mathcal{S}$ represent the deterministic state transition function.
+% Given a problem description $x\in\mathcal{I}$, at each turn $t$, the agent executes an action $a_t\in\mathcal{A}$ based on its policy $\pi_\theta$, parameterized by a VLM $\theta$ that processes visual and textual observations to generate language token sequences. 
+Following ReAct~\cite{yao2023react}, we structure the agent outputs to prioritize reasoning thought before action.
+Given a problem description $x\in\mathcal{I}$, the history, and the current feedback, at each turn $t$, the agent generates the thought $g_{t+1}\sim\pi_\theta(\cdot|x,g_1,a_1,o_1,\cdots,g_t,a_t,o_t)$ first and the subsequent action $a_{t+1}\sim\pi_\theta(\cdot|x,g_1,a_1,o_1,\cdots,g_t,a_t,o_t,g_{t+1})$.
+Following $a_{t+1}$, the environment transitions to a new state $s_{t+1}$ via $\mathcal{P}(s_{t+1}|s_t,a_t)$, and provides a new partial observation $o_{t+1}\sim\mathcal{O}(\cdot|s_{t+1})$.
+% emits a scalar reward $r_t=\mathcal{R}(s_t,a_t)$, 
+% The agent's objective is to maximize the expected the expected cumulative discounted return, $\max_\theta\mathbb{E}_{\pi_\theta,\mathcal{P},\Omega}[\sum_t\gamma^tr_t]$, where $\gamma\sim[0,1]$ is the discount factor. 
+Thus, the entire trajectory is:
+\begin{equation*}
+% \setlength{\abovedisplayskip}{3pt}
+% \setlength{\belowdisplayskip}{3pt}
+    \begin{aligned}
+        \tau=(g_0,a_0,o_0,\cdots,o_{T-1},g_T,\hat{y})\sim\pi_\theta(\tau|x),
+    \end{aligned}
+\end{equation*}
+where $\hat{y}$ is the final answer obtained from the model generations, and $\pi_\theta$ can be decomposed:
+\begin{equation*}
+% \setlength{\abovedisplayskip}{3pt}
+% \setlength{\belowdisplayskip}{3pt}
+% \setlength{\jot}{-2pt}
+    \begin{aligned}
+        &\pi_\theta(\tau|x)=\pi_\theta(g_T|x,c_{T-1})\cdot\prod_{t=0}^{T-1}\pi_\theta(g_t,a_t|x,c_{t-1}) \\
+        & =\pi_\theta(g_T|x,c_{T-1})\cdot\prod_{t=0}^{T-1}\pi_\theta(a_t|x,c_{t-1},g_t)\cdot\pi_\theta(g_t|x,c_{t-1}),
+    \end{aligned}
+\end{equation*}
+where $c_{t-1}=(g_0,a_0,o_0,\cdots,g_{t-1},a_{t-1},o_{t-1})$ represents the interactive history up to $t-1$.
+% The final reward $r(x,\tau)\in[0,1]$ is finally computed according the final success of the . \xr{do we still need this sentence here?}
+
+\noindent \textbf{Exploratory Experiments.}
+\input{table/table-error-type}
+We conduct exploratory experiments on three VQA tasks \cite{masry2022chartqa,chen2022unigeo,chang2022mapqa} with both proprietary and open-source VLMs.
+As shown in Fig.~\ref{fig:teaser}, naively enabling tools for base models induces a sharp accuracy drop: \emph{without instruction or reasoning priors, external tools act as distractors rather than aids.} To diagnose failure modes, we annotate 500 tool-enabled errors across GPT‑5 and InternVL3‑8B (Table~\ref{tab:error-def}). 
+% \wz{It seems like the errors are focused on format/structure.. which is still part of the text reasoning. Do we have annotations on e.g. useless visual function / missing key visual function?  } \xr{Shall we add a prompt format in the appendix to show that we do include instructions to use those tools, and even with such instructions, the model still fails to use the tool?} 
+The majority of failures arise from the \emph{if/when/which/how of tool calls}, schema/argument selection, and correctness (E1–E5); followed by \emph{incorrect post‑tool reasoning} (E6). These observations motivate us to train VLMs for TIR; To facilitate easy scale-up, we introduce \env{} (Figure~\ref{fig:overview}): we curate verifiable, visual‑centric tasks with tools (\cref{sec:4.1}), instantiate an interactive, executable environment (\cref{sec:4.2}) with scalable training facilities (\cref{sec:4.3}), and systematically improve open-source VLM agent within \env{} that \emph{interleaves} reasoning with tool execution (\cref{sec:training}).

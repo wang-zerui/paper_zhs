@@ -1,0 +1,85 @@
+\section{Experiment Details}
+\label{app:experiment_details}
+
+This appendix provides domain-specific training procedures, terminology conventions, and detailed ablation analyses for the experiments in Section~\ref{sec:experiments}.
+
+\subsection{Terminology Conventions}
+\label{app:terminology}
+
+Throughout the experiments, we call every extracted assistant turn a \emph{pivot candidate} and reserve the term \emph{pivot} for the offline-filtered subset used for PivotRL training. An \emph{action} is the full assistant completion at a model-call boundary, not an individual token. Depending on the benchmark, that completion may be a conversational tool-use turn, a coding-agent tool call, a bash command, or a search/browsing step. Natural-language-only assistant turns are also actions when the benchmark includes them.
+
+In the single-domain experiments, OOD change denotes the score difference relative to the base model on benchmarks outside the training domain. 
+
+For pivot selection, we use two subsets: \emph{random} ($\mathcal{D}_{\mathrm{cand}}$), which uses all pivot candidates, and \emph{low-reward-mean} ($\mathcal{D}_{\mathrm{adv}}$), which requires both nonzero reward variance and a gap between the demonstrated action and the reference-policy mean.
+
+\subsection{Domain-Specific Training Details}
+\label{app:training_details}
+
+In all four domains, pivot candidates are extracted once from the demonstration traces, profiled offline, and filtered before RL training; training then samples only from the retained set. We detail the domain-specific action definitions, data construction, and local verifiers below.
+
+\paragraph{$\tau^2$-Bench.}
+We curate an SFT trajectory dataset of 281{,}774 trajectories across 838 domains using a synthetic data-generation pipeline similar to ToolAce~\citep{liu2025toolacewinningpointsllm}, Kimi-K2~\citep{kimiteam2025kimik2openagentic}, and DeepSeek-V3.2~\citep{deepseekai2025deepseekv32pushingfrontieropen}. We train on top of \texttt{Qwen3-30B-A3B-Thinking-2507}. Every assistant turn in the trace is first treated as a pivot candidate. In this domain, an action is the full assistant turn at the model-call boundary, which may contain natural language, tool calls, or both. We then evaluate random and low-reward-mean pivot sets as described in Section~\ref{sec:pivotrl_method}. We release the conversational tool use environment and data as part of \href{https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison}{Nemo-Gym} and \href{https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1}{Nemotron-Post-Training-v3}.
+
+\paragraph{Terminal-Bench.}
+We collect resolved trajectories from \texttt{Qwen/Qwen3-Coder-480B-A35B-Instruct} and \texttt{moonshotai/Kimi-K2-Instruct} using the Terminus-1 and Terminus-2 agents. Every assistant bash action is treated as a pivot candidate, and an action in this domain is the next bash command produced at the model-call boundary. We start from the low-reward-mean set $\mathcal{D}_{\mathrm{adv}}$, with an additional command-deduplication step to improve diversity. The final dataset contains approximately 20{,}000 samples. The local verifier asks whether the sampled command is locally interchangeable with the demonstrated command: it combines output-schema validation, normalized string similarity, and equivalence-based LLM-as-judge scoring over the command and its immediate effect.
+
+\paragraph{SWE-Bench Verified.}
+We use an internal trajectory dataset generated with OpenHands~\citep{wang2025openhandsopenplatformai}, OpenCode~\citep{opencode}, and Codex~\citep{openaicodex_software} on tasks from SWE-Gym~\citep{pan2025trainingsoftwareengineeringagents} and R2E-Gym~\citep{jain2025r2egymproceduralenvironmentshybrid}, using \texttt{MiniMaxAI/MiniMax-M2.5}~\citep{minimax2026m25}. We evaluate mean@3 with the OpenHands harness. Every non-error tool-call action is treated as a pivot candidate, and an action in this domain is the next assistant tool call in the coding trace. Filtering to $\mathcal{D}_{\mathrm{adv}}$ yields a final training set of 87{,}718 samples. The local verifier matches tool-call names only. This is a deliberately coarse local signal: it checks whether the model selected the correct next \emph{kind} of operation at the pivot (e.g., search, open, edit, or run), without attempting to score tool arguments or patch quality at every turn. Final task success is determined only by the full SWE-Bench evaluation harness.
+
+For the E2E RL comparison in Section~\ref{sec:swe_e2e}, PivotRL trains with a batch size of $1024$ ($64$ prompts $\times$ $16$ generations) at $1$ turn per sample, reaching $32.67\%$ accuracy at step $130$ with ${\sim}133$K cumulative rollout turns. The E2E RL baseline trains with a batch size of $512$ ($16$ prompts $\times$ $32$ generations) at $12$--$25$ turns per trajectory, reaching the same $32.67\%$ accuracy at step ${\sim}72$ with ${\sim}542$K cumulative rollout turns. At this matched accuracy, PivotRL requires ${\sim}4\times$ fewer rollout turns and ${\sim}5.5\times$ less wall-clock time (Figure~\ref{fig:swe_speedup}). Both methods use the same number of compute nodes.
+
+\paragraph{BrowseComp.}
+We start from a multi-hop question-answer dataset and use an online search engine together with \texttt{DeepSeek-V3.2} to generate browsing trajectories. Each search-related assistant step at a model-call boundary is treated as a pivot candidate; in this domain, an action is the next browsing step, such as issuing a search query, opening a result, or taking the next evidence-gathering action. The final dataset contains 13{,}215 samples.
+
+\subsection{Detailed Ablation Analyses}
+\label{app:detailed_ablations}
+
+\subsubsection{Effect of Turn Selection Strategy on $\tau^2$-Bench}
+\label{app:pivot_selection}
+
+We compare two pivot selection strategies on $\tau^2$-Bench:
+\begin{itemize}
+    \item random pivots ($\mathcal{D}_{\mathrm{cand}}$): no filtering,
+    \item low-reward-mean ($\mathcal{D}_{\mathrm{adv}}$): mixed-outcome pivots further filtered for a large gap between the demonstrated action's reward and the reference-policy mean, given by Eq.~\eqref{eq:dadv}.
+\end{itemize}
+Table~\ref{tab:tau_pivot_selection} shows a monotonic benefit from more selective filtering: random pivots already improve over SFT ($59.68$ vs.\ $58.44$), and low-reward-mean pivots yield the best result ($63.81$).
+
+\begin{table*}[t]
+\small
+\centering
+\setlength{\tabcolsep}{6pt}
+\newcolumntype{F}{>{\centering\arraybackslash}p{0.8cm}}
+\newcolumntype{C}{>{\centering\arraybackslash}p{0.8cm}}
+\begin{tabular}{l|F|F|C|C}
+\toprule
+& \multicolumn{1}{c|}{\textbf{$\tau^2$-Airline}}
+& \multicolumn{1}{c|}{\textbf{$\tau^2$-Retail}}
+& \multicolumn{1}{c|}{\textbf{$\tau^2$-Telecom}}
+& \multicolumn{1}{c}{\textbf{$\tau^2$-Average}} \\
+\midrule
+gpt-oss-120b-high
+& 55.33 & 58.19 & 67.20 & 60.24 \\
+gpt-oss-20b-high
+& 43.33 & 50.20 & 52.63 & 48.72 \\
+Qwen3-235B-A22B-Thinking-2507
+& 50.00 & 66.08 & 46.78 & 54.29 \\
+\midrule
+Qwen3-30B-A3B-Thinking-2507
+& 50.00 & 54.39 & 28.65 & 44.35 \\
+\hdashline
+Qwen + SFT
+& 51.33 & 58.19 & 65.79 & 58.44 \\
+Qwen + Random Pivots ($\mathcal{D}_{\mathrm{cand}}$)
+& 58.00 & 63.74 & 57.31 & 59.68 \\
+Qwen + Low-Reward-Mean Pivots ($\mathcal{D}_{\mathrm{adv}}$)
+& 58.67 & 69.01 & 63.74 & 63.81 \\
+\bottomrule
+\end{tabular}
+\caption{
+Effect of pivot selection on $\tau^2$-Bench (best checkpoint over training).
+Random turns improve over the base model and low-reward-mean pivots perform even stronger.
+}
+\label{tab:tau_pivot_selection}
+\end{table*}
+
+

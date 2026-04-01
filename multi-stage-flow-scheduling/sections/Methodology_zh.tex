@@ -1,0 +1,46 @@
+\section{方法}\label{sec:Methodology}
+
+\subsection{问题建模}\label{sec:Methodology:formulation}
+
+\textbf{简化抽象。} 不失一般性地，我们考虑一个单独的 prefill 请求，它依次经过 $L$ 个顺序 Transformer 层。每一层的通信负载可统一抽象为多阶段流（Multi-stage Flow, MsFlow）。一个 MsFlow 由三个具有时间依赖关系的阶段组成，每个阶段对应由该层生命周期所决定的一组 flow（或 coflow），具体如下：
+\begin{enumerate}[label=$\bullet$,leftmargin=*,itemsep=0.5pt]
+\item \textbf{阶段 1：初始化。} 涉及 KV-cache 复用，用于传输先决状态。这类松耦合流往往会与前一层计算重叠，以隐藏延迟。
+\item \textbf{阶段 2：执行。} 由集合通信（如 all-to-all）组成，并会严格阻塞后续计算。
+\item \textbf{阶段 3：完成。} 负责把结果通过 P2D 传输到解码 worker。它决定最终 token 的可用时间，但不会阻塞当前 prefill 计算。
+\end{enumerate}
+
+对于单个请求而言，所有 MsFlow 共享同一个 TTFT 截止时间，并且会在层依赖约束下发生部分重叠（例如，第 $l$ 层的阶段 2 必须完成后才能开始计算第 $l+1$ 层）。
+
+\textbf{争用动态。} 当并发 MsFlow 竞争共享网络带宽时，就会发生争用。回顾图~\ref{fig:bg:contention}，请求内争用发生在同一请求的不同层 MsFlow 之间，而请求间争用则发生在不同请求的 MsFlow 之间。两者本质上都可归结为异构阶段之间的争用。
+
+\textbf{总体目标。} 我们的目标是满足端到端 TTFT 截止时间（即 SLO 达成），而不是优化单个流时延。具体来说，我们必须联合编排这些存在依赖关系的 MsFlow，以保证全部 $L$ 个 MsFlow 都能在截止约束内完成。为此，理想调度器需要围绕 MsFlow 各阶段的语义，在两个互补目标之间取得平衡：
+\begin{enumerate}[label=(\roman*),leftmargin=*,itemsep=0.5pt]
+    \item \textbf{最小化非重叠通信时延。} 对早期阶段（1 和 2）而言，若完成过晚，会直接拉长当前层执行时间，并推迟下一层的释放。
+    \item \textbf{最小化提前量（Earliness）。} 对最终阶段 3 而言，过早完成并不会帮助满足截止时间，反而会加剧潜在网络争用。
+\end{enumerate}
+
+\subsection{关键观察与调度原则}
+\input{sections/fig_code/methodology/IntraContentionExample_zh}
+\input{sections/fig_code/methodology/InterContentionExample_zh}
+最优解在理论上是难以求得的~\cite{bettati1990algorithms,bettati1992end}。为设计有效启发式方法，我们首先考察 prefill 的执行动态。分析表明，请求截止时间具有一种结构性特征，这启发了本节提出的调度原则。
+
+\parab{关键观察。}
+在 prefill 阶段，\emph{随着 prefill 流水线不断推进，请求级截止时间会逐步具体化为流级截止时间。}
+
+回顾第~\ref{sec:Methodology:formulation} 节，对于初始阶段（1 和 2）而言，流级截止时间是隐式的，因为它由 TTFT 与下游任务时长共同决定。当执行进入最终阶段时，这一约束开始显式化：全局 TTFT 直接决定 token 返回时间，从而转化为明确的流级约束。我们借用实时系统中的“松弛度”（laxity）概念——即触发截止违约前所剩余的预算——来表示流级紧迫性。不同的松弛度揭示出一个调度机会：我们可以安全地延后末阶段流（其松弛度是确定的），从而将带宽让给那些松弛度尚不确定的早期阶段流。
+
+\parab{调度原则：\DAP。} 基于上述观察，我们的核心原则是：\emph{将非紧急传输尽可能延后到最后一个安全时刻，仅在必要时提升其优先级}，从而在保证按时完成的同时最小化干扰。这一原则可具体化为两条规则：
+\begin{itemize}[leftmargin=*]
+    \item \textbf{原则 \#1（带显式截止时间的末阶段流）} 初始时被延后，以让出带宽；随后逐步提升优先级，以保证满足截止时间。
+    \item \textbf{原则 \#2（带隐式截止时间的早期阶段流）} 根据相对松弛度进行延后，并随着松弛度减小而提升优先级，以降低违约风险。
+\end{itemize}
+
+\parab{为何有效。}
+通过延后非紧急流并在必要时有选择地提升它们，调度器得以在短期效率与长期截止保证之间取得平衡。
+这一策略从两个维度提升 TTFT SLO 达成率：
+(i) 最小化非重叠通信时延，以缩短 prefill 总工期；
+(ii) 控制提前量，从而在争用条件下优先保障更紧迫的请求。
+
+为了理解 \DAP 为何能改善 prefill DAG 的工期，考虑图~\ref{fig:meth:intraA}-(a)（入口）与图~\ref{fig:meth:intraB}-(a)（出口）中的争用场景。Fair Sharing 会不加区分地稀释阶段 2 的吞吐；SJF（图~\ref{fig:meth:intraA}-(c)、\ref{fig:meth:intraB}-(c)）会优先调度 KV 搬运流（其流大小通常更小）；而 EDF 会因显式截止时间而过度优先阶段 3（图~\ref{fig:meth:intraA}-(c)），并在截止时间隐式时退化为 Fair Sharing（图~\ref{fig:meth:intraB}-(b)）。因此，这三种策略都会放大非重叠通信时延并阻塞计算。Defer-and-Promote 则通过有策略地延后阶段 3（其松弛度更高）来保护阶段 2，从而显著缩短总工期（图~\ref{fig:meth:intraA}-(d)、\ref{fig:meth:intraB}-(d)）。
+
+在请求间争用下，\DAP 通过严格优先保障真正紧急的请求来最大化达成率。以表~\ref{tab:InterReqExample} 为例，每个请求都具备端到端 TTFT 约束，且其剩余时间由下游任务决定。正如图~\ref{fig:meth:inter} 所示，三条具有不同大小和截止时间的流竞争同一条瓶颈链路。与 FS、SJF、EDF 等标准策略经常误判紧迫性不同，\DAP 会优先保障集合通信，因为若将其延后，会立刻阻塞执行流水线。与此同时，它会有策略地延后其他流量：阶段 1 流仅在其即将阻塞流水线时才被提升，而末阶段流则会一直拖延到显式截止时间临近时再执行。

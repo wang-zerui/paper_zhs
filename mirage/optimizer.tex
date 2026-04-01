@@ -1,0 +1,41 @@
+\section{\graph Optimizer}
+\label{sec:optimizer}
+
+For each verified \graph, \sys's {\em \graph optimizer} maximizes its performance by further performing {\em layout optimization}, {\em operator scheduling}, and {\em memory planning}, as shown in \Cref{fig:overview}. 
+%
+\sys defers these \graph optimizations until after verification for two reasons.
+%
+First, these optimizations {\em do not} affect the correctness of the generated \graphs; omitting them when generating \graphs reduces the search space \sys must consider, since \graphs with the same graph topology but different choices of tensor layouts, operator orders, or memory allocation plans are considered identical by the \graph generator.
+Second, applying these optimizations after verification also reduces the search space for these optimizations, since the \graph optimizer only needs to optimize \graphs that are functionally equivalent to the input.
+
+
+\paragraph{Tensor layouts.} The \graph optimizer explores possible data layouts for all intermediate tensors at the kernel, block, and thread levels and chooses the best combinations to maximize performance. We formulate layout selection as a constrained optimization problem and solve it optimally using an integer linear programming (ILP) algorithm.
+%
+Specifically, for each tensor $t$ and each possible layout $l$ for $t$, we introduce a boolean variable $B_{t,l}$ to indicate whether tensor $t$ uses layout $l$. 
+Operators at the kernel, block, and thread levels may impose various constraints on tensor layouts.
+For example, to use kernels from the cuBLAS library~\cite{cublas} for matrix multiplication, the innermost dimension of the two input tensors must be among the last two dimensions. These restrictions are converted into a series of linear constraints on $B_{t, l}$. Different tensor layouts may lead to varying performance. For example, some input tensor layouts support bulk copies from device to shared memory, while others do not. \sys introduces a cost function to model the performance of each operator under different layout choices.
+%
+\sys uses an off-the-shelf ILP solver (i.e., Z3~\cite{z3}) to find an optimal layout strategy that satisfies all layout constraints while minimizing cost.
+%
+
+\paragraph{Operator scheduling.} In a \graph, there are multiple topological orders to execute operators, and different orders may yield different performance. 
+For a given input \graph, the \graph optimizer identifies an efficient strategy to schedule operators by minimizing thread-level synchronization within each thread block (i.e., {\tt \_\_syncthreads()} in CUDA). 
+To achieve this goal, \sys labels each node with a {\em depth}, defined as the length of the longest path from any input operator to that node. \sys uses a dynamic programming algorithm to compute the depth of each node and schedules all operators in ascending order of their depths.
+This approach minimizes the number of thread-level synchronizations required in the generated CUDA kernel, as \sys only needs to insert synchronization points between operators with different depths.
+
+\paragraph{Memory planning.} A third class of post-verification optimizations is memory planning, which determines memory offsets for all intermediate tensors at the kernel, block, and thread levels. \sys formulates memory planning as a {\em dynamic storage allocation} problem and exhaustively enumerates all possible allocation plans to discover an optimal strategy.
+
+\if 0
+considering possible data layouts for all intermediate tensors at the kernel, block, and thread levels.
+%
+\sys defers layout optimizations after verification to enable two benefits.
+%
+First, data layouts do not affect the correctness of a generated \graph, and omitting layouts when generating \graphs reduces the search space \sys must consider since \graphs with the same graph topology and different data layouts are considered identical by the \graph generator.
+%
+Second, optimizing layout after verification minimizes the layout optimization workload and allows \sys to explore all possible layout combinations.
+
+For each \graph, the optimizer enumerates all supported layouts for each intermediate tensor of the \graph at the kernel, block, and thread levels, profiles the performance of the final kernels on target hardware, and selects the layouts that yield the best performance for the \graph.
+%
+Finally, \sys selects the best discovered \graph as the output program.
+%\Sys finally selects the \graph with the best performance.
+\fi 

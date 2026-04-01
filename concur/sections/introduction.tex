@@ -1,0 +1,154 @@
+\section{Introduction}
+
+\begin{figure*}[tb]
+    \centering
+\includegraphics[width=0.98\linewidth]{figure/comprehensive_comparison.pdf}
+    \caption{(a) (b) Input length and KV cache memory consumption growth across 10 generation steps for DeepSeek V3 and Qwen3-32B. (c) Comparison of GPU-to-CPU KV cache offload latency versus prefill-based recomputation latency for DeepSeek-V3 (6.67 GB cache per request, 4096 tokens) under varying concurrency levels.}
+    \label{fig:comparisons}
+    % \vvspace{}
+\end{figure*}
+
+
+
+% \begin{figure*}[tb]
+%     \centering
+%     \begin{subfigure}{0.49\linewidth}
+%         \centering
+%         \includegraphics[width=\linewidth]{figure/KVCacheAlloc.pdf}
+%         \caption{\textbf{Illustrative workflow of agent-level KV cache thrashing.}
+%         Two agents execute asynchronously under a limited number of GPU-resident KV cache slots.
+%         As agents alternate between generation and tool-calling, paused agents lose cache residency and are evicted by active ones,
+%         leading to cache misses and expensive recomputation upon resumption.}
+%         \label{fig:workflow}
+%     \end{subfigure}
+%     \hfill
+%     \begin{subfigure}{0.49\linewidth}
+%         \centering
+%         \includegraphics[width=\linewidth]{figure/dpsk_kv_w_time.pdf}
+%         \caption{\textbf{Empirical KV cache dynamics during agentic batch inference.}
+%         Time-series of KV cache usage and hit rate when running DeepSeek with high concurrency.
+%         The execution exhibits a warmup phase, a prolonged oscillation phase with near-saturated cache usage but low hit rate,
+%         and a cooldown phase as agents finish and release memory.}
+%         \label{fig:dpsk}
+%     \end{subfigure}
+%     \caption{\textbf{KV cache thrashing in offline agentic inference.}
+%     (Left) A conceptual workflow illustrating how asynchronous agent progress induces cache eviction and recomputation.
+%     (Right) Real execution traces showing that most runtime is dominated by a thrashing regime where high KV cache usage coexists with a low cache hit rate.}
+%     \label{fig:kv_overview}
+% \end{figure*}
+
+
+
+Large language models (LLMs) are increasingly deployed as \emph{agents} that interact with external environments over long horizons \cite{nex,rollpacker}. This necessitates high-throughput agentic batch inference, which serves as the computational backbone for three critical workloads: (1) agentic RL rollouts, where massively parallel trajectory generation is essential for policy optimization, account for the dominant share of end-to-end training time~\cite{openrlhf, Laminar,respec}; (2) data distillation, to distill from advanced reasoning models and then train student models via SFT~\cite{rl_distill}; (3) agentic evaluation, where models must concurrently simulate and judge thousands of diverse scenarios~\cite{agentjudge}. 
+
+% However, current LLM serving stacks are fundamentally designed for a different workload regime: short, independent requests with fixed or slowly varying context lengths. This mismatch gives rise to a new and poorly understood systems bottleneck.
+In agentic batch inference, the context of each agent (Figure~\ref{fig:comparisons}a) grows monotonically over time, causing its KV cache footprint to expand continuously (Figure~\ref{fig:comparisons}b).
+At scale, this behavior transforms GPU-resident KV cache from a static acceleration structure into a highly contended, dynamically evolving shared resource. 
+
+Modern LLM serving engines mitigate KV cache pressure through prefix caching and eviction \cite{chunkattention,hydragen,promptcache}.
+By organizing cached prefixes into tree structures \cite{sglang} and evicting nodes using Least Recently Used (LRU) policies, these systems achieve excellent efficiency for chat-style workloads with high prefix overlap.
+When GPU memory is insufficient, evicted KV cache slots are often offloaded to CPU memory, trading PCIe transfer latency for reduced recomputation \cite{mooncake,preble,promptcache}.
+% Prior work has shown that such offloading is generally beneficial under low contention (Figure \ref{fig:comparisons}c), and has therefore been widely adopted in production systems.
+
+Unfortunately, these techniques break down under agentic batch inference. 
+The core issue is not merely that contexts become long, but that \emph{agents progress asynchronously}.
+While some agents are actively generating tokens, others are stalled waiting for external tools, rendering their KV cache temporarily inactive.
+Under standard LRU eviction, these inactive but semantically critical prefixes are aggressively evicted once memory pressure rises.
+When the agent resumes, the system must reconstruct its entire prefix via recomputation or host-device transfer, incurring latency that grows with the agent’s accumulated history. Figure \ref{fig:twoagent}a illustrates this failure in a simplified three-agent setting.
+Crucially, this overhead is paid repeatedly throughout execution, even when the total number of agents remains fixed.
+
+% In this paper, we identify and characterize this specific failure mode as \emph{middle-phase thrashing}—a phenomenon that, to the best of our knowledge, has been previously underexplored.
+% Unlike classical memory thrashing caused by insufficient capacity, middle-phase thrashing arises from the interplay between asynchronous agent progress, monotonically growing KV cache footprints, and reactive eviction policies.
+% Trace-driven analysis of real-world deployments (Figure~\ref{fig:dpskthrashing} (a)) reveals that batch agent inference follows a characteristic three-phase execution pattern: a short warmup phase with high cache efficiency, a prolonged middle phase where GPU memory remains saturated yet cache hit rates collapse, and a final cooldown phase as agents complete.
+% Crucially, during the middle phase, the system becomes trapped in a cycle of aggressive eviction and recomputation, with thrashing-induced recomputation accounting for up to 60\% of end-to-end batch inference latency (Figure~\ref{fig:dpskthrashing} (b)).
+% As a result, increasing the number of concurrent agents \emph{reduces} overall throughput, despite unchanged model size and hardware resources.
+
+In this paper, we identify and characterize this specific pathology as \emph{middle-phase thrashing}. Distinct from classical memory thrashing, which typically arises from simple capacity exhaustion, this phenomenon manifests as a prolonged period of inefficiency. Through trace-driven analysis of real-world deployments (Figure \ref{fig:dpskthrashing}a), we show that agentic batch inference follows a distinctive three-phase execution pattern. After a brief warmup phase with increasing cache efficiency, systems enter the middle phase, where GPU memory remains saturated yet cache hit rates collapse. During this phase, the system is trapped in a vicious cycle of eviction and recomputation, leading to severe throughput degradation. Counterintuitively, adding more agents during this phase reduces overall throughput, despite unchanged model size and hardware resources.
+
+
+% Our key observation is that this failure stems from a mismatch in abstraction.
+% While agents represent coherent, long-lived execution units whose KV cache retains high reuse value until completion, existing systems reason only at the level of requests. This abstraction gap prevents the system from prioritizing agents with valuable cached state.
+% As concurrency increases, the system enters a pathological regime where eviction and recomputation dominate execution time, despite unchanged model size and hardware resources.
+
+
+To address this challenge, we argue that agentic batch inference requires a shift from reactive cache management to \emph{proactive, agent-level admission control}.
+We draw inspiration from congestion control \cite{congestion_control,chiu1989analysis,tcp} in distributed systems, where access to a finite shared resource is regulated using feedback-driven control loops to prevent congestion collapse.
+In our setting, the GPU-resident KV cache plays a role analogous to network bandwidth: a shared resource whose overcommitment degrades efficiency long before physical capacity is exhausted.
+
+Guided by this insight, we present \SysName{}, a lightweight agent-level control middleware that sits between the agent execution system and the LLM serving engine.
+Rather than replacing existing components, \SysName{} augments them by regulating when agents are allowed to issue generation requests. By treating the agent, not the individual request, as the unit of admission, \SysName{} preserves execution continuity for active agents and bounds the aggregate KV cache footprint as execution progresses. To realize this control in a principled and adaptive manner, \SysName{} draws inspiration from network congestion control and adapts the Additive Increase Multiplicative Decrease (AIMD) algorithm \cite{AIMD1} to dynamically modulate the number of admitted agents based on cache pressure signals.
+Through this cache-aware admission control loop, \SysName{} prevents middle-phase thrashing before it occurs, stabilizes cache efficiency, and enables scalable batch agent inference across a wide range of serving engines and agent frameworks.
+
+We make the following contributions:
+\begin{itemize}[leftmargin=*, itemsep=0pt, topsep=5pt]
+    \item We identify \emph{middle-phase thrashing} as a dominant and previously under-characterized performance pathology in offline agentic batch inference.
+    
+    \item We draw inspiration from congestion control in networking and introduce \emph{agent-level admission control} for batch agent inference.
+    We design a lightweight, non-intrusive middleware that operates between the agent execution system and existing LLM serving engines, and develop an AIMD-inspired, \emph{cache-aware admission control} algorithm that dynamically regulates agent admission based on runtime feedback.
+    
+    \item We evaluate \SysName{} on large-scale models and real-world agent workloads, achieving up to $4.09\times$ throughput improvement on Qwen3-32B and up to $1.90\times$ on DeepSeek-V3, while remaining compatible with existing serving engines and agent frameworks.
+\end{itemize}
+
+
+
+
+% The paradigm of AI is undergoing a seismic shift from static, single-turn interactions to dynamic, long-horizon agentic workflows \cite{rollpacker, rollart,nex} to transcend human-level performance in domains. 
+% As LLMs evolve from passive information retrievers into active reasoners, the infrastructure supporting them must undergo a parallel transformation. 
+% % Agentic RL frameworks, employing algorithms like Proximal Policy Optimization (PPO) and Group Relative Policy Optimization (GRPO)~\cite{ppo,ppo2,ppo1}, enable this by optimizing policies against verifiable outcomes rather than mere imitation. 
+% % The emergence of Agentic Reinforcement Learning (Agentic RL) as the primary methodology for instilling these reasoning and tool-using capabilities has exposed fundamental inefficiencies in existing systems. 
+% % This paper provides a comprehensive analysis of these infrastructure bottlenecks, specifically identifying the pathology of "Middle-Phase Thrashing" and the maladaptation of traditional cache eviction policies to agentic lifecycles. We propose a theoretical and practical framework for "Flow-Aware Scheduling," synthesizing principles from Operating System memory management and Network Congestion Control to optimize the high-throughput rollout generation required for next-generation AI.
+% % Agentic RL requires the continuous generation of fresh \textit{rollout} trajectories, which may consist of several interaction sequences where the agent perceives, reasons, acts, and receives feedback, which is called a \textit{trajectory}~\cite{Autellix}. These trajectories are then evaluated and consumed by the LLM training later. 
+% % Profiling of large-scale RLHF pipelines indicates that this rollout phase constitutes over 80\% of the total end-to-end training time \cite{openrlhf, Laminar}. Consequently, the efficiency of the serving engine during rollout determines the scalability of model reasoning capabilities, which is of vital importance. 
+% This necessitates high-throughput agentic batch inference, which serves as the computational backbone for three critical workloads: agentic RL rollouts, where massively parallel trajectory generation is essential for policy optimization, account for the dominant share of end-to-end training time~\cite{openrlhf, Laminar,respec}; data distillation, to distill from advanced reasoning models and then train student models via SFT~\cite{rl_distill}; and agentic evaluation, where models must concurrently simulate and judge thousands of diverse scenarios~\cite{agentjudge}. 
+% % Collectively, these use cases establish efficient large-batch execution as a fundamental requirement for scaling autonomous intelligence.
+% Therefore, high-throughput and efficient agentic batch inference serves as a fundamental requirement. 
+
+
+% The workload profile of agentic batch inference differs radically from the standard batch inference workloads, for which popular LLM serving engines like vLLM~\cite{pagedattention} and SGLang~\cite{sglang} were originally designed. 
+% Two primary characteristics define this divergence. 
+% \textbf{Interleaved execution of generation and tool calling.} Agentic workflows are inherently discontinuous. Agentic inference is not a monolithic block of computation but a sequence of \textit{generation steps} (making LLM generation requests to serving engines on GPU) punctuated by \textit{tool-calling steps} (calling tools or remote APIs on CPU sandbox). 
+% This forms a ReAct~\cite{react} pattern where generation and tool-calling steps are executed in an interleaved manner, and the number of iterations is non-deterministic and exhibits high variance across different agents. 
+% For serving engines, the GPU compute resources for that specific agent are idle when it is tool calling, yet the GPU memory (cached KVs) must be retained to avoid prefill after tool calling finishes.
+% % Second, these steps are causally dependent. The input for Step $T+1$ is strictly dependent on the output of Step $T$ and the result of the tool invocation. This creates a Directed Acyclic Graph (DAG) structure where latency in any single node propagates through the entire chain, and the loss of state (cache eviction) at any point necessitates a catastrophic recomputation of the entire history.1 In the context of RL, where "Goodput" (valid training samples per second) is the objective, the system's inability to manage these dependencies efficiently leads to severe resource underutilization.
+% \textbf{Sequential dependency leads to context divergence.} The output of a generation step determines the parameters for the subsequent tool call, and conversely, the result returned by the tool serves as the essential prompt context for the next generative phase. 
+% This creates a Directed Acyclic Graph (DAG) structure with shared nodes as start, where latency in any single node propagates through the entire chain, and the loss of state (KV cache eviction) at any point necessitates a catastrophic recomputation of the entire history. \textcolor{red}{Maybe put a figure here to show the diagram? Figure~\ref{fig:radix_tree}}
+
+% \begin{figure}[tb]
+%     \centering
+% \includegraphics[width=0.98\linewidth]{figure/radix_tree.png}
+%     \caption{Radix Tree.}
+%     \label{fig:radix_tree}
+% \end{figure}
+% % This auto-regressive dependency creates a critical path that cannot be easily parallelized; the system cannot speculate on the tool's output before it is executed.
+
+% % State-of-the-art serving engines rely on Least Recently Used (LRU) eviction policies to manage the GPU memory \cite{sglang, pagedattention}. While effective for individual requests, LRU is pathologically unsuited for batch inference. 
+% Standard GPU memory management in state-of-the-art serving engines, which relies on Least Recently Used (LRU) eviction \cite{sglang, pagedattention}, presents a fundamental misalignment with agentic inference. 
+% When an agent enters the tool calling step as a result of interleaved execution, it essentially gives up its KV caches since its latest access time stops updating. 
+% In a high-concurrency environment like large batch inference, the LRU policy misidentifies and evicts these KV caches from waiting agents with recomputation of prefill later. 
+% After the tool-calling step completes, the agent attempts to resume generation while encountering a cache miss for the serving engine. This forces the system to re-process the entire context window, wasting massive amounts of compute on redundant work. This recomputation penalty drastically reduces the effective throughput of agentic batch inference.
+
+
+% Moreover, the performance degradation becomes even more pronounced when considering the systemic impact on serving engines.
+% We identify the critical resource management inefficiency during the middle phase of inference for long-context agents, which we term \textbf{middle-phase thrashing}. 
+% Controllers of LLM serving engines typically over-admit generation requests during the early phase of agentic batch inference to maximize GPU utilization, with a short-sighted estimation of memory when there are high prefix sharing (e.g., common system prompts) and relatively short sequence length at the beginning. 
+% However, as each agent progresses, the output sequence of each agent lengthens and may diverge simultaneously. 
+% This divergence eliminates prefix sharing benefits while the aggregate memory demand ($N \times L$) surges beyond physical HBM capacity owing to the sequential dependency characteristic. 
+% % Because the active working set of the batch exceeds available memory, the system enters a thrashing state—forcing frequent page swaps to the CPU or expensive recomputations—which results in a precipitous collapse in system Goodput analogous to page thrashing in operating systems.
+% Crucially, as different agents asynchronously pause and wait for tool calling and resume in turn, they compete aggressively for the limited KV cache capacity. The serving engine is forced to constantly evict the context of paused agents to accommodate the growing KV cache needs of actively generating ones (as they are most recently used). 
+% This results in an abnormal \textit{thrashing} state where the controller \tian{what is controller? if it is scheduler, recomputing is not scheduler's work? } spends excessive time recomputing evicted tokens, without leveraging the KV cache efficiently.
+% \tian{Better to understand with a figure.}
+
+% We will detail it in Section (TODO: cite section).
+
+% To address these resource pathologies, we propose \SysName, with a paradigm shift from reactive eviction to proactive admission control to prevent \textit{middle-phase thrashing}. 
+% \SysName adapts venerable principles from operating systems for admission control. 
+% % Working Set Constraints (OS Theory): applying Denning’s Working Set Model to KV cache management, the scheduler must guarantee that the aggregate "Working KV Set" of all active agents resides within HBM. When the projected demand exceeds capacity, the system prioritizes admission control (load shedding) over the degradation of active tasks.
+% By applying Denning’s Working Set Model to KV cache management \cite{workingsetmodel}, \SysName tries to guarantee that the aggregate memory footprint of all active generation requests remains resident within HBM. When projected demand exceeds capacity, our system prioritizes strict admission control over the performance degradation of active generations.
+% % Congestion Control (Network Theory): We adapt the TCP Additive Increase Multiplicative Decrease (AIMD) algorithm to manage concurrency. By treating metrics such as "Recomputation Rate" or "Cache Misses" as congestion signals, the scheduler dynamically modulates the concurrency limit.
+% Complementing this, \SysName adapts the Additive Increase Multiplicative Decrease (AIMD) algorithm from network congestion control to dynamically modulate concurrency \cite{AIMD1}. 
+% % By considering (TODO: need check) cache hit rate as a signal of congestion, the system achieves effective traffic shaping by clipping memory demand peaks during the expansive middle phase, while filling utilization valleys during the idle times of tool-calling and finishing of many requests.
+% By considering (TODO: need check) cache hit rate as a signal of congestion, \SysName achieves effective traffic shaping by clipping memory demand peaks during the expansive middle phase, while filling utilization valleys during the idle times of tool-calling and finishing of many agents.
+
+% % TODO: contribution
+
+

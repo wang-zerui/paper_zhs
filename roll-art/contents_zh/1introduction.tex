@@ -1,0 +1,16 @@
+\section{引言}
+\label{sec:introduction}
+
+强化学习（RL）正在成为推动大语言模型（LLM）从被动式逻辑推理迈向自主决策与长时程规划的关键技术~\cite{deepseekr1,seed-thinking,openaio4}。这一范式通常被称为 \emph{agentic RL}：模型不再只对单轮输入做响应，而是要在复杂、动态的环境中持续行动，场景覆盖工具调用~\cite{hao2025exploringsuperiorfunctioncalls,wu2025agenticreasoningstreamlinedframework}、网页导航~\cite{song2025r1searcherincentivizingsearchcapability,jin2025searchr1trainingllmsreason,jiang2025deepretrievalhackingrealsearch} 以及通用计算机控制~\cite{luo2025guir1generalistr1style,lu2025uir1enhancingefficientaction,liu2025infigui}。与传统 LLM 后训练相比，agentic RL 更强调通过大规模“实践”学习：智能体与外部环境反复交互，产生长、多轮轨迹，并在试错中学习解决复杂任务。
+
+agentic RL 训练通常由三个阶段迭代组成：\emph{rollout}、\emph{reward} 与 \emph{training}。在 rollout 阶段，智能体 LLM 与环境进行多轮反馈式交互，生成动作 token，接收观测，直到满足终止条件，从而形成一条轨迹。随后在 reward 阶段，系统利用独立模型或代码沙箱对轨迹进行评估，并赋予标量奖励。最后，training 阶段消费这些带标签的轨迹，对智能体参数进行更新，再将新参数同步回 rollout 侧，以进入下一轮数据生成与策略更新。
+
+随着研究界开始系统性讨论 agentic RL 的扩展规律~\cite{kimiteam2025kimik2openagentic,deepseek_v3_2_speciale}，一个根本性的基础设施问题浮现出来：整个训练流水线的资源需求不仅高度\emph{异构}，而且常常彼此冲突。仅 rollout 阶段就由多种不同负载叠加而成。LLM 生成会在需要高 TFLOPS 的 prefill 阶段与受显存带宽限制的 decoding 阶段之间切换，前者更适合 H800 等算力型 GPU，后者则更受益于 H20 等高带宽设备。具体哪个阶段占主导，又取决于任务形态：如 \texttt{FrozenLake}~\cite{frozen_lake} 与 \texttt{SWE-bench}~\cite{swe-bench} 这类长程任务更偏 prefill，而 \texttt{GEM-math}/\texttt{GEM-game}~\cite{GEM-github} 这类短轮次任务更偏 decoding。同时，智能体还需要与成千上万个并行环境交互；这些环境往往是\emph{有状态}、\emph{CPU 受限}的模拟程序，若与 GPU 推理节点共置，会引入严重资源争用。相比之下，reward 阶段通常由\emph{无状态且可并行}的工作者组成，其计算形式从简单的 CPU 规则脚本~\cite{he2025deepmath,guo2024deepseekCoder} 到复杂的 GPU 评判模型~\cite{son2024llmasajudgerewardmodel,zhong2024rlhfuseefficientrlhftraining} 都可能出现。
+
+这种异构性意味着，单体式部署很难高效利用资源。近来的 RL 系统已经开始尝试按阶段做物理解耦，例如把训练放在计算型 GPU 上，把 rollout 放到更经济的推理型 GPU 上。然而我们发现，对于 agentic RL，仅做阶段级拆分仍然不够：在 rollout 内部，不同任务甚至不同轨迹都可能呈现完全不同的硬件亲和性；在环境侧，长尾延迟与失败恢复又会让同步式执行大量浪费 GPU 时间；在奖励侧，无状态组件更适合迁移到可弹性伸缩的外部服务上，而不是长期占用热备 GPU。
+
+基于这些观察，我们提出三项设计原则。第一，\textbf{硬件亲和映射}：不仅允许用户把整个阶段绑定到特定硬件池，还允许在阶段内部按更细粒度把子任务分配到最合适的设备上。第二，\textbf{细粒度异步}：在 rollout 内以轨迹而非批次作为调度单位，并对 rollout 与 training 之间的异步程度进行显式管理，以平衡吞吐、稳定性与同步成本。第三，\textbf{状态感知计算}：系统应显式区分有状态与无状态组件，将奖励模型等天然无状态部分迁移到无服务器基础设施，以获得自动扩缩容、多租户复用和更低的空闲成本。
+
+我们将这些原则落实为 \SystemName{}：一个结合声明式编程模型与异构感知运行时的分布式系统。用户通过 Python 装饰器声明任务的硬件亲和性，并将无状态组件注册到外部 serverless 接口。系统内部的资源管理器负责分配异构资源到不同 worker，分布式运行时则以轨迹粒度编排异步工作流。为充分发挥硬件能力，\SystemName{}接入了高吞吐推理引擎~\cite{vllm, sglang,rtp-llm} 与训练引擎~\cite{shoeybi2019megatron}，并暴露多种传输通道，以利用 NVLink、InfiniBand 与以太网等不同网络结构，在轨迹传输与权重同步之间做最优匹配。
+
+我们从零实现了 \SystemName{}，总代码约 6 万行 Python。基于 Qwen 系列模型~\cite{qwen-huggingface} 的实验表明，它在解耦式集群上相较单体式和同步式基线最高可获得 2.05 倍加速。为了验证在真实生产中的可扩展性与稳定性，我们还用 \SystemName{} 为 Qoder~\cite{qoder} 训练了大规模 MoE 模型，并在持续一周、超过 3000 张 GPU 的部署中验证了其高吞吐与高鲁棒性。

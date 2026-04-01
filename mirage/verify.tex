@@ -1,0 +1,169 @@
+\section{Probabilistic Equivalence Verifier}
+\label{sec:verify}
+%\ZJ{Discuss PET here.}
+%\MW{I still think we need to mention the floating point issue somewhere to justify finite field version, because analysis over finite fields (as well as the usage of two integers instead of a single floating point number) complicates the design a lot, and we need to explain why.}
+%\ZJ{I havd added a sentence to address this.}
+%\oded{I edited it a bit to emphasize that it's not just to avoid floating point errors}
+%\MW{Actually we can have a stronger theoretical guarantee with real numbers, so maybe we should not claim the theoretical bound as a benefit of finite fields?}
+%\oded{I still think it's fine. Testing with real numbers isn't computationally possible.}
+%\MW{I see. Then let's keep it}
+
+% This section introduces \sys's {\em probabilistic equivalence verifier} for verifying \graphs. 
+% A key idea behind \sys's approach to automatically verifying a \graph is to use multiple {\em random tests} executed in two finite fields of integers modulo two prime numbers to examine \graph equivalence.
+% %
+% Note that \sys performs random tests in finite fields instead of using floating points to avoid floating point errors.
+
+\sys's {\em probabilistic equivalence verifier} checks if a candidate \graph is equivalent to the desired \lax program.
+The key idea is to evaluate both on {\em random inputs} in two finite fields.
+Using finite fields instead of floating point numbers not only avoids floating point errors but also provides a strong theoretical guarantee: the probability of accepting a non-equivalent \graph can be made arbitrarily low.
+
+%
+For general programs, random testing can hardly provide any correctness guarantee.
+%, since the equivalence of two programs (i.e., producing identical output) on specific inputs does not indicate their equivalence for other inputs, and it is prohibitively expensive to test two \graphs for all possible inputs.
+%
+However, we show that for \lax programs (formally defined below), random testing offers a probabilistic correctness guarantee, and repeated tests can reduce the error probability to an arbitrarily small threshold.
+
+Prior work~\cite{wang2021pet} has applied a similar technique to check equivalence between tensor programs that contain only linear operators (e.g., matrix multiplication, convolution).
+We develop a random testing technique that also supports division and exponentiation, which are needed for many DNN optimizations (e.g., the RMSNorm example in \S\ref{sec:case2}).
+
+%
+%which allows \sys to strike a good balance between the cost of \graph verification and an arbitrarily small degree of unsoundness for verifying equivalence of \graphs.
+%
+\sys verifies equivalence between \lax \graphs (\underline{l}inear, division, and \underline{a}n e\underline{x}ponentiation) defined below. We introduce the main theoretical results in \S\ref{subsec:theory} and present \sys's verification methodology in \S\ref{subsec:random_tests}.
+
+\begin{definition}[\lax \graph]
+A \graph $G$ is a \lax \graph if (1) $G$ contains only multi-linear operators\footnote{Operator \er{op} with $n$ inputs is multi-linear if \er{op} is linear to all inputs $I_k$: \newline (1) $\forall X, Y. \er{op}(I_1,...,I_{k-1},X,I_{k+1},...,I_n)+\er{op}(I_1,...,I_{k-1},Y,I_{k+1},...,I_n)=\er{op}(I_1,...,I_{k-1},X+Y,I_{k+1},...,I_n)$, and \newline(2) $\alpha \cdot \er{op}(I_1,...,I_{k-1},X,I_{k+1},...,I_n) = \er{op}(I_1,...,I_{k-1},\alpha\cdot X,I_{k+1},...,I_n).$}, division, and exponentiation, and (2) every path from an input to an output in $G$ includes at most one exponentiation.
+\end{definition}
+%
+%\sys relies on the following theoretical results to probabilistically verify equivalence of two \lax programs.
+
+
+\subsection{Theoretical Foundations}
+\label{subsec:theory}
+Without loss of generality, we assume a \lax \graph $G$ takes $n$ input tensors and produces one output tensor.
+Our theoretical results directly generalize to \lax \graph with multiple outputs.
+%
+Since each \lax \graph includes linear operators, divisions, and at most one exponentiation along each path,
+%
+%Each \lax program includes linear operators (\oded{TODO: list the operators here}), element-wise divisions, and at most one exponential operator along each path.
+%For a given shape of input tensors, 
+the computation for each entry of the output tensor can be expressed in the following form (by using standard identities such as $\frac{\frac{a}{b}}{\frac{c}{d}} = \frac{ad}{bc}$, $\frac{a}{b} + \frac{c}{d} = \frac{ad+bc}{bd}$, $e^{x}e^{y}=e^{x+y}$):
+%
+\begin{equation}
+\label{eq:lax}
+%\sum_{i=1}^{k} \frac{f_i}{g_i} e^{\left({\frac{h_i}{u_i}}\right)},
+\frac{\sum_{i=1}^k f_i \exp(g_i/h_i)}{\sum_{i=1}^{k'} f'_i \exp(g'_i/h'_i)}
+\end{equation}
+where $f_i$, $g_i$, $h_i$, $f_j'$, $g_j'$ and $h_j'$ ($1\leq i \leq k$, $1 \leq j \leq k'$) are polynomials over the entries of the input tensors.
+
+The main theoretical result that underpins our randomized equivalence verification is the following theorem, which extends polynomial identity testing (PIT)~\cite{schwartz1980fast, zippel1979probabilistic} on finite fields to \lax \graphs. Note that the difference of two \lax \graphs is also of the form of \Cref{eq:lax}. Therefore, identity testing of two \lax \graphs reduces to testing if an expression of that form is zero.
+Due to the presence of exponentiation, we use two finite fields instead of one.\footnote{We use two primes $p$ and $q$ for polynomial identity testing \cite{schwartz1980fast, zippel1979probabilistic} outside and inside the exponents, respectively. The condition $q$ divides $p - 1$ is to ensure the existence of $q$-th roots of unity in $\mathbb{Z}_p$.}
+
+\begin{theorem}
+\label{thm:zero_test}
+Let $P$ be a function of the form described in \Cref{eq:lax},
+% \[
+% P(\vec x) = \frac{\sum_{i=1}^k f_i(\vec x) \exp\left(g_i(\vec x)/h_i(\vec x) \right)}{\sum_{i=1}^{k'} f'_i(\vec x) \exp\left(g'_i(\vec x)/h'_i(\vec x)\right)},
+% \]
+where
+% $\vec x \in \mathbb{R}^n$,
+$f_i, g_i, h_i, f_i', g_i', h_i'$ are non-zero polynomials of degree at most $d$ with integer coefficients between $[-w, w]$. Let $p, q$ be primes such that $q \mid p-1$ and $q > 2w$. Let $\mathcal{G}$ be the set of $q$-th roots of unity in $\mathbb{Z}_p$. If $P$ is not a zero function, then \cite{identitytesting}
+\[
+\Pr_{(\vec u, \vec v, \omega) \gets \mathbb{Z}_p^N\times \mathbb{Z}_q^N \times \mathcal{G}}\left[\frac{\sum_{i=1}^k f_i(\vec u) \omega^{g_i(\vec v)/h_i(\vec v)}}{\sum_{i=1}^{k'} f'_i(\vec u) \omega^{g'_i(\vec v)/h'_i(\vec v)}}\right] \le 8dk^4/q + q^{-1/k^2}.
+\]
+\end{theorem}
+
+\iffinal
+%\oded{for the final version, also talk about a few additional steps that are needed to go from the reals to \Cref{thm:zero_test}, such as the linear independence of different exponents.}
+\fi 
+
+\if 0
+\paragraph{Comparison with prior work.} \ZJ{Considering moving to the related work section.} PET~\cite{wang2021pet} has introduced theoretical results to simplify equivalence examination between {\em multi-linear} tensor programs, which are programs whose outputs are {\em linear} to all inputs.
+%
+However, many multi-level optimizations, especially these for language models, involve an {\em exponential} operator, making the program's outputs non-linear to its inputs.
+\fi 
+
+% $x e^x = y e^y$
+% $e^{f(x)}$'s are linearly indepdendent
+% <=> $\sum_{i} f_i e^{g_i} = 0 \Leftrightarrow f_i = 0 \forall i$
+
+\subsection{Random Tests over Finite Fields}
+\label{subsec:random_tests}
+
+\begin{table}
+    \centering
+    \caption{Arithmetic operations for random testing. \sys selects two prime numbers $p$ and $q$ such that $q$ divides $p - 1$. $x_p$ and $x_q$ are values from the finite fields $\mathbb{Z}_p$ and $\mathbb{Z}_q$, respectively. The notation $x^{-1}$ and $\sqrt{x}$ represents the multiplicative inverse and square root of $x$ in the corresponding finite field. Specifically,  $xx^{-1} \bmod p = 1$ and $\sqrt{x}\sqrt{x} \bmod p = x$.}
+    \vspace{\captionvspace}
+    \label{tab:fingerprint}
+    \resizebox{\columnwidth}{!}    
+    {%
+    \footnotesize
+    \begin{tabular}{c|c|c|l}
+    \toprule
+    {\bf Opt.} & {\bf Opd. 1} & {\bf Opd. 2} & {\bf Output} \\
+    \midrule
+    Add. & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big((x_p + y_p) \bmod{p}, (x_q + y_q) \bmod{q}$\big) \\
+    Sub. & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big((x_p - y_p) \bmod{p}, (x_q - y_q) \bmod{q}$\big) \\
+    Mul. & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big(x_py_p \bmod{p}, x_qy_q\bmod{q}\big)$ \\
+    Div. & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big(x_py_p^{-1} \bmod{p}, x_qy_q^{-1}\bmod{q}\big)$ \\
+    Exp. & $(x_p, x_q) $ & $ - $ & $\big(\omega^{x_q} \bmod{p}, -\big)$ \\
+    Sqrt. & $(x_p, x_q)$ & $ - $ & $(\sqrt{x_p}, \sqrt{x_q})$ \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\sys leverages \Cref{thm:zero_test} to probabilistically verify the equivalence of two \graphs by performing random testing over the finite fields $\mathbb{Z}_p$ and $\mathbb{Z}_q$ as defined in \Cref{thm:zero_test}.
+%finite fields  via modular arithmetic.
+% The arithmetic operations for tensor operators in random testing are performed using integers and calculated modulo a prime number $p$.
+%
+%For example, for element-wise addition which takes two input tensors $X$ and $Y$ and produces an output tensor $Z$, each element of the output is calculated using integer addition modulo $p$ (i.e., $Z_i = (X_i + Y_i) \% p$). \MW{This example can be a candidate to remove if we don't have enough space.}
+%
+%For each element, we use $x_p$ and $x_q$ as the remainder of $x$ divided by $p$.
+%
+%
+%
+\if 0
+Two arithmetic operations require special handling.
+%
+First, to support division, let $y_p^{-1}$ denote the multiplicative inverse of $y_p$ with respect to the modulus $p$
+(i.e., $y_p^{-1} \cdot y_p \equiv 1 \pmod{p}$).
+%
+The division of two integers $x_p$ and $y_p$ can be computed as $(x_p * y_p^{-1}) \% p$.
+%
+Second, supporting exponentiation introduces additional complexity since for a given integer $x$, its exponentiation $g^x$ module $p$ cannot be directly calculated using only $x_p$, where $g$ is an integer base for the exponential.
+%
+To address this issue, we select two prime numbers $p$ and $q$ and an integer base $g$ such that $q$ divides $p-1$ and $g$ is a $q$-th root of unity $g$ in $\mathbb{Z}_p$ (i.e., $g^q \equiv 1 \pmod{p}$). For each integer $x$, \sys maintains both $x_p$ and $x_q$ in arithmetic operations, whose semantics are summarized in \Cref{tab:fingerprint}.
+%
+%The division of two integers $(x_p, x_q)$ and $y_p, y_q$ is calculated as $\big(g^{x_q} \% p, -\big)$.
+
+\oded{I think the above paragraph has some important ideas but they don't get across clearly enough. Let's discuss over zoom}
+\fi
+To check the equivalence of two \graphs, \sys first generates input tensors, with each entry uniformly sampled from $\mathbb{Z}_p \times \mathbb{Z}_q$.
+\sys also samples $\omega$ uniformly from the set of $q$-roots of unity in $\mathbb{Z}_p$, which is used for exponentiation.
+\sys then evaluates the two \graphs on these inputs using the operations defined in \Cref{tab:fingerprint}.
+As explained in \S\ref{subsec:theory}, $\mathbb{Z}_p$ and $\mathbb{Z}_q$ are used for computations outside and inside the exponent, respectively.
+All operations except exponentiation are implemented via modular arithmetic in $\mathbb{Z}_p$ and $\mathbb{Z}_q$ independently.
+For exponentiation, \sys uses the value $x_q$ from $\mathbb{Z}_q$ and computes $\omega^{x_q} \bmod p$ to obtain a result in $\mathbb{Z}_p$.
+
+Note that in a \lax \graph, exponentiation is performed at most once along each path.
+Finally, \sys checks whether the two \graphs produce identical outputs.
+This process is repeated multiple times, and the two \graphs are considered equivalent if they pass all random tests.
+The following theorem, which follows from \Cref{thm:zero_test}, shows that this process can yield an arbitrarily low error rate.
+%By applying \Cref{thm:zero_test} to the difference of two \graphs and doing some additional analysis, we can have a bound on the error rate of the verifier:
+
+\begin{theorem}
+\label{thm:prob}
+Equivalent \graphs always pass \graph verification. 
+For two non-equivalent \graphs and a given probability threshold $0<\delta\leq 1$, the \graphs pass all $\Omega(\frac{k^2}{\ln q}\cdot \ln\frac{1}{\delta})$ random tests with probability at most $\delta$.
+\end{theorem}
+
+\if 0
+\begin{theorem}
+    any given threshold $\alpha$, two non-equivalent \graphs pass \graph verification with probability 
+
+$O((1/e)^t)$ when $kt$ times of random tests are performed.
+\end{theorem}
+\fi 
+
+\paragraph{Numerical stability.} While the theorem bridges finite fields and real-number computations, discrepancies can arise between real-number computations and floating-point operations, particularly involving overflow or underflow due to large intermediate values. \sys employs floating-point tests to filter out \graphs with significant numerical errors.

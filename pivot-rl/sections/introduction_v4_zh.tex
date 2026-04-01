@@ -1,0 +1,13 @@
+\section{引言}
+
+长时程智能体任务要求大语言模型（LLM）与环境进行多轮交互。这类任务包括对话式工具使用 \citep{schick2023toolformer, qin2023toolllm}、智能体编程 \citep{jimenez2024swebench}、终端交互 \citep{xie2024osworld} 以及网页搜索 \citep{yao2022webshop, wei2025browsecompsimplechallengingbenchmark}。它们已经成为能够执行复杂现实工作流的 AI 系统前沿。然而，对这些长时程智能体能力进行后训练，会在训练效率与泛化能力之间引入一个根本性矛盾。监督微调（SFT）为获得新能力提供了计算高效的机制，但它往往难以泛化到训练分布之外，并会灾难性地损害域外（OOD）性能 \citep{chu2025sftmemorizesrlgeneralizes, luo2023empiricalCF}。相比之下，端到端强化学习（E2E RL）通常能取得更高的域内准确率，同时较稳健地保留 OOD 能力 \citep{ouyang2022training, chen2025retainingdoingroleonpolicy}。但 E2E RL 的代价也很高，因为每次参数更新都需要与环境反复进行多轮 on-policy rollout。于是，自然会出现下面这个问题：
+\begin{center}
+    \emph{能否在不承担完整轨迹 rollout 成本的前提下，把 SFT 的数据效率与 E2E RL 的泛化能力结合起来，同时获得域内准确率与 OOD 保留能力？}
+\end{center}
+为了解决这个问题，一个自然想法是把 SFT 轨迹演示重新用于 RL。具体而言，可以从一条 SFT 轨迹中随机选取某个中间轮次，以它为条件进行 on-policy rollout；只有当生成动作与 SFT 数据中的演示动作完全一致时，才给予正奖励。这样做缓解了 SFT 数据只训练单一演示续写的低利用率问题，但我们的初步实验发现，它相较于同数据的标准 SFT 并不能提升 OOD 准确率。进一步分析表明，这一失败主要来自两个瓶颈。第一，随机选择的中间轮次往往几乎不提供学习信号；在 Group Relative Policy Optimization（GRPO）~\citep{shao2024deepseekmath} 下，这些轮次上采样得到的动作常常要么全部成功、要么全部失败，归一化优势接近零，因此无法产生有意义的梯度更新。第二，在生成式动作空间中，要求与 SFT 演示严格字符串匹配过于苛刻，因为大量功能等价的动作完全可能与唯一的演示续写不同。例如，一个工具调用或搜索查询即使不与演示完全一致，也可能是合理的。
+
+基于这些观察，我们提出 \textbf{PivotRL}，一种面向长时程智能体 RL 的新框架，同时解决上述两个瓶颈。PivotRL 进行局部 on-policy rollout，并筛选出 \emph{pivot}：即那些采样动作同时出现成功和失败结果的、信息量更高的助手轮次。因此，训练只需要从这些 pivot 状态出发执行简短的局部 rollout，而不必生成完整轨迹。为了有效为这些 rollout 打分，我们使用适合具体领域的 verifier，对功能等价的动作赋予奖励，而不是像以往那样严格惩罚任何偏离 SFT 演示的行为 \citep{shao2024deepseekmath, rohatgi2025tamingprocessverifiers}。
+
+我们还对这些核心设计做了简洁的理论分析。第一，我们证明状态级奖励目标的自然梯度 Fisher 范数会随奖励标准差增长。因此，沿着 KL 路径的 GRPO 更新量也会随该方差直接增大，这验证了我们通过筛选“结果有混合成败”的 pivot 来最大化局部域内学习信号的策略。第二，我们证明，基于功能奖励的 RL 会把概率质量转移到与专家演示功能等价的动作上，同时保持其它动作的条件分布不变。这样就保留了参考策略在与任务无关动作上的相对排序，从而缓解了 OOD 退化。
+
+在实验上，我们首先表明：在完全相同的训练数据下，也就是使用相同提示与专家轨迹时，PivotRL 比 SFT 带来更大的域内提升，同时显著减少 OOD 回退。当分别在对话式工具使用、智能体编程、终端工具使用和搜索四个领域训练时，PivotRL 相对基座模型的域内平均提升达到 $+14.11$\footnote{本文所有性能分数与差值均以百分点报告。}，显著高于 SFT 的 $+9.94$。更关键的是，PivotRL 几乎不会造成 OOD 回退（平均变化为 +$0.21$），而 SFT 在数学、科学问答与竞赛编程等非智能体领域上则出现了严重退化（平均为 $-9.48$）。其次，我们在 SWE-Bench 上将 PivotRL 与 E2E RL 直接比较。SWE-Bench 是评估长时程智能体能力的严格基准，并拥有较成熟的 E2E RL 基线 \citep{jimenez2024swebench, wang2025openhandsopenplatformai}。我们在该基准上展示，PivotRL 仅用约 {$4\times$ 更少的 rollout 轮次数} 就能达到与 E2E RL 有竞争力的准确率。PivotRL 已在领先的开源大模型中完成大规模部署；在 NVIDIA 的 Nemotron-3-Super LLM~\citep{nvidia2025nemotron3super} 后训练中，它与 SFT 和 E2E RL 一起构成了智能体后训练的核心工作流。

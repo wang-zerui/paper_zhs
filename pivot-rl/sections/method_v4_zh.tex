@@ -1,0 +1,232 @@
+\input{sections/prelim_zh}
+
+\section{PivotRL}
+\label{sec:pivotrl}
+
+PivotRL 相比第~\ref{sec:prelim} 节中的朴素局部 RL 基线只做了两处改动：其一，对抽取出的轮次进行筛选，把在线 rollout 预算集中到信息量更高的状态上；其二，用基于 verifier 的奖励替代严格精确匹配的局部信用。下面我们先介绍完整训练流程，再给出两个理论结果来解释这些设计。第~\ref{sec:pivotrl_method} 节介绍方法本身，第~\ref{sec:pivotrl_analysis} 节则分别分析这两个组成部分：命题~\ref{prop:mixed} 与定理~\ref{thm:pivot} 说明为什么“响应结果差异较大”的轮次能在组归一化 RL 下提供更强的局部学习信号，而定理~\ref{thm:kl} 表明，基于 verifier 的奖励会把概率质量转移到可接受动作上，同时相对参考策略保持保守。
+
+\subsection{方法}
+\label{sec:pivotrl_method}
+
+在轮次级训练中，我们从每条轨迹 $\tau=(s_0,a_0^*,\ldots,s_T,a_T^*)$ 中抽取助手轮次，构成 \emph{pivot candidate} 数据集：
+\begin{equation}
+\mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}_{\tau \in \mathcal{D}_{\mathrm{SFT}}, ~t = 0,\dots,T}.
+\label{eq:cand}
+\end{equation}
+PivotRL 由三个步骤组成：（i）离线分析各个轮次，只保留未来仍可能有信息量的状态；（ii）在保留下来的轮次上执行局部 on-policy rollout；（iii）优化基于 verifier 的 GRPO 风格目标。完整流程见算法~\ref{alg:pivotrl}。第一步对应第~\ref{sec:prelim} 节中的“无信息轮次”瓶颈，第二步则对应“局部信用过于严格”的瓶颈。
+
+\paragraph{离线轮次筛选。}
+我们在一个冻结的参考策略 $\pi_0$ 下估计每个抽取轮次的信息量，通常 $\pi_0$ 就是 PivotRL 的初始化策略。对某个轮次状态 $s$，我们从 $\pi_0(\cdot\mid s)$ 采样 $K$ 个局部 rollout，用 verifier 打分，并计算
+\begin{equation}
+\hat{\mu}(s)
+=
+\frac{1}{K}\sum_{k=1}^K r_{\mathrm{func}}(s,a^{(k)}),
+\qquad
+\hat{\sigma}^2(s)
+=
+\frac{1}{K}\sum_{k=1}^K \bigl(r_{\mathrm{func}}(s,a^{(k)})-\hat{\mu}(s)\bigr)^2.
+\label{eq:profile_stats}
+\end{equation}
+随后，我们只保留经验奖励方差非零且奖励均值较低的轮次：
+\begin{align}
+\mathcal{D}_{\mathrm{adv}}
+=
+\left\{
+(s,a^*)\in \mathcal{D}_{\mathrm{cand}}
+\;:\;
+\hat{\sigma}^2(s)>0, ~~
+\hat{\mu}(s)<\lambda_{\mathrm{diff}}
+\right\}.
+\label{eq:dadv}
+\end{align}
+第一个过滤条件会移除在参考策略下已经“全对”或“全错”的轮次；第二个过滤条件则把训练进一步集中到那些结果混合、且仍然具有难度的轮次上。因此，这个筛选后的子集被称为 \emph{pivot}，并用于 PivotRL 训练。我们记保留下来的训练集为 $\mathcal{D}_{\mathrm{pivot}}$；若无特别说明，默认使用 $\mathcal{D}_{\mathrm{pivot}}=\mathcal{D}_{\mathrm{adv}}$。
+
+\paragraph{基于 verifier 的局部奖励。}
+对于一个保留状态 $s$（即位于 $\mathcal{D}_{adv}$ 中），设 $\mathcal{M}(s)\subseteq \mathcal{A}(s)$ 表示在领域特定 verifier 下局部可接受的动作集合。PivotRL 定义奖励为
+\begin{equation}
+r_{\mathrm{func}}(s,a)=\mathbf{1}[a\in \mathcal{M}(s)].
+\label{eq:func_reward}
+\end{equation}
+与式~\eqref{eq:strict_reward} 中的严格局部奖励相比，这个 verifier 会对当前轮次上任何可接受的动作记分，而不仅仅是唯一的演示续写。根据不同领域，verifier 可以是归一化字符串或模式校验、任务特定的等价性规则，或者轻量级的 LLM 判别器。
+
+给定保留轮次集合 $\mathcal{D}_{\mathrm{pivot}}$ 和 rollout 组大小 $G$，PivotRL 在每个选中状态处采样 $\{a_i\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot\mid s)$，并优化
+\begin{equation}
+\mathcal{J}_{\mathrm{PivotRL}}(\theta)
+=
+\mathbb{E}_{\substack{
+s\sim \mathcal{D}_{\mathrm{pivot}}\\
+\{a_i\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot\mid s)
+}}
+\left[
+\frac{1}{G}
+\sum_{i=1}^G
+\min\!\Bigl(
+w_i(\theta)\hat{A}_i,\,
+\mathrm{clip}(w_i(\theta),1-\epsilon,1+\epsilon)\hat{A}_i
+\Bigr)
+- D_{\text{KL}}
+\right],
+\label{eq:pivotrl_obj}
+\end{equation}
+其中 $D_{\text{KL}} = \beta \KL(\pi_\theta(\cdot \mid s) \parallel \pi_0(\cdot \mid s))$，并且
+\begin{equation}
+w_i(\theta)
+=
+\frac{\pi_\theta(a_i\mid s)}{\pi_{\theta_{\mathrm{old}}}(a_i\mid s)},
+\label{eq:importance_weight}
+\end{equation}
+$\hat{A}_i$ 则是由局部 verifier 奖励 $\{r_{\mathrm{func}}(s,a_i)\}_{i=1}^G$ 计算得到的式~\eqref{eq:group_adv} 中的组归一化优势。相较于端到端 RL，训练期间唯一需要的在线交互只是给每个轮次级动作打分所需的那段短 rollout。
+
+\begin{algorithm}[t]
+\caption{PivotRL}
+\label{alg:pivotrl}
+\begin{algorithmic}[1]
+\State \textbf{输入：} 专家轨迹 $\mathcal{D}_{\mathrm{sft}}$、参考策略 $\pi_0$、初始策略 $\pi_\theta$、verifier $V$、rollout 组大小 $G$、难度阈值 $\lambda_{\mathrm{diff}}$
+\State 从 $\mathcal{D}_{\mathrm{sft}}$ 中抽取轮次 $\mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}$
+\State 用式~\eqref{eq:profile_stats} 对每个 $s\in\mathcal{D}_{\mathrm{cand}}$ 进行离线分析
+\State 令 $\mathcal{D}_{\mathrm{pivot}}\leftarrow \mathcal{D}_{\mathrm{adv}}$
+\For{$k=1,\dots,K_{\mathrm{train}}$}
+    \State 从 $\mathcal{D}_{\mathrm{pivot}}$ 中采样一个 minibatch $\{s_b\}_{b=1}^B$
+    \For{每个 $s_b$}
+        \State 从 $\pi_{\theta_{\mathrm{old}}}(\cdot\mid s_b)$ 采样 $\{a_{b,i}\}_{i=1}^G$
+        \State 执行给每个 $a_{b,i}$ 打分所需的短 rollout
+        \State 对 $i=1,\dots,G$，令 $r_{b,i}\leftarrow r_{\mathrm{func}}(s_b,a_{b,i})$
+        \State 计算 $\hat{A}_{b,i}\leftarrow \dfrac{r_{b,i}-\frac{1}{G}\sum_{j=1}^G r_{b,j}}{\mathrm{std}(\{r_{b,j}\}_{j=1}^G) + \epsilon_{\mathrm{std}}}$
+    \EndFor
+    \State 使用式~\eqref{eq:pivotrl_obj} 更新 $\theta$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{PivotRL 的理论分析}
+\label{sec:pivotrl_analysis}
+
+接下来我们分析第~\ref{sec:pivotrl_method} 节中的两个设计选择。首先，我们形式化说明：在组归一化的局部 RL 中，为什么“结果混合”的轮次才是值得投入预算的状态。随后，我们证明基于 verifier 的奖励会导向一种保守的、带 KL 正则的更新：它会增加局部可接受动作上的总概率质量，同时保持参考策略在可接受集合内外的相对排序。除特别说明外，本小节中都假设动作空间有限、$\mathcal{M}(s)\neq\emptyset$，且对任意 $s,a$ 都有 $\pi_0(a\mid s)>0$。
+
+\begin{proposition}[只有结果混合的轮次才会产生非零的组归一化更新]
+\label{prop:mixed}
+设 $s$ 为固定状态，$\{r_i\}_{i=1}^G$ 是该状态下一个 rollout 组对应的二值奖励。如果所有奖励都相同，那么式~\eqref{eq:group_adv} 中的归一化优势对每个 $i$ 都等于零。等价地说，只有奖励方差为正的 rollout 组，才会对组归一化更新产生非零贡献。
+\end{proposition}
+
+命题~\ref{prop:mixed} 直接解释了为什么在 RL 之前要先筛轮次：如果某个轮次在局部采样下要么总是容易、要么根本不可能成功，那么把 rollout 预算花在它身上就不会在组归一化训练下改变策略。
+
+对任意定义在 $\mathcal{A}(s)$ 上的分布 $\pi$，记
+\[
+T_\pi
+=
+\left\{
+v:\mathcal{A}(s)\to\mathbb{R}
+\;:\;
+\mathbb{E}_{a\sim\pi}[v(a)]=0
+\right\},
+\qquad
+\langle u,v\rangle_{F,\pi}
+=
+\mathbb{E}_{a\sim\pi}[u(a)v(a)],
+\]
+并令 $\nabla^{\mathrm{nat}}J_s(\pi)\in T_\pi$ 表示在该 Fisher 几何下 $J_s$ 的自然梯度。
+
+\begin{theorem}[奖励方差决定局部 GRPO 信号强度]
+\label{thm:pivot}
+考虑状态级期望奖励目标
+\[
+J_s(\pi)=\mathbb{E}_{a\sim\pi}[r(s,a)],
+\]
+以及 KL 路径
+\[
+\pi_{s,\beta}(a)
+=
+\frac{
+\pi_0(a\mid s)e^{r(s,a)/\beta}
+}{
+\sum_{b\in \mathcal{A}(s)} \pi_0(b\mid s)e^{r(s,b)/\beta}
+}.
+\]
+定义总体 GRPO 分数
+\begin{equation}
+\gamma_{s,\beta}
+:=
+-
+\mathbb{E}_{a\sim \pi_{s,\beta}}
+\left[
+\frac{
+r(s,a)-\mathbb{E}_{a'\sim\pi_{s,\beta}}[r(s,a')]
+}{
+\sqrt{\mathrm{Var}_{a'\sim\pi_{s,\beta}}(r(s,a'))}
+}
+\,\partial_\beta \log \pi_{s,\beta}(a)
+\right].
+\label{eq:grpo_score}
+\end{equation}
+则有
+\begin{equation}
+\gamma_{s,\beta}
+=
+\frac{1}{\beta^2}
+\left\|
+\nabla^{\mathrm{nat}}J_s(\pi_{s,\beta})
+\right\|_{F,\pi_{s,\beta}}
+=
+\frac{
+\sqrt{\mathrm{Var}_{a\sim\pi_{s,\beta}}(r(s,a))}
+}{\beta^2}.
+\label{eq:pivot_theorem}
+\end{equation}
+特别地，在固定 $\beta$ 的情况下，奖励方差越大的状态，其自然梯度范数与总体 GRPO 分数也越大。
+\end{theorem}
+
+\paragraph{解释。}
+定理~\ref{thm:pivot} 针对理想化的、带 KL 正则的状态级更新路径 $\pi_{s,\beta}\propto \pi_0 e^{r(s,\cdot)/\beta}$，给出了一个总体、路径级的结论。它表明，对于组归一化局部 RL 来说，奖励方差并不只是启发式诊断量，而是 KL 路径上局部自然梯度信号的精确尺度。对二值 verifier 奖励而言，更大的方差意味着这个轮次上成功与失败更加混合，这正是 PivotRL 要优先筛选此类轮次的原因。
+
+\begin{theorem}[功能奖励以最小 KL 变化把概率质量推向可接受动作]
+\label{thm:kl}
+固定 $\beta>0$，考虑带正则项的目标
+\begin{equation}
+\mathcal{L}_{\mathrm{func},\beta}(\pi)
+=
+\mathbb{E}_{s\sim d}
+\left[
+-
+\mathbb{E}_{a\sim\pi(\cdot\mid s)}[r_{\mathrm{func}}(s,a)]
++
+\beta\,\mathrm{KL}\!\bigl(\pi(\cdot\mid s)\,\|\,\pi_0(\cdot\mid s)\bigr)
+\right],
+\label{eq:kl_obj}
+\end{equation}
+其中 $r_{\mathrm{func}}(s,a)=\mathbf{1}[a\in \mathcal{M}(s)]$，$d$ 为一个固定的状态分布。对每个状态 $s$，定义
+\begin{equation}
+\rho(s)=\pi_0(\mathcal{M}(s)\mid s),
+\qquad
+q_\beta(s)
+=
+\frac{\rho(s)e^{1/\beta}}{(1-\rho(s))+\rho(s)e^{1/\beta}}.
+\label{eq:qbeta}
+\end{equation}
+那么，$\mathcal{L}_{\mathrm{func},\beta}$ 存在唯一极小化解 $\pi_\beta^*$，使得对每个状态 $s$（在 $d$-几乎处处意义下）都有
+\begin{equation}
+\pi_\beta^*(\mathcal{M}(s)\mid s)=q_\beta(s)\ge \rho(s),
+\label{eq:mass_shift}
+\end{equation}
+且当 $0<\rho(s)<1$ 时不等号严格成立。进一步地，在所有满足式~\eqref{eq:mass_shift} 的分布中，$\pi_\beta^*(\cdot\mid s)$ 是
+\[
+\mathrm{KL}\!\bigl(\pi(\cdot\mid s)\,\|\,\pi_0(\cdot\mid s)\bigr)
+\]
+的唯一极小化解，并且它保持了参考策略在 $\mathcal{M}(s)$ 及其补集 $\mathcal{M}(s)^c$ 内部的相对排序：
+\begin{align}
+\label{eq:conditional-distibution}
+\frac{\pi_\beta^*(a\mid s)}{\pi_\beta^*(b\mid s)}
+=
+\frac{\pi_0(a\mid s)}{\pi_0(b\mid s)}
+\quad
+\text{当 } a,b\in \mathcal{M}(s),
+\qquad
+\frac{\pi_\beta^*(a\mid s)}{\pi_\beta^*(b\mid s)}
+=
+\frac{\pi_0(a\mid s)}{\pi_0(b\mid s)}
+\quad
+\text{当 } a,b\in \mathcal{M}(s)^c.
+\end{align}
+\end{theorem}
+
+\paragraph{解释。}
+定理~\ref{thm:kl} 分离出了功能奖励本身的作用：它表明，基于功能奖励的 RL 所得到的极小策略，等价于把参考策略做 KL 投影，投影到“在可接受动作上拥有更高概率质量 $q_\beta(s)$”的策略集合上。由式~\eqref{eq:conditional-distibution} 可知，功能奖励 RL 会同时保持（i）可接受动作集合内部，以及（ii）其补集内部的条件分布不变。由于助手轮次的动作空间呈指数级大，任意给定动作通常只与单个任务相关。在这一假设下，不可接受动作的补集可视为与当前任务无关的动作集合，因此这些与任务无关动作之间的相对排序会被保留，这也解释了 PivotRL 为什么能够较好地保留 OOD 性能。

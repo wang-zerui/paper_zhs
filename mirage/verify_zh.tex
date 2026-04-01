@@ -1,0 +1,89 @@
+\section{概率等价验证器}
+\label{sec:verify}
+
+\sys 的{\em 概率等价验证器}用于检验候选 \graph 是否与目标 \lax 程序等价。
+其核心思想是在两个有限域中对两者使用{\em 随机输入}进行求值。
+使用有限域而非浮点数，不仅避免了浮点误差，还提供了强有力的理论保证：接受不等价 \graph 的概率可以被降至任意低。
+
+对于一般程序，随机测试几乎无法提供任何正确性保证。
+然而，我们证明了对于 \lax 程序（以下正式定义），随机测试提供了概率正确性保证，且重复测试可以将错误概率降低到任意小的阈值。
+
+先前的工作~\cite{wang2021pet} 将类似的技术应用于只含线性运算符（如矩阵乘法、卷积）的张量程序的等价性检验。
+我们开发了一种也支持除法和指数运算的随机测试技术，这对许多 DNN 优化是必要的（例如 \S\ref{sec:case2} 中的 RMSNorm 示例）。
+
+\sys 对以下定义的 \lax \graphs（\underline{l}inear——线性，division——除法，\underline{a}n e\underline{x}ponential——一个指数运算）验证等价性。我们在 \S\ref{subsec:theory} 中介绍主要理论结果，并在 \S\ref{subsec:random_tests} 中介绍 \sys 的验证方法。
+
+\begin{definition}[\lax \graph]
+若 \graph $G$ 满足以下条件，则称其为 \lax \graph：（1）$G$ 只包含多线性运算符\footnote{具有 $n$ 个输入的运算符 $\er{op}$ 是多线性的，若 $\er{op}$ 对所有输入 $I_k$ 均为线性：(1) $\forall X, Y. \er{op}(I_1,...,I_{k-1},X,I_{k+1},...,I_n)+\er{op}(I_1,...,I_{k-1},Y,I_{k+1},...,I_n)=\er{op}(I_1,...,I_{k-1},X+Y,I_{k+1},...,I_n)$，以及 (2) $\alpha \cdot \er{op}(I_1,...,I_{k-1},X,I_{k+1},...,I_n) = \er{op}(I_1,...,I_{k-1},\alpha\cdot X,I_{k+1},...,I_n)$。}、除法和指数运算，且（2）$G$ 中从输入到输出的每条路径上最多包含一次指数运算。
+\end{definition}
+
+\subsection{理论基础}
+\label{subsec:theory}
+不失一般性，假设 \lax \graph $G$ 接受 $n$ 个输入张量并产生一个输出张量。
+我们的理论结果可以直接推广到具有多个输出的 \lax \graph。
+由于每个 \lax \graph 包含线性运算符、除法以及每条路径上至多一次指数运算，
+输出张量每个元素的计算可以表达为以下形式（通过使用标准恒等式，如 $\frac{\frac{a}{b}}{\frac{c}{d}} = \frac{ad}{bc}$，$\frac{a}{b} + \frac{c}{d} = \frac{ad+bc}{bd}$，$e^{x}e^{y}=e^{x+y}$）：
+\begin{equation}
+\label{eq:lax}
+\frac{\sum_{i=1}^k f_i \exp(g_i/h_i)}{\sum_{i=1}^{k'} f'_i \exp(g'_i/h'_i)}
+\end{equation}
+其中 $f_i$、$g_i$、$h_i$、$f_j'$、$g_j'$ 和 $h_j'$（$1\leq i \leq k$，$1 \leq j \leq k'$）是输入张量元素上的多项式。
+
+支撑我们随机等价验证的主要理论结果是以下定理，它将有限域上的多项式恒等测试（PIT）~\cite{schwartz1980fast, zippel1979probabilistic} 推广到了 \lax \graphs。注意，两个 \lax \graphs 之差也具有 \Cref{eq:lax} 的形式。因此，两个 \lax \graphs 的恒等测试归结为测试该形式的表达式是否为零。
+由于存在指数运算，我们使用两个有限域而非一个。\footnote{我们使用两个素数 $p$ 和 $q$ 分别对指数外和指数内的值进行多项式恒等测试~\cite{schwartz1980fast, zippel1979probabilistic}。条件"$q$ 整除 $p-1$"是为了确保 $q$ 次单位根在 $\mathbb{Z}_p$ 中存在。}
+
+\begin{theorem}
+\label{thm:zero_test}
+设 $P$ 是 \Cref{eq:lax} 所描述形式的函数，
+其中 $f_i, g_i, h_i, f_i', g_i', h_i'$ 是整数系数在 $[-w, w]$ 范围内、次数至多为 $d$ 的非零多项式。设 $p, q$ 为素数，满足 $q \mid p-1$ 且 $q > 2w$。设 $\mathcal{G}$ 为 $\mathbb{Z}_p$ 中的 $q$ 次单位根集合。若 $P$ 不是零函数，则~\cite{identitytesting}
+\[
+\Pr_{(\vec u, \vec v, \omega) \gets \mathbb{Z}_p^N\times \mathbb{Z}_q^N \times \mathcal{G}}\left[\frac{\sum_{i=1}^k f_i(\vec u) \omega^{g_i(\vec v)/h_i(\vec v)}}{\sum_{i=1}^{k'} f'_i(\vec u) \omega^{g'_i(\vec v)/h'_i(\vec v)}}\right] \le 8dk^4/q + q^{-1/k^2}.
+\]
+\end{theorem}
+
+\subsection{有限域上的随机测试}
+\label{subsec:random_tests}
+
+\begin{table}
+    \centering
+    \caption{随机测试的算术运算。\sys 选取两个满足 $q$ 整除 $p-1$ 的素数 $p$ 和 $q$。$x_p$ 和 $x_q$ 分别是有限域 $\mathbb{Z}_p$ 和 $\mathbb{Z}_q$ 中的值。记号 $x^{-1}$ 和 $\sqrt{x}$ 分别表示对应有限域中 $x$ 的乘法逆元和平方根。具体地，$xx^{-1} \bmod p = 1$ 且 $\sqrt{x}\sqrt{x} \bmod p = x$。}
+    \vspace{\captionvspace}
+    \label{tab:fingerprint}
+    \resizebox{\columnwidth}{!}    
+    {%
+    \footnotesize
+    \begin{tabular}{c|c|c|l}
+    \toprule
+    {\bf 运算} & {\bf 操作数 1} & {\bf 操作数 2} & {\bf 输出} \\
+    \midrule
+    加法 & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big((x_p + y_p) \bmod{p}, (x_q + y_q) \bmod{q}$\big) \\
+    减法 & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big((x_p - y_p) \bmod{p}, (x_q - y_q) \bmod{q}$\big) \\
+    乘法 & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big(x_py_p \bmod{p}, x_qy_q\bmod{q}\big)$ \\
+    除法 & $(x_p, x_q) $ & $(y_p, y_q)$ & $\big(x_py_p^{-1} \bmod{p}, x_qy_q^{-1}\bmod{q}\big)$ \\
+    指数 & $(x_p, x_q) $ & $ - $ & $\big(\omega^{x_q} \bmod{p}, -\big)$ \\
+    平方根 & $(x_p, x_q)$ & $ - $ & $(\sqrt{x_p}, \sqrt{x_q})$ \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{table}
+
+\sys 利用 \Cref{thm:zero_test}，通过在 \Cref{thm:zero_test} 定义的有限域 $\mathbb{Z}_p$ 和 $\mathbb{Z}_q$ 上执行随机测试，来概率性地验证两个 \graphs 的等价性。
+为了检验两个 \graphs 的等价性，\sys 首先生成输入张量，其中每个元素均匀采样自 $\mathbb{Z}_p \times \mathbb{Z}_q$。
+\sys 还从 $\mathbb{Z}_p$ 中的 $q$ 次单位根集合中均匀采样 $\omega$，用于指数运算。
+\sys 随后使用 \Cref{tab:fingerprint} 中定义的运算对这些输入求值两个 \graphs。
+如 \S\ref{subsec:theory} 中所述，$\mathbb{Z}_p$ 和 $\mathbb{Z}_q$ 分别用于指数外和指数内的计算。
+除指数运算外，所有运算均通过在 $\mathbb{Z}_p$ 和 $\mathbb{Z}_q$ 中独立进行模运算来实现。
+对于指数运算，\sys 使用 $\mathbb{Z}_q$ 中的值 $x_q$，并计算 $\omega^{x_q} \bmod p$ 以得到 $\mathbb{Z}_p$ 中的结果。
+
+注意，在 \lax \graph 中，每条路径上最多只进行一次指数运算。
+最后，\sys 检查两个 \graphs 是否产生相同的输出。
+该过程重复多次，若两个 \graphs 通过所有随机测试，则认为它们等价。
+以下定理由 \Cref{thm:zero_test} 推导，表明该过程可以达到任意低的错误率。
+
+\begin{theorem}
+\label{thm:prob}
+等价的 \graphs 始终通过 \graph 验证。
+对于两个不等价的 \graphs 以及给定的概率阈值 $0<\delta\leq 1$，这两个 \graphs 通过所有 $\Omega(\frac{k^2}{\ln q}\cdot \ln\frac{1}{\delta})$ 次随机测试的概率至多为 $\delta$。
+\end{theorem}
+
+\paragraph{数值稳定性。}虽然定理将有限域与实数计算联系起来，但在浮点运算中——尤其是涉及大中间值导致的溢出或下溢时——可能出现与实数计算的差异。\sys 使用浮点测试来过滤掉具有显著数值误差的 \graphs。

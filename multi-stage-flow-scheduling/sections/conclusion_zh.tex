@@ -1,0 +1,26 @@
+\section{讨论}
+
+\parab{更多并行方式。} 尽管 \sys 主要关注专家并行与序列并行，我们也意识到仍存在一些未在评估中显式覆盖的并行策略。张量并行虽然在服务系统中被广泛采用，但通常局限于单机内互连（如 NVLink），不会直接与跨节点带宽发生竞争。类似地，我们也没有显式讨论流水线并行，因为 prefill 阶段通常对时延极其敏感（因此要求较低甚至为零的 PP 度数~\cite{distserve}），而其通信量相较于 KV cache 搬运或集合通信要小几个数量级~\cite{liao2025mixnet}。如果这类流确实出现在共享网络上，它们会被识别为阶段 2 流量，因此仍与我们的分析兼容。这一观察也适用于新兴并行策略：尽管它们可能引入新的通信模式和更强的重叠能力，但一旦延迟仍会阻塞依赖计算。
+
+\parab{混合模型部署。}
+在真实部署中，服务提供者往往维护分层的模型组合：一个大型旗舰模型配合多个较小模型，共同服务多样化工作负载~\cite{openai2024gpt4}。
+在这种环境下，网络争用主要来自不同模型之间并发的 KV cache 传输（阶段 1 和阶段 3），因为集合通信通常被限制在隔离的机架或专用 pod 内部~\cite{deepseektech}。
+虽然本文未显式评估多模型部署场景，但 \sys{} 的调度原则仍适用于共享网络上的 KV cache 流量。
+这一方向很有前景，但如何整体协调多模型争用格局，仍是一个研究尚不充分的设计空间。
+
+\parab{对 scale-up 互连的适用性。} 虽然 \sys 聚焦于 scale-out 网络，其设计原则同样可以扩展到 scale-up 领域（如 NVL~\cite{nvidia_gb200_nvl72}、UB~\cite{huawei384} 等）。当多个服务实例共同部署时，集合通信与 KV Cache 搬运之间的争用依然存在。\sys 的调度策略可以借助硬件级隔离机制（如虚拟通道或流量类别）有效迁移到这类架构上，从而实现差异化优先控制。
+
+\parab{与 GPU 发起式集合通信的兼容性。} 尽管新兴的 GPU 发起式通信~\cite{nvidia_nvshmem_ibgda,deepseek_deepep_2024}能够优化 decode 阶段的小消息时延，但由于硬件前提严格、对大体量传输收益有限，它在 prefill 部署中仍不常见。即便在这类环境中，\sys 仍可通过 CPU 辅助变体（如主机侧 doorbell）保持兼容；尽管相较完全 GPU 发起执行，这种方式可能引入可忽略的额外时延~\cite{nvidia_magnum_nvshmem3}。
+
+\section{相关工作}
+
+\parab{流与协同流调度。}
+传统流调度主要优化平均流完成时间~\cite{dctcp,dcqcn,pfabric,PDQ,pias,li2017rate,li2024flow}或截止满足率~\cite{D3,d2tcp,PDQ,zhang2015guaranteeing}等单流指标，对应策略包括 SJF 和 EDF。
+Coflow 调度~\cite{varys,Aalo,zhang2016coda,zhao2015rapier,susanto2016stream,agarwal2018sincronia,wan2025coflow}进一步把相关流组成一个整体，以优化数据并行工作负载中的 Coflow Completion Time；而混合流调度~\cite{karuna}则考虑截止敏感流量与尽力而为流量共存的情形。与之相比，\sys{} 显式刻画多阶段依赖关系，并以端到端 TTFT 达成为目标进行流调度。
+
+\parab{针对单个阶段的优化。} 既有研究多半聚焦于孤立通信阶段的优化。对于集合通信，已有工作通过算法综合~\cite{shah2023taccl,cao2025syccl}、解决潜在争用~\cite{cao2024crux,rajasekaran2024cassini}、或利用系统级流水线增强重叠~\cite{comet,zheng2025triton,hong2025flashoverlap}来提升性能。与此同时，另一些工作则通过预取隐藏时延~\cite{mooncakefast,splitwise}、块合并~\cite{li2025flowkv,chen2024kvdirect}与多路径传输~\cite{wu2026dualpath}来优化 KV cache 传输，或者通过牺牲模型质量来降低传输数据量~\cite{cachegen}。然而，这些方法都将各个阶段孤立处理，忽视了集合通信与 KV cache 传输之间的潜在争用。
+
+\parab{LLM 服务系统。} 近年来，LLM 服务系统的发展主要沿两条互补路径展开。从架构上看，系统采用 prefill-decode 解耦~\cite{distserve,splitwise}与 KV-cache 复用~\cite{mooncakefast,cachedattention}来提升吞吐并避免重复计算。从编排角度看，大量请求调度器~\cite{thunderserve,stojkovic2025dynamollm,chen2025slos,hongsola,tempo2025}被提出，用以最大化 SLO 达成率。然而，这些系统主要聚焦于理想网络假设下的计算效率优化。\sys 与这些工作是正交的：它填补了它们所忽视的网络争用问题。
+
+\section{结论}
+本文提出了 \sys{}，一个面向 LLM 服务的整体式多阶段流调度框架，目标是提升端到端 TTFT SLO 达成率。\sys{} 建立在这样一个观察之上：随着 prefill 执行推进，请求级截止时间会逐步具体化为显式的流级截止时间。其核心是实现了一种 Defer-and-Promote 调度原则，在无需精确估计松弛度的情况下近似 Least-Laxity-First 行为。通过原型实现与广泛评估，我们表明 \sys{} 能够在多种模型与工作负载下稳定提升 TTFT SLO 达成率。

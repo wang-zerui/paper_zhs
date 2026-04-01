@@ -1,0 +1,40 @@
+\section{预备知识与动机性观察}
+\label{sec:prelim}
+
+\paragraph{轮次级智能体训练。}
+设 $\tau$ 为在智能体任务中收集得到的一条交互轨迹。将 $\tau$ 按照助手决策边界分解，可得 $\tau=(s_{0},a_{0}^*,\ldots,s_{T},a_{T}^*)$，其中 $s_{t}$ 表示从轨迹 $\tau_i$ 起点到第 $t$ 个助手动作之前的完整交互历史，$a_{t}^*$ 则是在该状态上的演示助手续写。在轮次级智能体训练中，一个\emph{动作}指的是一次模型调用边界上的完整助手续写，而不是单个 token。SFT 的标准负对数似然损失为
+\begin{align*}
+    \mathcal{L}_{\mathrm{sft}}(\theta) = -\mathbb{E}_{\tau \sim \mathcal{D}_{\mathrm{sft}}, (s_t,a_t^*) \sim \tau} [\log \pi_\theta(a^*_t \mid s_t)].
+\end{align*}
+记 $\pi_0$ 为参考策略，E2E RL 从 $\pi_{\old}$ 采样 rollout，并优化 GRPO~\citep{shao2024deepseekmath} 目标：
+\begin{align*}
+    \mathcal{J}_{\mathrm{GRPO}}(\theta) = \mathbb{E}_{\substack{s \sim \mathcal{D}_{\pi_{\old}} \\ a_i \sim \pi_{\old}(\cdot \mid s)}} \left[ \frac{1}{G} \sum_{i=1}^G \min \left( w_i(\theta) \hat{A}_i, \operatorname{clip}(w_i(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_i \right) - \beta \KL(\pi_\theta(\cdot \mid s) \parallel \pi_0(\cdot \mid s)) \right]
+\end{align*}
+其中 $w_i(\theta) = \frac{\pi_\theta(a_i \mid s)}{\pi_{\old}(a_i \mid s)}$ 是重要性采样权重，$\mathcal{D}_{\pi_{\old}}$ 表示 on-policy rollout 轨迹中状态 $s_t$ 的分布，而
+\begin{equation}
+\hat{A}_i
+=
+\frac{
+r_i-\frac{1}{G}\sum_{j=1}^G r_j
+}{
+\mathrm{std}(\{r_j\}_{j=1}^G) + \epsilon_{\mathrm{std}}
+}.
+\label{eq:group_adv}
+\end{equation}
+表示在 $G$ 个采样到的端到端 rollout 组内进行归一化后的优势。
+
+\paragraph{来自专家轨迹的局部 RL。}
+为了规避完整端到端轨迹生成带来的高计算成本，我们考虑一种局部 RL 范式。在这个设定中，我们不再从初始环境状态展开完整交互直到终止，而是直接使用 SFT 数据集中的中间专家状态 $s_t$ 作为条件，并从这些状态出发进行有针对性的轮次级 rollout。给定专家轨迹数据集 $\mathcal{D}_{\mathrm{sft}}=\{\tau_i\}_{i=1}^N$，一种最直接的适配方式是：先采样一个状态 $s_t$，再从 $\pi_{\theta}(\cdot \mid s_t)$ 采样动作；只有当该动作与演示续写完全一致时才给奖励：
+\begin{equation}
+r_{\mathrm{strict}}(s,a)=\mathbf{1}[a=a^*(s)].
+\label{eq:strict_reward}
+\end{equation}
+这种做法是把 SFT 演示转换为局部 RL 框架的最直接方式：交互历史被严格固定在专家轨迹上，随后动作按当前策略采样，信用分配只在完美复现演示续写时才给出。然而，$\tau^2$-Bench 上的经验结果表明，这种朴素局部 RL 相比于同数据的行为克隆只带来极其有限的收益，其准确率仅为 $57.34$，甚至低于同数据 SFT 的 $58.44$。因此，仅仅把专家演示转写为基于精确匹配奖励的局部 RL episode，并不足以带来实质性性能改进。
+
+\paragraph{动机性观察。}
+通过初步实验，我们发现 rollout 预算分配与局部信用分配存在两个瓶颈。 \emph{第一，若某个轮次上的动作要么全部成功、要么全部失败，那么在组归一化 RL 下它是没有信息量的。} 事实上，如果一批奖励 $\{r_i\}_{i=1}^G$ 全部为 0 或全部为 1，那么式~\eqref{eq:group_adv} 中的归一化优势就为零。我们在 $\tau^2$-Bench 和 SWE-Bench 上观察到，随机采样的轮次中有 $71\%$ 会产生 $0$ 学习信号，也就是说它们要么已经全部被解决，要么全部失败，对梯度没有贡献。 \emph{第二，精确匹配的局部信用过于严格。} 在生成式动作空间里，许多工具调用、shell 命令或搜索步骤在局部上是可接受的，即使它们与唯一的演示字符串并不完全相同。将精确匹配与更宽松的 verifier 奖励 $r_{\mathrm{func}}$（见第~\ref{sec:pivotrl_method} 节）比较，我们定义 miss rate 为 $\Pr\!\left[
+r_{\mathrm{strict}}(s,a)=0
+\;\middle|\;
+r_{\mathrm{func}}(s,a)=1
+\right].$
+较高的 miss rate 意味着，精确匹配会错误地丢弃在当前决策点上实际上功能正确的 rollout。这两个瓶颈正好对应 PivotRL 的两个核心组成部分：首先筛选出 \emph{pivot}，也就是仍然会产生混合结果的高信息轮次；其次，用奖励局部可接受动作的 verifier 取代精确匹配信用。

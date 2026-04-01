@@ -1,0 +1,92 @@
+% =============================================================================
+\section{维度 1：工作负载刻画}
+\label{sec:workload}
+% =============================================================================
+
+我们的集群优化工作~\cite{poolrouting2026, fleetopt2026, fleetsim2026}表明，工作负载刻画会驱动其余设计决策。我们沿着四条轴线来组织工作负载。
+
+\subsection{聊天 vs.\ 智能体工作负载}
+\label{sec:workload:chat-agent}
+
+聊天工作负载（LMSYS-Chat-1M~\cite{zheng2024lmsys}，以及与 Splitwise~\cite{patel2024splitwise}一同发布的 Azure LLM Inference Trace）以短提示为主：80--95\% 的请求低于 8K token，但向 64K+ 方向存在长尾。智能体工作负载（SWE-bench~\cite{jimenez2024swebench}，BFCL~\cite{patil2025bfcl}）则呈现出另一种模式：随着工具输出不断累积，其提示长度会随轮次数确定性地增长。ServeGen~\cite{servegen2025}报告说，相比聊天机器人，智能体每个用户请求会触发 3--10$\times$ 更多的 LLM 调用。
+
+这两类工作负载都是\emph{多轮}的，但它们的会话结构不同。聊天会话是对话式的：每一轮都隐含携带来自之前交互的上下文，用户可能在轮次之间切换话题、提供修正，或者逐步升级跨轮的对抗性试探。智能体会话则是任务驱动的：随着工具输出不断累积，上下文单调增长，并且会话在任务完成或失败时终止。像 OpenAI Responses API 这样的多轮 API，会显式编码这些模式，提供对话状态管理与逐轮优化，而这些是单请求路由无法利用的。一个具备多轮感知的路由器之所以必须维护会话上下文，原因有二：KV-cache 亲和性，以及路由信号质量。先前的轮次暴露出用户意图、主题漂移、难度升级和安全违规，而这些都是单轮分类器会遗漏的。
+
+我们的资源池路由论文~\cite{poolrouting2026}第一次明确展示了聊天/智能体区分如何创造路由机会：在同构 64K 集群中，那 80--95\% 的短聊天请求实际上被过度供给了，导致 $7/8$ 的 KV-cache 槽位被浪费。与之相对，智能体会话按轮次确定性增长这一特征意味着，基于会话感知的预测很可能优于基于类别的 EMA 路由。
+
+\paragraph{记忆管理是隐藏的成本放大器。}
+除去上下文本身的增长，多轮会话还要面对一个由记忆管理失败引出的复合成本问题。当 LLM 产生幻觉或者选错工具时，错误输出会进入对话历史，并在后续每一轮都被重新发送，组织会为这些\emph{降低了}准确率的内容继续支付输入 token 成本。智能体要么容忍被污染的上下文，从而冒着进一步发生自我条件化错误的风险~\cite{driftbench2026}，要么必须额外发起 LLM 调用，对这些错误轮次进行摘要、压缩或移除，然后才能继续。AgentHallu~\cite{agenthallu2026}对这一挑战做了基准测试：即便是前沿模型，在定位“哪一步导致了幻觉”上的准确率也只有 41.1\%，而面对工具使用型幻觉时甚至会降到 11.6\%，这使得有针对性的清理既不可靠，也往往迫使系统退回到昂贵的全上下文重摘要。
+
+一份综合性的记忆综述~\cite{memorysurv2026}总结了智能体记忆的五类机制，即驻留在上下文内的压缩、检索增强存储、反思式自我改进、分层虚拟上下文，以及策略学习式管理；它们各自有不同的成本轮廓。另一项直接比较成本与性能的研究~\cite{memcost2026}表明，在 100K token 上下文长度下，即使启用 prompt caching，逐轮推理收费仍会随着上下文长度同比增长，而基于事实的记忆系统在大约十轮之后就会变得更便宜，这恰好处于智能体会话所处的区间。上下文压缩能够缓解这一问题：ACON~\cite{acon2025}通过基于失败的指南优化，在保持 95+\% 任务准确率的同时，将峰值 token 数减少 26--54\%；Focus~\cite{focus2026}则在 SWE-bench 任务上通过自主智能体驱动的上下文剪枝，节省 22.7\% 的 token。问题在于，这些方法都发生在智能体一侧，只优化单个会话。这里存在一个根本限制：SAMULE~\cite{samule2025}表明，\emph{单轨迹}反思，也就是单个智能体所能获得的唯一层级，只会产生狭窄的错误修正；而\emph{跨任务}学习会在不同会话中聚合失败模式，从而得到可迁移的洞见，显著优于逐会话基线。CORRECT~\cite{correct2025}进一步强化了这一点：多智能体错误会以相似结构跨请求重复出现，而一个由既往会话提炼而来的在线错误模式缓存，可将步骤级错误定位能力提高多达 19.8\%。Mistake Notebook Learning~\cite{mnl2025}也展示了同样的原则：基于批量聚类的失败分析，可以生成无需参数更新即可防止已知陷阱的通用性指导。
+
+路由器在这里具备一种结构性优势，可以直接利用这种跨会话可迁移性：它观察来自所有租户、所有领域的数千个会话结果，并把失败模式聚合到一个按 \emph{(model, domain, failure-class)} 组织的表中（\Cref{opp:failure-routing}）。与之相比，单个智能体只能看到自己的会话，样本量太少，不足以建立可靠的失败统计，也不足以发现领域特定的压缩策略，例如“编码会话允许激进地剪掉前期失败工具轨迹；医疗会话则必须保留完整上下文用于合规审计”。路由器把这类跨会话智能作为一个集群级服务立即提供给每个智能体，连那些原本会遭遇冷启动的新智能体也能立刻受益。
+
+\paragraph{网关原生助手与集群可观测性。}
+OpenClaw~\cite{openclaw2026}提供了这一模式的一个具体开源实例，即\emph{个人助手 + 本地优先网关}：用户通过多种消息渠道与智能体交互，而一个 WebSocket Gateway 负责协调会话、工具执行（浏览器、自动化、设备节点）和模型调用。这类部署会产生冗长而杂乱的多轮轨迹，包括工具结果、重试、渠道切换与上下文压缩事件，而固定的学术基准往往捕捉不到这些现象。推理路由器位于这些网关发出的模型流量的热路径上，因此它可以记录：哪种模型、哪种工具表面、哪条安全路径与短会话或失控会话相关。跨租户聚合这些轨迹，可以为离线 RL 与集群先验数据集提供输入，而单个本地助手根本无法积累到这样的数据量（\Cref{opp:session-cascade}, \Cref{opp:tool-pruning}）。反过来，围绕 token 和轮次最小化而调优的路由策略，也会反向影响运营者在网关上对默认模型和工具预算的选择。
+
+\paragraph{代理层的指令、工具与记忆表面。}
+ITR~\cite{itr2026}会在每个智能体步骤上检索最小化的 system instruction 片段和缩减后的工具子集；在作者自己的受控智能体基准上，它报告说每步上下文 token 数下降约 $\sim$95\%，而且正确工具路由有明显提升，因为一整套大型工具目录本身就可能吃掉约 $\sim$90\% 的上下文窗口。相同的机制也可以放到推理\emph{网关}层实现，即在请求到达模型前重写 \texttt{tools} 载荷和 system 块，这样即便某些框架总是把完整工具目录一并发送，也仍然能从集群级校准中受益。ToolScope~\cite{toolscope2025}在智能体一侧合并和过滤工具；SMART~\cite{smart2026}则表明，抑制工具滥用可以同时改善成本和下游准确率。一个能够协调缩减、合并提示和预算信号（BATS~\cite{bats2025}）的路由器，可以避免在每个 SDK 里重复实现互不兼容的策略。最后，记忆不只是“智能体记住了什么”，更是\emph{下一次 prefill 要为哪些内容付费}：MemCost 风格的分析~\cite{memcost2026}说明了何时事实存储优于原始上下文，而会话感知调度器（AgServe~\cite{agserve2025}，Continuum~\cite{continuum2025}）则把 KV-cache 生命周期与多轮结构当作一等资源。路由器天然适合在“完整历史、注入摘要、检索优先 prefill”之间做出选择，以同时降低 token 数与错误累积，而后者本来会拉长会话轮数（\Cref{opp:gateway-agent-loops}）。
+
+\subsection{暖请求 vs.\ 冷请求}
+\label{sec:workload:warm-cold}
+
+\emph{暖请求}会命中来自前一轮或共享系统提示的 KV-cache 前缀；\emph{冷请求}则从零开始。缓存 token 的成本最高可降低 $10\times$~\cite{llmd2026kvcache}，而在分布式部署中，带有前缀缓存感知的调度甚至可实现 $57\times$ 更快的响应时间~\cite{llmd2026kvcache}。
+
+对于智能体工作负载而言，会话时间的 40--60\% 都花在被暂停的工具调用上，这会让 LRU 驱逐把缓存命中率摧毁掉~\cite{vllm2026rfc37003}。会话亲和路由，也就是尽量把一个会话保留在同一资源池实例上，可以保住 KV-cache 局部性。更高层面上，类别感知语义缓存~\cite{wang2025cache}可以与之互补：它依靠领域感知的相似度阈值和 TTL，直接消除冗余推理请求，也就是对语义等价的查询直接返回缓存响应，而不再调用 LLM，从而同时降低成本和资源池负载。
+
+\subsection{Prefill 主导 vs.\ Decode 主导工作负载}
+\label{sec:workload:prefill-decode}
+
+视觉语言模型会把图像编码成数百个视觉 token，因此 VLM 工作负载属于\emph{prefill 主导}。我们的 AVR 系统~\cite{avr2026}正面处理了这个问题：CUA 截图约为 $\sim$5\,MB，而对 4K 截图做路由，要求路由层本身先抽取多模态信号。FastRouter~\cite{fastrouter2026}则表明，传统 NLP 压缩可以把路由器输入限制在大约 $\sim$512 token，无论原始提示多长，这使得 prefill 主导工作负载对路由层而言也变得可处理。
+
+编码智能体则属于\emph{decode 主导}：代码生成会产生长而结构化的输出。decode 比例会直接影响解耦 prefill/decode 架构（Splitwise~\cite{patel2024splitwise}、DistServe~\cite{zhong2024distserve}）是否有收益，而我们的 inference-fleet-sim~\cite{fleetsim2026}明确建模了这一权衡。
+
+\subsection{工作负载身份信号}
+\label{sec:workload:identity}
+
+我们先前的工作把入站请求当作不透明文本，并通过内容分析来推断工作负载类型，例如嵌入相似度、关键词匹配和领域分类器。实际上，请求结构本身就携带了丰富的身份信号，路由器无需检查内容就能利用它们，从而打开零延迟工作负载分类的可能。
+
+\paragraph{显式的 API 层信号。}
+现代推理 API 已经暴露出能够区分智能体与聊天工作负载的结构化元数据：
+\begin{itemize}[nosep]
+  \item \textbf{工具定义。} 带有 \texttt{tools} 数组和函数 schema 的请求几乎一定是智能体工作负载；工具的数量和类型（代码执行、Web 搜索、MCP 连接器）还能进一步标识智能体所处的操作模式。工具目录本身就是一个成本杠杆：ITR~\cite{itr2026}表明，动态地只暴露每一步所需的最小工具子集，能够让每步上下文 token 减少 95\%，同时使正确工具路由提高 32\%，因为大型工具目录最多可消耗 90\% 的可用上下文。
+  \item \textbf{会话链。} 像 \texttt{previous\_response\_id}（OpenAI Responses API）或对话状态对象这类字段，表示这是多轮续接。它们的存在告诉路由器该请求位于会话中段（因此可以启用 KV-cache 保留，见 \Cref{opp:kv-retention}），同时无需解析整个对话历史就能知道当前轮次编号。
+  \item \textbf{系统提示指纹。} 系统提示通常在同一部署中是静态的，因此可在网关层做哈希。一个已知哈希查找表能够把每个部署映射到其领域、预期工具集和历史会话长度分布，从而让路由器以零分类成本拿到每请求先验。
+  \item \textbf{网关元数据头。} 生产网关（如 Cloudflare AI Gateway 的 \texttt{cf-aig-metadata}、LiteLLM 的 \texttt{x-litellm-tags}，以及自定义 \texttt{X-Client-Request-Id} 头）已经允许运营者用环境、团队和工作负载类型标签来标注请求。SIRP~\cite{sirp2025}则把这种做法标准化为分类轴头字段。
+\end{itemize}
+
+\paragraph{调用者身份与授权范围。}
+上面四类信号描述的是请求\emph{是什么}。但它们都没有描述\emph{是谁}发起了这个请求，也没有描述\emph{他/它被授权做什么}。每个 LLM API 调用里携带的 bearer token 恰好填补了这一空白：在生产网关中，它同时编码了调用者身份\emph{以及}授权范围，例如某个 key 能访问哪些模型、能调用哪些工具、能消耗多少预算。
+\begin{itemize}[nosep]
+  \item \textbf{按 key 的工具权限。}
+        LiteLLM 的 Tool Permission Guardrail~\cite{litellm2026toolguard}使用正则匹配工具名和参数，为每个 key 执行工具的 allow/deny 规则。它提供两种模式，即 \emph{block}（拒绝请求）与 \emph{rewrite}（在模型看到之前剥离掉不允许的工具），这说明在网关层做“按调用者范围治理工具”的能力已经具备生产可用性。
+  \item \textbf{结构化的智能体授权。}
+        Agent Authorization Profile（AAP）~\cite{aap2026}是一个正在出现的 OAuth~2.0 扩展，它增加了五个 JWT claim：智能体身份、带有服务端约束的能力（按工具的域名限制、速率限制、时间窗口）、任务绑定（防止范围漂移）、委派跟踪以及审计轨迹。它的核心原则是：“授权必须在执行时评估，而不能只在连接建立时评估。”
+  \item \textbf{基础设施类比。}
+        Kubernetes RBAC 结合 admission webhook，会在 API server 边界依据身份强制执行权限，而不管 Pod 里的应用自己认为自己应该做什么。这正是同样的零信任原则~\cite{nist800207}在 LLM 请求上的体现。
+\end{itemize}
+bearer token 使一种当前 WRP 路线图里尚未出现的新型路由决策成为可能：基于角色的工具调用强制执行（\Cref{opp:rbac-enforcement}）、按调用者的全局信誉评分（\Cref{opp:caller-reputation}），以及由路由器强制执行的行为承诺（\Cref{opp:behavioral-commitments}）。它也扩展了已有机会：按调用者跨会话累积风险（\Cref{opp:cumulative-risk}）、跨会话 token 预算（\Cref{opp:token-budget}）、治理 DSL 中的 RBAC 谓词（\Cref{opp:governance}）、按角色调整工具目录（\Cref{opp:tool-pruning}），以及感知调用者的记忆隔离（\Cref{opp:gateway-agent-loops}）。
+
+\paragraph{推断得到的结构信号。}
+除显式元数据外，路由器还可以在分发时从请求结构中推断工作负载身份：
+\begin{itemize}[nosep]
+  \item \textbf{对话深度。} \texttt{messages} 数组里消息对象的数量揭示了会话成熟度：一个只有 2 条消息的交换大概率是冷启动聊天；一个包含 20 条消息、且 \texttt{assistant}/\texttt{tool} 角色交替出现的数组，则更可能是一个深层智能体会话，并对应不同的模型、资源池和压缩需求。
+  \item \textbf{工具调用历史模式。} 如果此前的 assistant 消息里包含 \texttt{tool\_calls}，并且后续 \texttt{tool} 角色消息报告了较高失败率，那么路由器可以在下一轮之前主动切换到更强模型，或者先做压缩。
+  \item \textbf{推理元数据。} NofT~\cite{noft2026}表明，chain-of-thought 推理步数的多少能在推理前预测任务难度，并据此实现难度感知模型选择，同时达到 95\% 的对抗检测准确率。
+\end{itemize}
+
+\paragraph{从静态路由走向分阶段路由。}
+这些信号使系统可以从“每个 API 调用做一次决策”的逐请求路由，转向“在智能体工作流内部按阶段做决策”的\emph{逐阶段}路由。Aragog~\cite{aragog2025}已经展示了这一点：它把一次性的、保持准确率的配置步骤与依赖系统当前观测的逐阶段调度器分离开来，因此在峰值负载下实现了 50--217\% 的吞吐提升和 32--79\% 的延迟下降。WRP 框架非常适合支持这一演化：路由器已经为了多轮感知而维护会话状态（VCD~\cite{vcd2026}，Feedback Detector~\cite{feedbackdet2026}），而上面这些按阶段划分的身份信号，则为一个阶段感知的路由策略提供了输入特征，使其能随着会话演进而不断调整模型选择、压缩策略和资源池分配。
+
+\subsection{工作负载 CDF 原型}
+\label{sec:workload:archetypes}
+
+FleetOpt~\cite{fleetopt2026}识别出三类提示长度 CDF 原型，它们决定了最优资源池与路由配置：
+
+\begin{enumerate}[nosep]
+  \item \textbf{Concentrated-below}（例如 Azure）：80--95\% 都是短请求。此时激进压缩最能降低长池成本。
+  \item \textbf{Dispersed}（例如 LMSYS）：请求跨越整个长度谱。适合采用中等压缩的平衡型双池拆分。
+  \item \textbf{Concentrated-above}（例如 SWE-bench）：多数请求都很长。此时应提升 $\boundary_{\text{short}}$，而不是压缩。
+\end{enumerate}
+
+这些原型并不是静态的：随着组织从聊天转向智能体，CDF 会从 Archetype~1 向 Archetype~3 迁移。FleetOpt~\cite{fleetopt2026}表明，每种原型对应的最小成本集群在性质上都不同；inference-fleet-sim~\cite{fleetsim2026}进一步确认，当 $\boundary_{\text{short}} < 4$K 时，对 Archetype~1 而言，单体拓扑甚至可能优于解耦拓扑。

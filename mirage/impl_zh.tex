@@ -1,0 +1,43 @@
+\section{实现}
+\label{sec:impl}
+
+\begin{table}
+    \centering
+    \caption{评估中使用的 DNN 基准测试。}
+    \vspace{\captionvspace}
+    \footnotesize
+    \label{tab:benchmarks}
+    \begin{tabular}{l|l|l}
+    \toprule
+    {\bf 名称} & {\bf 描述} & {\bf 基础架构} \\
+    \midrule
+    GQA & 分组查询注意力 & \llama-3-70B~\cite{grattafiori2024llama3herdmodels}\\
+    QKNorm & 带注意力的 QK 归一化 & Chameleon-7B~\cite{chameleonteam2024chameleon} \\
+    RMSNorm & 带线性层的 RMS 归一化 & \llama-2-7B~\cite{llama2}\\
+    LoRA & 低秩适配 & GPT-3-7B-LoRA~\cite{llama-7b-lora} \\
+    GatedMLP & 门控多层感知器 & Falcon-7B~\cite{falcon40b}\\
+    nTrans & 归一化 Transformer & nGPT-1B~\cite{loshchilov2024ngpt}\\
+    \bottomrule
+    \end{tabular}
+    \vspace{\captionvspace}
+    \vspace{\captionvspace}
+\end{table}
+
+\sys 使用 C++、CUDA 和 Python 实现，共约 30K 行代码。核运算符使用 cuDNN 和 cuBLAS 库~\cite{cudnn, cublas} 实现，块和线程运算符使用 cuTLASS~\cite{cutlass} 和 CUDA PTX 实现。
+对于每个输入张量程序，\sys 自动生成并验证潜在的 \graphs。
+对于每个经过验证的 \graph，\sys 为该 \graph 的所有自定义核生成 CUDA 源代码，并使用 CUDA 编译器将代码编译为二进制文件。
+这种方法支持对一般张量程序的即时（JIT）编译和部署，生成的核可以通过几行代码修改直接集成到 PyTorch 程序中。
+\sys 的 SMT 和 ILP 求解器使用 Z3 4.12.6~\cite{z3} 实现。
+
+我们的实现支持 \Cref{tab:expression} 中列出的运算符。
+\sys 可以扩展以包含新的运算符，例如卷积或矩阵乘法的变体，在核、块和/或线程层次上均可添加。
+为了支持一个新的线性运算符，\sys 需要：（1）该运算符在核、块和/或线程层次上的浮点实现，用于 \graph 优化器生成 CUDA 核；（2）该运算符的模运算实现（见 \S\ref{sec:verify}）；以及（3）为该运算符扩展抽象表达式公理 $\Aeq$ 和 $\Asub$（见 \S\ref{subsec:abstract_expression}）。
+
+为了利用 \Cref{thm:zero_test,thm:prob}，随机测试应使用足够大的素数 $p$ 和 $q$ 并多次迭代。我们目前的实现使用乘积能放入 16 位整数的最大 $p$ 和 $q$ 值（即 $p=227, q=113$）在 GPU 上运行这些随机测试。我们利用 \sys 的 GPU 优化（如将中间结果保存在共享内存中）来加速搜索过程。
+我们还执行一次不迭代的随机测试，比较输出张量的所有元素。
+需要注意的是，这一等价验证过程不会引入假阴性。
+虽然理论上可能引入假阳性，但在实践中我们从未观察到这种情况。
+因此，我们认为这一过程对于搜索过程已经足够，并计划在优化过程最后只对最佳 \graph 添加一个提供理论保证的最终验证步骤。
+
+\paragraph{非 \lax 程序的等价验证。}虽然 \sys 可以为任意张量程序生成 \graphs，但概率等价验证器仅限于 \lax 程序，不支持某些 DNN 运算符（如 ReLU~\cite{relu}）。
+作为替代方案，我们开发了一种基于求解器的验证器，用于处理任意张量程序。该验证器依赖于用户提供的各个运算符的数学性质（例如，线性性、结合律、交换律和分配律），这些性质以一阶逻辑形式定义，并使用自动定理证明器来验证等价性。与概率等价验证器相比，基于求解器的验证器支持更通用的程序，但需要为每个新运算符额外指定其性质。对基于求解器的验证器的详细讨论超出了本文的范围。

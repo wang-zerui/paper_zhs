@@ -1,0 +1,74 @@
+\section{背景}
+\label{sec:background}
+本节首先回顾以 kernel 为中心的 GPU 编程模型及其局限（\Cref{subsec:gpu-programming-model}），随后介绍 kernel fusion 与 mega-kernel 技术（\Cref{subsec:kernel_fusion}），它们共同构成了 \sys 的设计动机。
+
+\begin{figure}
+    \centering
+    \subfloat[Kernel barrier 会阻断跨任务流水。]{
+    \includegraphics[scale=0.37]{figs/intra-task-pipelining.pdf}
+    \label{fig:intra-task-pipelining}
+    }
+    \\
+    \subfloat[\Sys 同时支持任务内与任务间流水。]{
+    \includegraphics[scale=0.37]{figs/inter-task-pipelining.pdf}
+    \label{fig:inter-task-pipelining}
+    }
+    \vspace{\captionvspace}
+    \caption{比较 \sys 与现有方法在任务内和任务间流水支持上的差异。}
+    \vspace{\captionvspace}
+    \label{fig:pipelining}
+\end{figure}
+
+\subsection{GPU 编程模型}
+\label{subsec:gpu-programming-model}
+在 GPU 上，计算通常以 {\em kernel} 的形式组织。每个 kernel 都是在大量核心上以 SPMD（single-program, multiple-data）方式并发执行的函数。一个 kernel 由若干 {\em thread block} 组成，每个 block 会被分配到一个流式多处理器（SM）上执行；block 内包含多个 {\em thread}，分别处理不同的数据元素。每个线程拥有私有寄存器文件，而同一 block 内的线程则可通过低延迟的 {\em shared memory} 交换数据并完成协作。kernel 的输入与输出均存储在 GPU 的 {\em device memory} 中。
+
+CUDA 编程模型并不支持在同一个 kernel 内对不同 thread block 进行直接同步，因为现代 GPU 架构缺乏相应的硬件协同机制。因此，跨算子依赖（例如一个矩阵乘法必须在另一个开始前完成）通常依赖 {\em kernel barrier} 来保证，这些 barrier 由 GPU 运行时自动插入在同一 stream 上相邻启动的 kernel 之间。
+
+kernel barrier 虽然简化了依赖管理，但也会阻碍一些关键 GPU 优化，例如跨 kernel 软件流水与细粒度 kernel 重叠。
+
+\paragraph{软件流水。}
+现代 GPU 正变得越来越 {\em 异构}，会集成 tensor core、tensor memory accelerator（TMA）等专用部件。由于 TMA 的 load/store 指令是异步执行的，因此数据搬运可以与 tensor core 和 CUDA core 上的计算并行进行。若想充分发挥这些硬件单元的能力，就需要 {\em 软件流水}，即把不同迭代中的数据搬运与计算阶段交错执行，以提高整体硬件利用率。
+
+现有系统通常只能实现 {\em 任务内} 流水，如 \Cref{fig:intra-task-pipelining} 所示：一个任务被拆成多个迭代，不同迭代中的数据传输、矩阵计算与辅助操作分别在流水线的不同阶段执行。但 kernel barrier 会把流水限制在单个任务内部，阻止 {\em 任务间} 流水，从而在任务切换处产生流水气泡，导致硬件资源利用不足。
+
+\begin{figure}
+    \centering
+    \subfloat[Kernel barrier 阻止 {\tt MatMul} 与 {\tt AllGather} 重叠。]{
+    \includegraphics[scale=0.45]{figs/no-overlap-v3.pdf}
+    \label{fig:no-overlap}
+    }
+    \\
+    \subfloat[\Sys 支持 {\tt MatMul} 与 {\tt AllGather} 的细粒度重叠。]{
+    \includegraphics[scale=0.45]{figs/mpk-overlap-v3.pdf}
+    \label{fig:mpk-overlap}
+    }
+    \vspace{\captionvspace}
+    \caption{比较 \sys 与现有方法在任务间细粒度 kernel 重叠上的能力。\Cref{fig:mpk-overlap} 中的黑色箭头表示保证正确性的依赖关系。}
+    \vspace{\captionvspace}
+    \label{fig:overlap}
+\end{figure}
+
+\paragraph{细粒度 kernel 重叠。}
+kernel barrier 还会阻碍那些使用不同硬件资源的 kernel 之间进行重叠，例如计算与通信。原因在于它只能在 {\em 整个 kernel} 粒度上施加依赖，而不是在数据块粒度上施加依赖。 \Cref{fig:no-overlap} 给出了 LLM 中的常见模式：{\tt MatMul} 之后紧跟一个 {\tt AllGather}。在现有系统里，它们通常被实现为两个独立 kernel，因此 {\tt AllGather} 的所有 thread block 都必须等前一个 {\tt MatMul} kernel 的所有 thread block 完成后才能开始。
+
+但在实际中，{\tt AllGather} 与 {\tt MatMul} 之间的数据依赖远比这更细。由于 {\tt AllGather} 本质上是逐元素通信，它的每个 thread block 往往只依赖某一个 {\tt MatMul} thread block 的输出。这样的依赖结构天然支持 {\em 细粒度 kernel 重叠}：只要依赖得到满足，不同 SM 就可以并行执行 {\tt MatMul} 与 {\tt AllGather}。先前工作已经指出，这样的重叠能够同时利用现代 GPU 的计算能力和通信带宽~\cite{zhu2025nanoflow}。但要做到这一点，就必须在 sub-kernel 粒度上实现跨 SM 同步，而传统的 kernel barrier 并不具备这种能力。
+
+\begin{figure*}
+    \centering
+    \includegraphics[scale=0.36]{figs/task_graph_v8_mpk.pdf}
+    \vspace{\captionvspace}
+    \caption{\Sys 编译器将 kernel 级计算图转换为优化后的 SM 级 \graph。图中的 {\tt MM}、{\tt AT} 和 {\tt AR} 分别表示 {\tt MatMul}、{\tt Attention} 与 {\tt AllReduce} 任务。}
+    \vspace{\captionvspace}
+    \label{fig:task_graph}
+\end{figure*}
+
+\subsection{Kernel Fusion}
+\label{subsec:kernel_fusion}
+Kernel fusion 通过把多个本来需要顺序执行的 GPU kernel 合并成一个语义等价的单一 kernel，来消除 kernel barrier。这样做可以避免中间结果落回 device memory，减少显存访问，并消除 kernel 启动开销。
+
+Kernel fusion 已广泛应用于张量程序编译器中。PyTorch、JAX 和 TVM 等框架依靠规则或启发式方法融合相邻 kernel~\cite{pytorch, jax2018github, tvm}；Mirage 与 TASO 这类系统则利用超级优化自动搜索融合规则~\cite{TASO, wu2025mirage}。不过，现有编译器通常只能融合局部、规模较小的一组算子，因为为复杂张量程序生成一个单一且等价的 kernel 在计算上极为困难，很多时候甚至不可行。
+
+{\em mega-kernel} 则把 kernel fusion 推向极致：它把一个张量程序中的全部计算与通信都融合到同一个持久 kernel 中，并通过 device memory 中的同步原语协调不同 SM 的执行。尽管这种范式具有明显的性能优势，PyTorch、Triton、JAX 和 TVM 等现有 ML 编译器仍不支持 mega-kernel 编译。当前能见到的 mega-kernel，大多仍是 GPU 专家针对特定模型手工打造的。
+
+例如，FlashDMoE 将 MoE 计算与跨 GPU 通信融合进单个 kernel~\cite{aimuyo2025flashdmoe}；Spector 等人则为 LLAMA-1B 手工设计并实现了一个低延迟 mega-kernel~\cite{touvron2023llama,megakernel}。这类方案都需要很高的工程投入与深入的 GPU 专业知识。相比之下，\sys 采用编译器驱动的方法，能够自动把张量程序转换为优化后的 mega-kernel，从而消除人工 mega-kernel 化的负担。

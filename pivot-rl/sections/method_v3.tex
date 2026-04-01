@@ -1,0 +1,259 @@
+\section{Preliminary and Motivating Observations}
+\label{sec:prelim}
+
+This section motivates PivotRL through the simplest possible baseline. We first show how expert trajectories from SFT naturally induce turn-level decision states. We then evaluate a naive construction based on random pivots, and finally isolate the two bottlenecks that motivate the full method. We keep this section deliberately short; the complete training pipeline and analysis appear in Section~\ref{sec:pivotrl}.
+
+\paragraph{From expert trajectories to RL candidates.}
+Let $\mathcal{D}_{\mathrm{sft}}=\{\tau_i\}_{i=1}^N$ denote the expert trajectory dataset used for SFT. We decompose each trajectory at assistant decision boundaries: $\tau = (s_0, a_0^*, s_1, a_1^*, \ldots, s_T, a_T^*)$, where $s_t$ -- the full trajectory history from the beginning -- is the interaction state before the $t$-th assistant action and $a_t^*$ is the demonstrated assistant completion at that state.
+Here, $s_t$ includes the full interaction prefix up to that point, including prior tool results or environment feedback. We call each extracted pair $(s_t,a_t^*)$ a \emph{pivot candidate}. A \emph{pivot} is a pivot candidate that is retained for PivotRL training after offline filtering. Throughout the paper, an \emph{action} means the full assistant completion at a model-call boundary, not an individual token.
+
+This decomposition turns the original trajectory dataset into a set of local decision problems: $\mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}_{t=0}^T.$
+
+A local RL example is formed by conditioning on the demonstrated prefix $s_t$, replacing the next assistant action with an on-policy sample $a \sim \pi_\theta(\cdot \mid s_t)$, and executing only the short rollout needed to score that action.
+
+\paragraph{Naive Baseline: random pivots with strict reward.}
+The simplest possible baseline samples pivot candidates uniformly from $\mathcal{D}_{\mathrm{cand}}$ and rewards the sampled action only if it exactly matches the demonstrated completion:
+\[
+r_{\mathrm{strict}}(s,a)=\mathbf{1}[a=a^*(s)].
+\]
+We refer to this baseline as \emph{random pivot RL with strict reward}. It is the most direct way to turn SFT trajectories into turn-level RL data, and it provides the cleanest starting point for understanding what is missing.
+
+\paragraph{Random pivots alone do not suffice.}
+In practice, naive baseline does not recover the behavior of the full method in terms of the in-domain improvement. In the strict preliminary setting, random pivots with exact matching reach only \texttt{[PLACEHOLDER: random+strict result]}, which is substantially lower than the 63.81\% achieved by the full method. Even under the more permissive reward used in our current $\tau^2$ study, random pivots reach 59.68, only slightly above same-data SFT at 58.44 and still below informative pivot selection at 63.81. This already suggests that simply converting SFT traces into examples is not enough: the quality of the pivot states and the reward both matter.
+
+\paragraph{Bottleneck analysis.}
+Two issues explain why the naive baseline is weak.
+
+\emph{(1) Random pivots do not provide enough signal.}
+Under group-normalized RL, a state produces no update if all sampled actions succeed or all sampled actions fail. If $\{r_i\}_{i=1}^G$ are the rewards of a rollout group at state $s$, the normalized advantage takes the form
+\[
+\hat{A}_i=\frac{r_i-\frac{1}{G}\sum_{j=1}^G r_j}{\mathrm{std}(\{r_j\}_{j=1}^G)}.
+\]
+When all rewards are identical, every $\hat{A}_i$ is zero. Empirically, this is exactly what we observe under random pivot sampling: the per-batch reward standard deviation decays rapidly during training, indicating that many turns quickly become uninformative.
+
+\emph{(2) Strict reward misses a large fraction of useful signal.}
+Exact expert matching is too sparse in generative action spaces. Many tool calls, shell commands, or search actions are functionally correct without matching the demonstrated string exactly. To quantify this, we compare strict matching to a domain-appropriate verifier and measure
+\[
+\mathrm{MissRate}
+=
+\Pr\!\left[r_{\mathrm{strict}}(s,a)=0 \;\middle|\; r_{\mathrm{func}}(s,a)=1\right].
+\]
+In our preliminary analysis, strict matching misses positive credit on \texttt{[PLACEHOLDER: miss-rate]}\% of verifier-approved rollouts. This means that even when a sampled action is locally acceptable, strict reward often labels it as failure.
+
+\paragraph{Takeaway.}
+These observations motivate the full PivotRL design. Effective RL from expert trajectories requires both \emph{informative pivot selection}, to avoid wasting updates on zero-signal states, and a \emph{functional reward}, to credit acceptable alternatives rather than only the single demonstrated completion.
+
+\section{PivotRL}
+\label{sec:pivotrl}
+
+This section presents the full PivotRL method and the analysis that supports its two components. Section~\ref{sec:pivotrl_method} describes the training pipeline: offline pivot selection, functional reward construction, and the GRPO-style objective used for optimization. Section~\ref{sec:pivotrl_analysis} then explains why these choices are well matched to local on-policy RL. In particular, we first show why mixed-outcome turns are the only ones that produce nonzero group-normalized updates, and then show that the functional reward induces a conservative KL-regularized update relative to the reference policy.
+
+\subsection{Method}
+\label{sec:pivotrl_method}
+
+Starting from the pivot candidates constructed in Section~\ref{sec:prelim}, PivotRL proceeds in three steps: (i) profile and filter those candidates to obtain informative pivots, (ii) sample local on-policy rollouts at the retained pivots, and (iii) optimize a functional reward with a GRPO-style update. Algorithm~\ref{alg:pivotrl} summarizes the full pipeline.
+
+\paragraph{Pivot selection.}
+Not every pivot candidate is useful for training. We therefore profile the candidate set offline under a frozen reference policy $\pi_{\mathrm{ref}}$. For each candidate state $s$, we sample multiple local rollouts, compute their rewards, and estimate an empirical mean return $\hat{\mu}(s)$ and reward variance $\hat{\sigma}^2(s)$. Full profiling details and hyperparameters are deferred to the appendix; in the main text, we only use the resulting filtered sets:
+\[
+\mathcal{D}_{\mathrm{random}}=\mathcal{D}_{\mathrm{cand}},
+\]
+\[
+\mathcal{D}_{\mathrm{mixed}}=\left\{(s,a^*)\in\mathcal{D}_{\mathrm{cand}} \;:\; \hat{\sigma}^2(s)>0\right\},
+\]
+\[
+\mathcal{D}_{\mathrm{adv}}=\left\{(s,a^*)\in\mathcal{D}_{\mathrm{mixed}} \;:\; \hat{\mu}(s)<\lambda_{\mathrm{diff}}\right\}.
+\]
+
+The random set is the naive baseline. The mixed set keeps only states whose rollouts under $\pi_{\mathrm{ref}}$ have nonzero reward variance, i.e., states that can produce nonzero group-normalized updates at the beginning of training. The advantage-gap set is a stricter subset of difficult mixed-outcome states. Intuitively, these harder pivots remain informative longer as the policy improves. Unless otherwise stated, PivotRL uses $\mathcal{D}_{\mathrm{adv}}$ as its training set.
+
+\paragraph{Functional reward.}
+At a retained pivot state $s$, PivotRL samples actions from the current policy and scores them with a functional verifier rather than exact expert matching. Let $\mathcal{M}(s)\subseteq\mathcal{A}(s)$ denote the set of \emph{acceptable} actions at state $s$, where acceptability is defined by a domain-specific verifier. We then define the functional reward
+\begin{align}\label{eq:func_reward}
+r_{\mathrm{func}}(s,a)=\mathbf{1}[a\in\mathcal{M}(s)].
+\end{align}
+This replaces the strict reward
+\[
+r_{\mathrm{strict}}(s,a)=\mathbf{1}[a=a^*(s)].
+\]
+
+The verifier depends on the domain. In some settings, acceptability can be checked by normalized string or schema-based comparison; in others, it is better captured by a lightweight LLM judge or a task-specific equivalence rule. The key point is that PivotRL rewards \emph{functional equivalence at the local decision point}.
+
+\paragraph{PivotRL objective.}
+Given a filtered pivot dataset $\mathcal{D}_{\mathrm{pivot}}$ and a rollout group size $G$, PivotRL optimizes a clipped GRPO-style objective over local on-policy samples:
+\[
+\mathcal{J}_{\mathrm{PivotRL}}(\theta)
+=
+\mathbb{E}_{s\sim\mathcal{D}_{\mathrm{pivot}},\{a_i\}_{i=1}^G\sim\pi_{\theta_{\mathrm{old}}}(\cdot\mid s)}
+\left[
+\frac{1}{G}
+\sum_{i=1}^G
+\min\!\Big(
+w_i(\theta)\hat{A}_i,
+\mathrm{clip}(w_i(\theta),1-\epsilon,1+\epsilon)\hat{A}_i
+\Big)
+\right],
+\]
+where
+\[
+w_i(\theta)=\frac{\pi_\theta(a_i\mid s)}{\pi_{\theta_{\mathrm{old}}}(a_i\mid s)},
+\qquad
+\hat{A}_i=
+\frac{
+r_{\mathrm{func}}(s,a_i)-\mathrm{mean}\!\left(\{r_{\mathrm{func}}(s,a_j)\}_{j=1}^G\right)
+}{
+\mathrm{std}\!\left(\{r_{\mathrm{func}}(s,a_j)\}_{j=1}^G\right)
+}.
+\]
+Compared with E2E RL, this objective requires only one-turn or partial rollouts from pivot states. Compared with SFT, it uses a set-valued verifier-based reward.
+
+\paragraph{Full algorithm.}
+Algorithm~\ref{alg:pivotrl} summarizes the entire method. The only online interaction during training is the local rollout required to score sampled actions at the selected pivots.
+
+\begin{algorithm}[t]
+\caption{PivotRL}
+\label{alg:pivotrl}
+\begin{algorithmic}[1]
+\State \textbf{Require:} Expert trajectories $\mathcal{D}_{\mathrm{sft}}$, reference policy $\pi_{\mathrm{ref}}$, initial policy $\pi_\theta$, verifier $V$, rollout group size $G$, difficulty threshold $\lambda_{\mathrm{diff}}$
+\State Extract pivot candidates $\mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}$ from expert trajectories
+\State Profile each candidate under $\pi_{\mathrm{ref}}$ to estimate $\hat{\mu}(s)$ and $\hat{\sigma}^2(s)$
+\State Construct $\mathcal{D}_{\mathrm{pivot}}$ by filtering to mixed-outcome pivots, optionally retaining only difficult ones
+\For{training step $k=1,\dots,K$}
+    \State Sample a minibatch of pivot states $\{s_b\}_{b=1}^B$ from $\mathcal{D}_{\mathrm{pivot}}$
+    \For{each pivot state $s_b$}
+        \State Sample rollout group $\{a_{b,i}\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot\mid s_b)$
+        \State Execute the local rollout needed to score each action
+        \State Compute rewards $r_{\mathrm{func}}(s_b,a_{b,i})$ using verifier $V$
+        \State Compute normalized advantages $\hat{A}_{b,i}$
+    \EndFor
+    \State Update $\pi_\theta$ with the clipped objective in Eq.~(8)
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Theoretical analysis for PivotRL}
+\label{sec:pivotrl_analysis}
+
+We now analyze the two core design choices separately: the functional reward in Eq.~\eqref{eq:func_reward} and the pivot selection scheme in Section~\ref{sec:pivotrl_method}. Our first result shows that KL-regularized RL with the functional reward improves the probability on acceptable actions $\mathcal{M}(s)$ while preserving the conditional distribution on both $\mathcal{M}(s)$ and its compliment $\mathcal{M}(s)^c$. Our second result shows that selecting pivots with large reward variance improves the natural-gradient norma and GRPO score along the KL-path, thus filtering for stronger learning signals.
+Throughout this section, we assume the action space $\mathcal{A}$ is finite, $\mathcal{M}(s) \neq \emptyset$, and $\pi_0(a\mid s)>0$ for all $s$ and $a$. 
+
+\iffalse
+\paragraph{SFT as policy gradient.}
+Consider an expert token trajectory $t^*=(t_1^*,\ldots,t_N^*)\sim d_{\mathrm{sft}}$. The SFT objective is
+\[
+\mathcal{L}_{\mathrm{SFT}}(\theta)
+=
+-
+\mathbb{E}_{t^*\sim d_{\mathrm{sft}}}
+\left[
+\sum_{n=1}^N
+\log \pi_\theta(t_n^* \mid t_{<n}^*)
+\right].
+\]
+This gradient can be rewritten as a policy gradient with a strict exact-match reward and an off-policy correction term:
+\[
+\nabla_\theta \mathcal{L}_{\mathrm{SFT}}(\theta)
+=
+-
+\mathbb{E}_{(h,a)\sim d_{\pi_\theta}}
+\left[
+w_{\mathrm{sft}}(h,a)\,
+\nabla_\theta \log \pi_\theta(a\mid h)\,
+r_{\mathrm{strict}}(h,a)
+\right],
+\]
+where $h$ denotes a token prefix, $r_{\mathrm{strict}}(h,a)=\mathbf{1}[a=a^*(h)]$, and
+\[
+w_{\mathrm{sft}}(h,a)=\frac{d_{\mathrm{sft}}(h,a)}{d_{\pi_\theta}(h,a)}.
+\]
+
+This form exposes two limitations of SFT that are especially acute in agentic settings. First, the reward is exact-match and therefore assigns zero credit to functionally equivalent alternatives. Second, the importance-weight term reflects the mismatch between the expert data distribution and the current policy distribution. PivotRL addresses these limitations by replacing strict matching with a functional turn-level reward and by sampling actions on-policy at pivot states.
+\fi
+% \begin{proposition}[Only mixed-outcome pivots produce nonzero group-normalized updates]
+% \label{prop:mixed}
+% Let $s$ be a fixed pivot state, let $\{a_i\}_{i=1}^G$ be a rollout group sampled from the current policy, and let $\{r_i\}_{i=1}^G$ be the corresponding binary rewards. Define the normalized advantage
+% \[
+% \hat{A}_i=\frac{r_i-\frac{1}{G}\sum_{j=1}^G r_j}{\mathrm{std}(\{r_j\}_{j=1}^G)}.
+% \]
+% If $\sum_{i=1}^G r_i=0$ or $\sum_{i=1}^G r_i=G$, then $\hat{A}_i=0$ for all $i$. Therefore, only states with mixed sampled outcomes can contribute a nonzero group-normalized update.
+% \end{proposition}
+
+% \paragraph{Interpretation.}
+% Proposition~\ref{prop:mixed} gives the basic justification for pivot selection. Randomly sampling from all turns wastes training budget on states that are already uniformly solved or uniformly failed under the current local rollout distribution. Filtering to mixed-outcome pivots increases the density of informative updates, and further biasing toward difficult mixed-outcome pivots helps maintain that signal later in training.
+
+\begin{theorem}%[Functional reward as a KL-conservative update]
+\label{thm:kl}
+Fix $\beta>0$ and consider the regularized objective
+\[
+\mathcal{L}_{\mathrm{func},\beta}(\pi)
+=
+\mathbb{E}_{s\sim d}
+\left[
+-
+\mathbb{E}_{a\sim\pi(\cdot\mid s)}[r_{\mathrm{func}}(s,a)]
++
+\beta\,\mathrm{KL}(\pi(\cdot\mid s)\|\pi_0(\cdot\mid s))
+\right],
+\]
+where $r_{\mathrm{func}}(s,a)=\mathbf{1}[a\in\mathcal{M}(s)]$. For each state $s$, let
+\[
+\rho(s)=\pi_0(\mathcal{M}(s)\mid s),
+\qquad
+q_\beta(s)=\frac{\rho(s)e^{1/\beta}}{(1-\rho(s))+\rho(s)e^{1/\beta}}.
+\]
+Then $d$-almost surely for each state $s$, $\mathcal{L}_{\mathrm{func},\beta}(\pi)$ has a unique minimizer $\pi_\beta^*$ such that it solves the following constraint optimization problem:
+\begin{align*}
+    \min \mathrm{KL}(\pi(\cdot\mid s)\|\pi_0(\cdot\mid s)) \quad s.t. ~~ \pi(\mathcal{M}(s)\mid s)=q_\beta(s).
+\end{align*}
+Furthermore, $\frac{\pi_\beta^\star(a\mid s)}{\pi_\beta^\star(b\mid s)}
+= \frac{\pi_0(a\mid s)}{\pi_0(b\mid s)}$ holds for any $a,b \in \mathcal{M}(s)$ and $a,b \in \mathcal{M}(s)^c$.
+% Equivalently, when $0<\rho(s)<1$, the optimal policy rescales the reference policy by one factor on acceptable actions and another factor on non-acceptable actions, thereby preserving the reference ordering within each set.
+\end{theorem}
+
+\paragraph{Interpretation.}
+Theorem~\ref{thm:kl} analyzes PivotRL from a KL projection view that isolates the effect of the matching-style reward $r_{\mathrm{func}}(s,a)$ in the RL objective.
+The analysis only depends on the induced matching set, so it applies to any matching rule that can be written in this indicator form.
+This implies that PivotRL does not force the policy to collapse onto a single canonical continuation. Instead, it increases total probability mass on the verifier-approved set while minimally perturbing the reference policy in KL. In particular, it preserves the relative ordering among acceptable actions and, separately, among non-acceptable actions. This is the sense in which the functional reward supports OOD retention: it changes the policy where the verifier provides signal, while remaining conservative elsewhere.
+
+\begin{theorem}\label{thm:pivot}
+For any distribution $\pi$ over $\mathcal{A}$, define the score-tangent space 
+$$T_\pi = \left\{ v : \mathcal{A}_s \to \mathbb{R}: \mathbb{E}_{a \sim \pi}[v(a)] = 0 \right\}$$
+equipped with the Fisher inner product $\langle u, v \rangle_{F,\pi} = \mathbb{E}_{a \sim \pi}[u(a)v(a)]$.
+
+For a smooth functional $F$ on the simplex, define its natural gradient $\nabla^{\mathrm{nat}}F(\pi) \in T_\pi$ as the unique Riesz representative satisfying $D F(\pi)[v]
+= \langle \nabla^{\mathrm{nat}}F(\pi), v \rangle_{F,\pi}$ for any $v \in T_\pi$.
+
+Consider the statewise expected reward objective
+\begin{align*}
+J_s(\pi)
+= &~ \mathbb{E}_{a \sim \pi}[r_s(a)],
+\end{align*}
+and the population GRPO score for exponential-tilted policy $\pi_{s,\beta} = \frac{\pi_0(a \mid s)e^{r_s(a)/\beta}}{\sum_{b \in \mathcal{A}_s}\pi_0(b \mid s)e^{r_s(b)/\beta}}$, defined by
+\begin{align*}
+\gamma_{s,\beta}
+:= &~ -\mathbb{E}_{a \sim \pi_{s,\beta}}
+\left[
+\frac{r_s(a) - \mathbb{E}_{a \sim \pi_{s,\beta}}[r_s(a)] }{\sqrt{\Var_{a \sim \pi_{s,\beta}}(r)}} \partial_\beta \log \pi_{s,\beta} (a)
+\right].
+\end{align*}
+Then we have 
+\begin{align*}
+\gamma_{s,\beta} = \frac{1}{\beta^2}
+\left\|\nabla^{\mathrm{nat}} J_s(\pi_{s,\beta})\right\|_{F,\pi_{s,\beta}} = \frac{\sqrt{\Var_{a \sim \pi_{s,\beta}}(r)}}{\beta^2}.
+\end{align*}
+\end{theorem}
+
+\paragraph{Interpretation.} 
+Theorem~\ref{thm:pivot} is a population, pathwise statement about the idealized
+KL-regularized statewise update $\pi_{s,\beta}\propto \pi_0 e^{r_s/\beta}$.
+By REINFORCE~\citep{williams1992simple},
+for any smooth path $t \mapsto \pi_t$,
+\[
+\partial_t J_s(\pi_t)
+=
+\mathbb{E}_{a \sim \pi_t}
+\bigl[
+r_s(a)\,\partial_t \log \pi_t(a)
+\bigr].
+\]
+The GRPO score $\gamma_{s,\beta}$ is thus the REINFORCE direction along the KL path where the rewards are normalized by the standard deviation. Theorem~\ref{thm:pivot} shows that the Fisher norm of the natural gradient of the statewise reward objective is exactly the reward standard deviation, and that the normalized REINFORCE covariance along the KL path is this norm divided by $\beta^2$. For binary verifier rewards, larger variance means a more mixed success/failure state. This motivates the pivot filter as a proxy for states with stronger local learning signal.

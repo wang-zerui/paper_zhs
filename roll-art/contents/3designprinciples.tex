@@ -1,0 +1,51 @@
+%!TEX root=../main.tex
+\section{Design Principles}
+\label{sec:design-principle}
+We present our design principles to meet above requirements for multi-task agentic training on disaggregated infrastructure.
+
+
+\subsection{P1: Hardware-Affinity Workload Mapping}
+Our first principle is to map workloads to resources based on their \textit{hardware affinity} to meet requirement \textbf{R1} (highlighted in the box of \S\ref{subsec:resource-req-within-stage}). Users are allowed to define a collection of hardware types at the granularity of both stages and individual trajectories. At the stage level, the training stage can be executed on GPUs, while environment can run on CPUs. At the trajectory level, this principle enables even finer optimization. For example, within the rollout stage, trajectories whose generation is dominated by prefill and does not hit memory limits can be routed to H800 GPUs, whereas trajectories dominated by decoding can be scheduled on H20 GPUs (\S\ref{subsec:resource-req-within-stage}). Similarly, within the reward stage, the reward LLM can run on GPUs, while code‑sandbox execution can run on CPUs. The fine‑grained mapping achieves maximized efficiency.
+
+
+
+
+
+\subsection{P2: Fine-Grained Asynchronous Execution}
+To comply with \textbf{R2} and \textbf{R4}, we introduce our second principle: the diverse communication patterns of disaggregated agentic training can be addressed with fine‑grained asynchrony. Particularly, it should realize the following designs. 
+
+\noindent\textbf{Trajectory-level Rollout Scheduling.} Conventional approaches~\cite{verl} perform LLM generation, environment interaction, and reward computation in a batched manner, which leads to substantial resource wastage and long rollout latency (\S\ref{subsec:communication-between-stage}). In contrast, trajectory-level scheduling creates a continuous pipeline in which LLM generation for one trajectory overlaps with environment interaction for another and reward computation for a third. This pipelined execution reduces resource idleness and hides environment communication delays, improving resilience to environment instability.
+
+
+
+\noindent\textbf{Managed Rollout-Train Synchronization.}
+Asynchronous RL training decouples the rollout and training stages, allowing them to proceed in parallel. The rollout stage continuously produces trajectories, while the training stage consumes these trajectories and periodically synchronizes updated model weights with the inference workers. Our managed synchronization mechanism exposes explicit control over the rate at which completed trajectories are consumed. 
+% (2) the frequency and networking fabric used for model weight synchronization. 
+This control allows practitioners to flexibly configure the asynchronous bound (defined in \S\ref{subsec:async-workflow}) to balance the training stability, system throughput, and model weight synchronization overhead. 
+
+
+
+\subsection{P3: Statefulness-Aware Computation}
+The third principle satisfies \textbf{R3}: we perform statefulness-aware computation. A stateless system component's output depends solely on its input, rendering each execution independent and thus ideal for optimization on a serverless platform.
+% This enables employing a serverless platform to optimize it. 
+
+% A stateful component maintains an internal state that persists and evolves across invocations. Differently,
+
+
+% classify each computational component as either \emph{stateless} or \emph{stateful}.
+
+\noindent\textbf{Rollout: LLM generation.} Production systems typically deploy LLM generation using a serverful architecture to achieve low latency and high throughput. Recently, Tinker~\cite{tml2025tinker} explores elastic serving for RL rollouts, but is designed around LoRA~\cite{hu2021loralowrankadaptationlarge}, whereas full-parameter training is more urgent for production-grade LLMs. 
+
+
+
+
+
+\noindent\textbf{Rollout: Environment.} This stage is inherently stateful, as the environment (for example, a coding workspace, web browser, or game) is updated by each action. All actions in a trajectory must be routed to the same persistent environment instance, requiring session affinity.
+
+
+\noindent\textbf{Stateless Reward.} A reward worker takes a trajectory as input and produces a scalar value without retaining any memory of past evaluations. This property makes it well suited to a serverless computation model, enabling shared, multi-tenant \textit{Reward-as-a-Service} that can scale elastically to and from zero, thereby maximizing resource utilization.
+
+
+\noindent\textbf{Training.} This stage is inherently stateful, necessitating a dedicated GPU cluster. 
+
+

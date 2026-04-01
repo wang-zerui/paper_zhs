@@ -1,0 +1,21 @@
+\section{Generator}
+
+The generator transforms the original non-distributed computation graph to one applied with the optimal execution plan given by our solver and it compiles the optimized computation graph to PyTorch code. To achieve this goal, we implement a set of compilation passes to manipulate the graph and a code generation feature to create PyTorch code based on optimized Graph IR.
+
+\subsection{Compilation passes}
+
+Our generator has a set of compilation passes to apply the searched execution plan.
+
+Firstly, we design a \textit{communication-related pass} to insert communication nodes as required by the execution plan. Two kinds of communication nodes in our execution plan need to be considered: a) communication node to ensure numerical correctness, such as an all-reduce node after obtaining a partial sum output. b) communication node converting tensor to a layout required by a downstream user node.
+
+Secondly, we design a \textit{parameter shard pass} to shard module parameters and add a hook to handle gradient communication. To improve training efficiency, we use an extra CUDA stream to overlap the asynchronous gradient communication with backward computation. \par
+
+Finally, a \textit{reshape conversion pass} is used to adapt the argument of a node with reshape operators, such as transpose or reshape, to the searched execution plan. The reason we need this pass is that some nodes of the reshape operation use a constant that may come from the shape of the original input tensor, instead of the shard tensor in the execution plan.
+
+\subsection{Code generation}
+
+PyTorch FX~\cite{torch-fx} provides a code generation feature to generate valid Python code that adheres to the semantics of a given Graph. In order to support our automatic activation checkpoint feature, we made certain modifications to the PyTorch FX code generation.
+
+Following the activation checkpoint searching process, we annotate each node with the activation checkpoint block index, based on the activation checkpoint solution. Nodes annotated with the same block index are then packaged together in an activation checkpoint block.
+
+Our code generator initially generates a function that packages all the operations in the same activation checkpoint block. These generated functions are then wrapped in PyTorch's built-in checkpoint function, which enables input tensor preservation for backward computation and recomputation during forward computation. Finally, we substitute the nodes packaged in the activation checkpoint block in the original computation graph with the corresponding wrapped activation checkpoint function.

@@ -1,0 +1,184 @@
+%!TEX root = main_zh.tex
+\section{实验评估}
+\label{sec:eval}
+
+\subsection{实验设置}
+\phm{硬件平台。}
+在测试床实验中，我们分别以 Llama3.1-8B~\cite{llama3_1_8b_instruct} 和 Qwen3-32B~\cite{qwen3_32b} 作为后端模型。
+其中 Llama3.1-8B 部署在 A40-PCIe-48GB 服务器上，Qwen3-32B 部署在 H800-PCIe-96GB 服务器上。
+此外，我们还构建了可扩展至 {64 张 GPU} 的模拟器，用于评估 \oursched 的可扩展性。
+
+\phm{工作负载。}
+实验使用与~\cite{hu2024inference}一致的三类推理数据集：SharedGPT~\cite{sharegpt_vicuna_unfiltered_2025}、Alpaca-Summarization~\cite{alpaca_pubmed_summarization_2025} 与 Document-Write~\cite{write_doc_sft_v1_2025}。
+这些数据集特征已在图~\ref{fig:background_hybridity} 中展示。
+请求提交间隔采用不同 $\lambda$ 参数的泊松分布，以覆盖不同任务到达速率。
+
+\phm{对比方法。}
+我们将 \oursched 与多个代表性基线比较：FCFS~\cite{kwon2023efficient}、FastServe~\cite{wu2023fast}、SSJF~\cite{qiu2024efficient}、LTR~\cite{fu2024efficient} 和 TRIAL~\cite{shahout2024don}。
+这些方法已在第~\ref{subsec:limitations} 节介绍，实验中均采用其默认超参数。
+此外，\oursched 默认设置为：预测器选择阈值 0.8，Gittins 分析桶大小 200。
+
+\phm{评测指标。}
+如第~\ref{subsec:problem} 节所述，我们以平均 TTLT 作为核心指标。
+同时也报告平均 TTFT（首 token 时间）。
+
+\subsection{端到端实验}
+
+\begin{figure}[t]
+    \centering
+    \subfigure[Llama3.1-8B]{
+        \includegraphics[width=0.45\linewidth]{figures/ttlt_plot_8b.pdf}
+        \includegraphics[width=0.45\linewidth]{figures/ttft_plot_8b.pdf}
+        \label{fig:e2e 8b ttft}
+    }
+
+    \subfigure[Qwen3-32B]{
+        \includegraphics[width=0.45\linewidth]{figures/ttlt_plot_32b.pdf}
+        \includegraphics[width=0.45\linewidth]{figures/ttft_plot_32b.pdf}
+        \label{fig:e2e 32b ttft}
+    }
+
+    \caption{混合数据集下的端到端性能。}
+    \label{fig:e2e}
+\end{figure}
+
+\phm{混合数据集请求实验。}
+端到端实验中，我们先将三个数据集合并，再随机提交请求，并在不同任务速率下评测。
+如图~\ref{fig:e2e} 所示，\oursched 在所有设置下都取得了最佳 TTLT 效率。
+例如，在 Qwen3-32B 上、请求速率为 8 RPS 时，\oursched 相比次优方法 TRAIL 的 TTLT 进一步降低 28.7\%。
+竞争越激烈，这一优势越明显，因为 \oursched 能更稳定地利用不确定性与混合性信息计算更优排队顺序。
+
+对于 TTFT，虽然并非本文主要目标，但图~\ref{fig:e2e} 显示 \oursched 同样表现良好，因为它能够有效缓解队首阻塞。
+特别地，FastServe 虽然通过优先新到请求获得了最优 TTFT，但其 MLFQ 交替执行机制导致 TTLT 明显劣于其他方法。
+因此，\oursched 是少数能在 TTLT 与 TTFT 上同时保持优异表现的调度器。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1\linewidth]{figures/end_to_end.pdf}
+    \caption{分别在各单一数据集上的端到端性能。}
+    \label{fig:single_dataset}
+\end{figure}
+
+\phm{单数据集请求实验。}
+回顾图~\ref{fig:background_hybridity}，三类数据集的输入/输出长度分布差异明显。
+因此我们分别在每个数据集上独立评测，结果见图~\ref{fig:single_dataset}。
+可以看到，\oursched 在每个数据集上都稳定最优。
+尤其在 Alpaca（摘要）数据集上优势最大：该数据集请求通常输入较长，现有仅基于输出长度的建模方法在此场景代价估计误差更大。
+
+\subsection{微观深入分析}
+
+本节进一步验证 \oursched 各组成模块的有效性。
+除非特别说明，默认设置与图~\ref{fig:e2e}一致（RPS=8）。
+
+\subsubsection{预测器设计的优越性}
+
+针对传统输出长度预测器不足，我们在第~\ref{subsec:predictor} 节提出了\emph{语义感知历史预测器}。
+这里从端到端 TTLT 角度验证其必要性。
+具体引入两个对照预测器：
+(1) \emph{语义无关的历史预测器}——按输入长度相近筛选历史请求并预测分布（筛选流程与我们一致）；
+(2) \emph{语义感知的 LLM 预测器}——仍使用~\cite{qiu2024efficient}中的 DistillBert，但为输出分布，去除 \texttt{logits.argmax} 层。
+图~\ref{fig:ablation_prediction} 给出不同预测器下 \oursched 的表现。
+结果表明，我们的语义感知历史预测器因分布预测更准确，从而实现最佳 TTLT。
+
+同时，在训练与推理开销方面，我们的方法也优于替代方案。
+第一，我们完全免除了训练成本；而 LLM 预测器需数小时构造训练集并额外花费数十分钟微调。
+第二，我们方法的单请求平均预测延迟低于 0.5 ms（语义嵌入提取 0.22 ms，向量检索 0.15 ms）；LLM 预测器约为 3.6 ms。
+这些结果共同证明：我们的预测器兼具轻量与准确。
+
+\begin{figure}
+    \centering
+    \begin{minipage}[t]{0.47\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/ablation_on_influence.pdf}
+        \caption{不同输出长度预测方法的性能对比。}
+        \label{fig:ablation_prediction}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.47\linewidth}
+         \centering
+        \includegraphics[width=\linewidth]{figures/ablation_on_cost.pdf}
+        \caption{不同服务代价建模方法的性能对比。}
+        \label{fig:ablation_cost}
+    \end{minipage}
+    \hfill
+\end{figure}
+
+\subsubsection{代价建模方法的优越性}
+\label{sec:cost modeling}
+
+在第~\ref{subsec:cost} 节中，我们分别分析计算瓶颈与显存瓶颈后提出了\emph{资源瓶颈驱动建模}方法。
+为验证其必要性，我们将其替换为两种常见方案：
+(1) \emph{基于输出长度建模}——直接以输出长度作为代价~\cite{shahout2024don,qiu2024efficient}；
+(2) \emph{基于总长度建模}——将输入与输出长度加权求和（与~\cite{sheng2024fairness}一致，输出长度权重设为 2）。
+图~\ref{fig:ablation_cost} 展示了不同建模方法下整体 TTLT。
+结果确认了资源瓶颈驱动建模的必要性。
+
+\subsubsection{调度策略的优越性}
+
+回顾第~\ref{subsec:gittins} 节，我们的不确定性感知调度包含两项关键技术：
+\emph{基于 Gittins 指数排序}与\emph{运行时 Gittins 指数刷新}。
+这里分别评估其贡献，并检验在预测不准确时的鲁棒性。
+具体地，我们加入两个额外基线：
+(1) \emph{Mean}——按代价分布\emph{均值}排序；
+(2) \emph{Gittins}$-$——使用 Gittins 策略，但不在桶边界及时刷新指数。
+此外，对每种调度器我们还构造\emph{不准确预测}场景：将原始分布与\emph{均匀分布}按 4:1 融合注入噪声。
+图~\ref{fig:ablation_gittins} 表明，Gittins 排序与运行时刷新都能显著提升 TTLT；同时，相比其他方法，注入噪声对我们基于 Gittins 的算法影响更小。
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[t]{0.47\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/ablation_on_effect.pdf }
+        \caption{不同调度方法对比（含代价噪声注入场景）。}
+        \label{fig:ablation_gittins}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.47\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/overhead.pdf}
+        \caption{\oursched 在不同规模下的预测与调度开销。}
+        \label{fig:overhead}
+    \end{minipage}
+\end{figure}
+
+\subsection{开销与敏感性分析}
+\label{subsec:eval_sensitivity}
+
+本节分析 \oursched 的可扩展性，并对关键超参数进行敏感性研究。
+除非特别说明，配置同图~\ref{fig:e2e}。
+
+\phm{可扩展性。}
+我们模拟了最多 64 GPU 节点的大规模集群部署。
+系统负载（RPS）随集群规模同比增长。
+平均每个节点服务 8 RPS，队列中最多缓冲 1000 个请求。
+在固定输出长度 1000 token 的设置下，测量预测与调度阶段引入的单请求额外时延。
+如图~\ref{fig:overhead} 所示，开销随规模近线性增长。
+即便在 64 节点规模下，单请求平均额外时延约 100 ms。
+考虑到典型 LLM 推理时延量级通常为秒级到分钟级（见图~\ref{fig:e2e}），该开销可以忽略。
+此外，在更大集群中还可部署多个并行调度器进一步降低开销。
+
+\phm{相似度阈值。}
+在预测器设计中（第~\ref{subsec:predictor} 节），我们用余弦相似度阈值筛选可参考历史请求。
+图~\ref{fig:sensitivity_predictor} 给出了不同阈值下的测试床结果。
+可见阈值 0.8 最优：阈值过大导致样本不足（不利于刻画不确定性），阈值过小会引入无关样本污染分布。
+
+\phm{桶大小。}
+在第~\ref{subsec:gittins} 节中，我们使用桶大小控制 Gittins 指数刷新频率。
+图~\ref{fig:sensitivity_gittins} 展示了不同桶大小下 \oursched 的平均 TTLT。
+结果表明桶大小 200 最优（因此设为默认）：桶太小会带来更高优先级计算与重调度开销；桶太大则降低优先级估计精度，二者都会损害整体效率。
+
+\begin{figure}[t]
+    \centering
+    \subfigure[预测器超参数]{
+        \includegraphics[width=0.45\linewidth]{figures/sensitive_selection.pdf}
+        \label{fig:sensitivity_predictor}
+    }
+    \hfill
+    \subfigure[调度器超参数]{
+        \includegraphics[width=0.45\linewidth]{figures/sensitive_bucket.pdf}
+        \label{fig:sensitivity_gittins}
+    }
+    \vspace{-.1in}
+    \caption{\oursched 超参数敏感性分析。}
+    \label{fig:sensitivity}
+\end{figure}

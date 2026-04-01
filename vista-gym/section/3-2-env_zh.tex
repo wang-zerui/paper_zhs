@@ -1,0 +1,36 @@
+\section{\env：面向 VLM 的可扩展工具集成智能体训练环境}
+\label{sec:env}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figure/overview.pdf}
+    \caption{\env{} 的整体概览。\env{} 在一个交互式执行环境中整合了丰富的推理密集型 VQA 任务与工具，为 VLM 智能体提供可扩展的视觉中心工具集成训练平台。}
+    \label{fig:overview}
+\end{figure*}
+
+\subsection{多样化任务与工具集合} \label{sec:4.1}
+\noindent\textbf{推理密集型 VQA 任务。}
+\env{} 将多样化多模态任务与可执行工具和 verifier 统一到同一个训练与评估环境中，强调的不只是最终答案，还包括\emph{可审计的工具调用序列}。我们从 13 个成熟基准中筛选了可验证样本，以覆盖广泛的难度和推理类型，包括感知、符号化操作以及语言理解。具体来说，训练任务覆盖七类互补轴线：图表理解、几何推理、地理空间推理、科学推理、文档理解、空间/组合推理，以及其他视觉推理任务。
+
+\noindent \textbf{视觉中心工具集。}
+小型开源 VLM 往往缺乏完成上述任务所需的细粒度视觉感知和特定领域例程，例如精确定位、符号形式化和密集图表解析。因此，\env{} 提供了一个标准化且可扩展的工具接口，使智能体可以把这些子问题交给可靠模块来完成，并把高层推理建立在结构化中间结果之上。共有 26 个工具，分为四个家族：感知工具、图表理解工具、图示形式化工具以及数学求解工具。
+
+\subsection{可执行交互环境} \label{sec:4.2}
+\noindent \textbf{接口。}
+\env{} 提供了类似 Gymnasium 的 API，包括 \texttt{reset()} 和 \texttt{step()}。给定指令 $x\in\mathcal{I}$ 后，\texttt{reset} 返回初始部分观测 $o_0$（问题文本和支持图像），并初始化交互历史 $c_0$。每个 episode 都是 \cref{sec:pre} 中定义的一个 POMDP。
+
+\noindent \textbf{动作空间。}
+动作空间 $\mathcal{A}$ 严格受可用工具集合约束。我们把一个动作形式化为带类型的元组 $a_t \in \mathcal{A}$，其中包含唯一工具标识以及传递给执行接口的参数。
+
+\noindent \textbf{观测空间。}
+观测空间 $\mathcal{O}$ 由工具执行后的环境反馈构成。每个 $o_t\in\mathcal{O}$ 都包含执行成功后的结果或运行时错误信息，它们共同作为外部信号，用于检验中间假设并调整后续推理轨迹。
+
+\subsection{可扩展训练设施} \label{sec:4.3}
+\noindent \textbf{把 VLM 当作工具。}
+为了增强视觉感知能力，我们把 G-LLaVA 和 ChartMoE 这类计算开销较高的 VLM 也作为交互式服务纳入环境。为了高效整合到分布式 RL 中，我们构建了高度并发的微服务架构，将每个 VLM 工具封装为独立 HTTP 服务，分别负责接口暴露、动作解析与图像检索，以及基于 Ray Actor 的驻留式 GPU 推理。
+
+\noindent \textbf{异步训练。}
+为了在 RL rollout 阶段维持高吞吐，我们使用 Ray 管理并发。每一步中，策略先输出 \texttt{<think>} 段，再输出 \texttt{<tool\_call>}；当生成哨兵 token \texttt{</tool\_call>} 时，解码停止，框架将轨迹标识和图像路径打包成批量 HTTP 请求。Ray 负责请求队列和工具服务器侧的负载均衡。为提高资源效率，计算密集型 VLM 工具绑定到专用 GPU，而轻量级工具则复用共享 CPU。
+
+\noindent \textbf{可扩展工具集合。}
+为了支持实验之外的新工具快速接入，我们提供了通用的 \texttt{BaseTool} 接口，使新工具能够以低样板成本实现即插即用集成。系统鲁棒性则通过健康检查、指标端点以及 Ray 的自动故障恢复机制来保证。

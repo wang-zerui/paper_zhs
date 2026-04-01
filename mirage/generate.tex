@@ -1,0 +1,516 @@
+\section{Expression-Guided \graph Generator}
+\label{sec:search}
+
+% \paragraph{Tensor layout optimization}
+
+% \begin{table}
+%     \centering
+%     \caption{Definition of abstract expressions as a class of functions over the elements from the input tensors. $\Gamma(E)$ denotes the corresponding set of functions of abstract expression $E$.}
+%     \label{tab:my_label}
+%     \resizebox{\columnwidth}{!}{
+%     \begin{tabular}{c|l}
+%     \toprule
+%     {\bf Expression} & {\bf Corresponding functions} \\
+%     \midrule
+%     $v_i$ & the set of elements in the $i$-th input tensor \\
+%     $\eadd(E_1, E_2)$ & $\{x + y : x \in \Gamma(E_1), y \in \Gamma(E_2)\}$ \\
+%     $\emul(E_1, E_2)$ & $\{xy : x \in \Gamma(E_1), y \in \Gamma(E_2) \}$ \\
+%     $\ediv(E_1, E_2)$ & $\{x/y : x \in \Gamma(E_1), y \in \Gamma(E_2)\}$ \\
+%     $\eexp(E)$ & $\{\mathrm{e}^x : x \in \Gamma(E)\}$ \\
+%     $\ered(k, E)$ & $\{ \sum_{x \in S} x : S \subseteq \Gamma(E), |S| = k \}$ \\
+%     \bottomrule
+%     \end{tabular}}
+    
+% \end{table}
+
+% \begin{table}
+%     \centering
+%     \caption{Evaluation rules for abstract expressions. To calculate the abstract expression of the output of an operator, MLSO first obtains the abstract expressions of its inputs, and derives the abstract expressions of its outputs according to the operator type.
+%     }
+%     \label{tab:expression}
+%     \resizebox{\columnwidth}{!}
+%     {%
+%     \begin{tabular}{c|c|c|l}
+%     \toprule
+%     {\bf \graph} & {\bf Expr. of} & {\bf Expr. of} & {\bf Expr. of Output} \\
+%     {\bf Operator} & {\bf 1st Opd.} & {\bf 2nd Opd.} & {\bf } \\
+%     \midrule
+%     Input & - & - & $v_i$, $i$: index of the input tensor \\
+%     Matmul & $E_1$ & $E_2$ & $\ered(k, \emul(E_1, E_1))$, $k$: size of red. dim \\
+%     Reduce & $E_1$ & - & $\ered(k, E_1)$, $k$: size of red. dim \\
+%     EwExp & $E_1$ & - & $\eexp(E_1)$ \\
+%     EwDiv & $E_1$ & $E_2$ & $\ediv(E_1, E_2)$ \\
+%     InputLoader & $E_1$ & - & $E_1$ \\
+%     OutputSaver & $E_1$ & - & $\ered(k, E_1)$, $k$: forloop range \\
+%     \bottomrule
+%     \end{tabular}
+%     }
+% \end{table}
+
+% \begin{table}
+%     \centering
+%     \caption{Evaluation rules for abstract expressions. To calculate the abstract expression of the output of an operator, MLSO first obtains the abstract expressions of its inputs, and derives the abstract expressions of its outputs according to the operator type.
+%     }
+%     \label{tab:expression}
+%     \resizebox{\columnwidth}{!}
+%     {%
+%     \begin{tabular}{c|c|c|l}
+%     \toprule
+%     {\bf \graph} & {\bf Parameters} & {\bf Operands} & {\bf Output Expression } \\
+%     {\bf Operator} & {\bf } & {\bf (Expression) } & {\bf } \\
+%     \midrule
+%     Input & $i$: index & - & $v_i$ \\
+%     Matmul &  & $A(E_1), B(E_2)$ & $\ered(A[-1], \emul(E_1, E_1))$ \\
+%     Reduce & $d$: reduce dim & $A(E)$ & $\ered(k, E)$ \\
+%       & $k$: reduce factor &  &  \\
+%     EwExp &  & $A(E)$ & $\eexp(E)$ \\
+%     EwDiv &  & $A(E_1), B(E_2)$ & $\ediv(E_1, E_2)$ \\
+%     InputIterator &  & $A(E)$ & $E$ \\
+%     Output- & $d$: forloop dim & $A(E)$ & $\ered(d, E)$ if $m=\phi$ else $E$ \\
+%     Accumulator & $m$: fmap &  &  \\
+%     \bottomrule
+%     \end{tabular}
+%     }
+% \end{table}
+
+\if 0
+\begin{algorithm}
+\caption{\sys's hybrid \graph generation algorithm.}
+\label{algo:generate}
+\footnotesize
+\begin{algorithmic}[1]
+\Require{A \lax program with a computation graph $\refgraph$}
+\Ensure{A set of \graphs $\mathcal{S}$}
+\State $\mathcal{S}_0, \mathcal{S} \gets \varnothing, G \gets \func{Inputs}(\refgraph)$ \label{line:init_prefix}
+\State \Call{GenerateKernelOrBlockOps}{$\mathcal{S}_0, G$}
+\State \Call{ConstructThreadGraphs}{$\mathcal{S}_0, \mathcal{S}$}
+\Statex
+\Function{GenerateKernelOrBlockOps}{$\mathcal{S}_0, G$}\label{line:begin_thread_graph_construct}
+    \State $\mathcal{S}_0 \gets \mathcal{S}_0 \cup \{G\}$
+    \ForAll{kernel or block operator type $\vi{type}$; input set $\vi{inputs}$}\label{alg:line:op_attrs}
+      \If{$o := \Call{CheckAndConstructOp}{G, \vi{inputs}, \vi{type}}$ is valid}
+          \State \Call{GenerateNextKernelOperator}{$G \cup \{o\}$}
+      \EndIf
+    \EndFor
+\EndFunction\label{line:end_thread_graph_construct}
+% \Statex
+\Function{CheckAndConstructOp}{$G, \vi{inputs}, \vi{type}$} \label{line:begin_op}
+    \If{$\mathrm{TensorShapeInference(\vi{inputs}, \vi{type})}$ succeeds} \label{line:tensor_shape_check}
+    \If{$\mathrm{MemoryCheck}(G, \vi{inputs}, \vi{type})$}\label{line:memory_check}
+    \If{$\mathrm{IsSubexpression}(\mathrm{AbstractExpresssion}(G, \vi{inputs}, \vi{type}), \mathrm{AbstractExpression}(\refgraph))$}
+    \State {\bf return} $\mathrm{ConstructOp}(G, \vi{inputs}, \vi{type})$
+    \EndIf
+    \EndIf
+    \EndIf
+    \State {\bf return} Invalid
+\EndFunction \label{line:end_op}
+% \Statex
+\Function{ConstructThreadGraphs}{$\mathcal{S}_0, \mathcal{S}$}
+    \State $\mathcal{P} \gets $ pre-defined patterns
+    \ForAll{$G \in \mathcal{S}_0$}
+        \State $\GF{fused} \gets G$
+        \ForAll{$(G_i, O_i) \in \mathcal{P}$}
+            \ForAll{subgraph $G'$ of $G$ matching $G_i$}
+                \State Substitute $G'$ with $O_i$ in $\GF{fused}$
+            \EndFor
+        \EndFor
+        \State $S \gets S \cup \{\GF{fused}\}$
+    \EndFor
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\fi
+
+\begin{algorithm}[h]
+\caption{\sys's hybrid \graph generation algorithm.}
+\label{algo:generate}
+\footnotesize
+\begin{algorithmic}[1]
+\Require{A \lax program with a computation graph $\refgraph$}
+\Ensure{A set of \graphs $\mathcal{S}$}
+\State $E_O \gets E(\refgraph)$
+\State $\mathcal{S}_0, \mathcal{S} \gets \varnothing$ \label{line:init_prefix}
+\State \Call{GenerateNextKernelOperator}{$\func{Inputs}(\refgraph)$}
+\ForAll{$G \in \mathcal{S}_0$} \label{line:begin_thread_graph_construct}
+\State $\mathcal{S} \gets \mathcal{S} \cup \{\Call{ThreadGraphConstruction}{G}\}$\label{line:end_thread_graph_construct}
+\EndFor
+\Statex
+\Function{GenerateNextKernelOperator}{$\kngraph$}\label{line:begin_kn}
+    \State $\mathcal{S}_0 \gets \mathcal{S}_0 \cup \{\kngraph\}$
+    \ForAll{kernel graph op type $t$; input set $I$}
+        \If{$\func{rank}(I, t) > \func{rank}(\vi{op}.I, \vi{op}.t)$ for each $\vi{op} \in \kngraph$} \label{alg:line:kn_order}
+        \If{$t$ is a pre-defined operator} \label{line:pre-defined}
+          \If{$o := \Call{ConstructOp}{\kngraph, I, t}$ is valid}
+              \State \Call{GenerateNextKernelOperator}{$\kngraph \cup \{o\}$}
+          \EndIf
+        \Else
+          \Comment{$t$ is a graph-defined operator}
+          \ForAll{$\vi{gridDims}$; $\vi{forloopDims}$} \label{line:pre-defined}
+            \State $\tbgraph \gets \func{TBGraph}(I, \vi{gridDimd}, \vi{forloopDims})$
+            \State \Call{GenerateNextBlockOperator}{$\kngraph, \tbgraph$}
+          \EndFor
+        \EndIf
+        \EndIf
+    \EndFor
+\EndFunction \label{line:end_kn}
+\Statex
+\Function{GenerateNextBlockOperator}{$\kngraph, \tbgraph$} \label{line:begin_tb}
+    \If{all shared tensors in $\tbgraph$ are consumed}
+        \If{$o := \Call{ConstructOp}{\kngraph, \tbgraph.I, \tbgraph}$ is valid}
+            \State \Call{GenerateNextKernelOperator}{$\kngraph \cup \{o\}$}
+        \EndIf
+    \EndIf
+    \ForAll{block graph op type $t$; input set $I$}
+        \If{$\func{rank}(I, t) > \func{rank}(\vi{op}.I, \vi{op}.t)$ for each $\vi{op} \in \tbgraph$} \label{alg:line:tb_order}
+          \If{$o := \Call{ConstructOp}{\tbgraph, I, t}$ is valid}
+              \State \Call{GenerateNextBlockOperator}{$\kngraph, \tbgraph \cup \{o\}$}
+          \EndIf
+        \EndIf
+    \EndFor
+\EndFunction \label{line:end_tb}
+\Statex
+\Function{ConstructOp}{$\ngraph, I, \vi{attrs}$} \label{line:begin_op}
+    \State $E \gets \Call{ExprInfr}{E(I), \vi{attrs}}$ \Comment{Refer to Table~\ref{tab:expression}}
+    \If{$\Call{Subexpr}{E, E_O}$} \Comment{Prune via abstract expressions}
+    \label{line:expr_check}
+    \State $S \gets \ngraph.\func{outputTensorShapeInfr}(I, \vi{attrs})$
+    \Comment{Check tensor shape} \label{line:tensor_shape_check}
+    \If{$S.\func{valid}$, $\ngraph.\func{mAlloc}+S.\func{size} \le \ngraph.\func{mLimit}$}
+        \Comment{Check memory} \label{line:memory_check}
+            \State \Return $\ngraph.\func{constructOp}(I, \vi{attrs})$
+        \EndIf
+    \EndIf
+    \State \Return Invalid
+\EndFunction \label{line:end_op}
+\Statex
+% \Function{ThreadGraphConstruction}{$G$}
+%     \State $\mathcal{P} \gets $ pre-defined patterns
+%     \State $\GF{fused} \gets G$
+%     \ForAll{$(G_i, O_i) \in \mathcal{P}$}
+%         \ForAll{subgraph $G'$ of $G$ matching $G_i$}
+%             \State Substitute $G'$ with $O_i$ in $\GF{fused}$
+%         \EndFor
+%     \EndFor
+%     \State \Return $\GF{fused}$
+% \EndFunction
+\Function{ThreadGraphConstruction}{$G$}
+    \State $\GF{fused} \gets G$
+    \While{$\exists o \in \GF{fused}$ that can be fused with a preceding operator}
+        \State $\GF{fused} \gets \Call{FuseOp}{\GF{fused}, o}$
+    \EndWhile
+    \State \Return $\GF{fused}$
+\EndFunction
+
+\end{algorithmic}
+\end{algorithm}
+
+
+This section introduces the \sys \graph generator, which automatically discovers potential \graphs for an input tensor program.
+To generate \graphs that capture optimizations at the kernel, block, and thread levels, \sys must explore a significantly larger search space than existing superoptimizers, which only consider optimizations at the kernel level. 
+%
+\sys employs two key techniques to address this challenge.
+%
+First, based on the observation that optimizations at the kernel and block levels are substantially more critical to performance than optimizations at the thread level---since accessing device and shared memory is orders of magnitude more expensive than accessing register file---\sys's \graph generator employs a {\em hybrid approach}: it exhaustively considers all possible graphs up to a certain size at the kernel and block levels, and uses a rule-based strategy to construct graphs at the thread level. This approach reduces the search space while retaining most performance-critical optimizations.
+%
+Second, to further prune the search space, \sys introduces a pruning technique based on an abstraction of \graphs called {\em abstract expression}, which reduces the number of \graphs \sys must consider while providing a certain theoretical guarantee on the optimality of the discovered \graphs.
+%
+We introduce the hybrid \graph generation algorithm in \S\ref{subsec:kernel_block_graph_generation} and \S\ref{subsec:thread_graph_construction}, and the expression-guided pruning techniques in \S\ref{subsec:abstract_expression}.
+
+
+\if 0
+\ZJ{TODO: explain the insight between our two-level approach.}
+\sys's \graph generator uses an expression-guided search to generate kernel and block graphs, and a rule-based operator fusion strategy to construct thread graphs. \Cref{fig:generator} shows an overview of the \graph generator.
+\fi 
+
+\subsection{Kernel and Block Graph Generation}
+\label{subsec:kernel_block_graph_generation}
+\sys generates kernel and block graphs incrementally and leverages several pruning techniques to reduce the search space, as shown in the second part of \Cref{fig:generator}. 
+%
+Specifically, \sys maintains a \textit{\prefix} of a valid \graph and iteratively extends it with new operators. 
+%Here, a \prefix $G'$ of $G$ is defined as a subgraph of $G$ such that $\forall u \in G', \forall (v, u) \in G, v \in G'$.
+For a graph $G=(V,E)$ we say that $G'=(V',E')$ is a \emph{prefix} of $G$ if it is a subgraph of $G$ such that $\forall u \in V', \forall (v, u) \in E, v \in V'$.
+
+To generate the next operator in the kernel graph, \sys enumerates the kernel operator type $t$ and the input tensor set $I$. If $t$ represents the graph-defined operator type, \sys  generates the associated block graph that defines its kernel computation by (1)
+enumerating the grid and for-loop dimensions (introduced in \S\ref{sec:hcg}), which enables \sys to calculate the input tensor shapes of the block graph; and (2) performing a nested generation procedure similar to that used at the kernel level but without considering graph-defined operators. \Cref{line:begin_kn}-\ref{line:end_kn} and \cref{line:begin_tb}-\ref{line:end_tb} in \Cref{algo:generate} show how \sys generates kernel and block operators, respectively.
+%
+\if 0
+\sys generates the next operator by enumerating the operator type $\vi{type}$ and the input tensor set $\vi{inputs}$ (\cref{alg:line:op_attrs} in \cref{algo:generate}). If $\vi{type}$ represents a customized operator, \sys will also enumerate its grid and for-loop dimensions.
+\fi
+%
+%
+\sys checks tensor shape (\cref{line:tensor_shape_check}) and memory usage (\cref{line:memory_check}) before adding an operator, ensuring a valid \prefix.
+%A \prefix passes the memory usage check if: (1) all tensors in the kernel graph can reside in device memory; and (2) all tensors in each block graph can fit in shared memory. 
+%the memory usage in both kernel and block levels, i.e., \sys checks 1) whether all the kernel graph tensors can reside in the device memory and 2) whether all the block graph tensors within a single kernel can fit into the shared memory.
+
+To ensure that identical \graphs are generated only once, \sys defines the \textit{canonical form} of \graphs. 
+Given a \graph $G$ with its operators in topological order $o_1, \ldots, o_n$, the \textit{index} of the $j$-th output of $o_i$ is defined as a tuple $(i, j)$. Each operator $o_i$ in $G$ is assigned a \textit{rank} $(\vi{input}_i, \vi{type}_i)$, where $\vi{input}_i$ is the list of input tensor indices of $o_i$, and $\vi{type}_i$ is the operator type. 
+A \graph is in canonical form if its operators are ordered in increasing rank. 
+\sys generates only \graphs in canonical form by requiring that operators be added in increasing order of rank (line \ref{alg:line:kn_order} and \ref{alg:line:tb_order}). This approach does not prune out any valid solutions, since each \graph can be transformed to canonical form by reordering the operators.
+
+In addition, \sys utilizes the \textit{abstract expression} technique to prune out prefixes that do not satisfy certain constraints, which will be introduced in \S\ref{subsec:abstract_expression}.
+
+% An abstract expression is a signature of a tensor, which indicates how this tensor is computed from the inputs of the program, ignoring the difference between elements from the same input tensor. Each abstract expression can be identified as a class of functions on the input elements. Given a \graph, \sys calculate the abstract expressions according to Table~\ref{tab:expression}. Figure~\ref{fig:abstract_expression} shows an example of abstract expressions in a subgraph of the attention computation.
+
+% \MW{Thinking of whether to remove this definition}
+% There are $5$ operations used in abstract expressions: $\eadd$, $\emul$, $\ediv$, $\eexp$ and $\ered$. Given an abstract expression $E$, the corresponding class of functions $\Gamma(E)$ is defined recursively:
+% \begin{align*}
+%     &\Gamma(v_i) = \text{the set of elements in the $i$-th input tensor} \\
+%     &\Gamma(\eadd(E_1, E_2)) = \{x + y : x \in \Gamma(E_1), y \in \Gamma(E_2)\} \\
+%     &\Gamma(\emul(E_1, E_2)) = \{xy : x \in \Gamma(E_1), y \in \Gamma(E_2) \} \\
+%     &\Gamma(\ediv(E_1, E_2)) = \{x/y : x \in \Gamma(E_1), y \in \Gamma(E_2)\} \\
+%     &\Gamma(\eexp(E)) = \{\mathrm{e}^x : x \in \Gamma(E)\} \\
+%     &\Gamma(\ered(k, E)) = \{ \textstyle\sum_{x \in S} x : S \subseteq \Gamma(E), |S| = k \}
+% \end{align*}
+
+% MLSO calculate the abstract expressions of a \graph in topological order. Given an operator and the abstract expressions of its input tensors, MLSO calculates the expressions of the output tensors according to Table~\ref{tab:expression}. We can check that the evaluation rules outlined in Table~\ref{tab:expression} are consistent with the definition of abstract expressions, i.e., the computation of the output tensor adheres to the specific class of functions described by the associated abstract expression.
+
+% MLSO formalizes the complexity of the expression as a relation, \textit{subexpression}.
+
+% \paragraph{Subexpression.} An abstract expression $E_1$ is a subexpression of an abstract expression $E_2$ if applying a sequence of operations on $E_1$ with (if necessary) some other expressions results in an abstract expression equivalent to (i.e., with the same corresponding class of functions as) $E_2$. For example, $\eadd(v_0, v_1)$ is a subexpression of $\emul(\eadd(v_1, v_0), v_0)$, while $\emul(v_0, v_1)$ is not a subexpression of $\emul(\eexp(v_0), v_1)$.
+
+
+% The following properties guarantee a limited search space:
+% \begin{itemize}
+%     \item The abstract expressions of tensors along each path of a \graph always become strictly more complicated, i.e., the input abstract expression of an operator is always a strict subexpression of the output of the operator.
+%     \item If the abstract expression of a tensor cannot evolve to the abstract expression of one of the eventual output tensors of the program by applying more operators, this tensor cannot in any valid optimal \graph.
+% \end{itemize}
+
+
+% Ignoring the difference between elements from the same input tensor avoids large expressions and expensive comparison.
+% abstract expressions cannot ensure correctness (still need fingerprint check).
+
+\subsection{Thread Graph Construction}
+\label{subsec:thread_graph_construction}
+
+While a similar nested generation strategy can be applied to thread graphs, \sys instead constructs them using a transformation-based approach (see the third panel of \Cref{fig:generator} and lines \ref{line:begin_thread_graph_construct}–\ref{line:end_thread_graph_construct} in \Cref{algo:generate}) to reduce the search space. 
+%Concretely, \sys maintains a set of pre-defined transformations $\{G_b \to G_t\}$, where each $G_b$ is a graph of block operators and $G_t$ is its optimized thread-graph equivalent. During generation, \sys scans the \graph for occurrences of $G_b$ and rewrites each match as a customized operator defined by $G_t$.
+%
+%The primary heuristic \sys uses to design these transformations is operator fusion.
+%In particular, \sys fuses element-wise operators with their preceding operators into the same thread graph to reuse  intermediate results in register file.
+\sys applies operator fusion when constructing thread graphs, which reduces access to shared memory by reusing tensors in register file whenever possible. 
+For example, \sys fuses the three element-wise operators ({\tt Mul}, {\tt Sqrt}, and {\tt Div}) in \Cref{fig:rms_norm_mlso} into a thread graph, avoiding saving intermediate results to shared memory and keeping the entire computation of these operators in register file.
+While our current implementation focuses on operator fusion, additional rule-based transformations can be used to construct thread graphs.
+
+
+\begin{table}
+    \centering
+    \caption{Operators supported by \sys. The second column shows the graph levels supporting each operator (K, B and T denote kernel, block, and thread graphs, respectively). The last column defines the abstract expressions for the outputs of each operator, where $E$ maps tensors to their abstract expressions.}
+    \vspace{\captionvspace}
+    \label{tab:expression}
+    \resizebox{\columnwidth}{!}
+    {%
+    \begin{threeparttable}
+    \begin{tabular}{l|l|l}
+    \toprule
+    {\bf \graph} & {\bf Graph} &  {\bf Abstract Expression of Output Tensor } \\
+    {\bf Operator} & {\bf Level} &  {\bf } \\
+    \midrule
+    InIter & B & $\expr(\mathrm{InIter}(X)) = \expr(X)$ \\
+    OutSaver  & B & $\expr(\mathrm{OutSaver}(X)) = \expr(X)$ \\
+    Matmul & K, B, T & $\expr(\mathrm{Matmul}(X, Y)) = \ered(k, \emul(\expr(X), \expr(Y)))$\tnote{1} \\
+    Sum & K, B, T & $\expr(\mathrm{Sum}(d_r, k_r, X)) = \ered(k_r, \expr(X))$\tnote{2} \\
+    EwAdd & K, B, T & $\expr(\mathrm{EwAdd}(X, Y)) = \eadd(\expr(X), \expr(Y))$ \\
+    EwMul & K, B, T & $\expr(\mathrm{EwMul}(X, Y)) = \emul(\expr(X), \expr(Y))$ \\
+    EwDiv & K, B, T & $\expr(\mathrm{EwDiv}(X, Y)) = \ediv(\expr(X), \expr(Y))$ \\
+    EwExp & K, B, T & $\expr(\mathrm{EwExp}(X)) = \eexp(\expr(X))$ \\
+    Repeat & K, B & $\expr(\mathrm{Repeat}(X)) = \expr(X)$ \\
+    Reshape & K, B & $\expr(\mathrm{Reshape}(X)) = \expr(X)$ \\
+    Sqr & K, B & $\expr(\mathrm{Sqr}(X)) = \emul(\expr(X), \expr(X))$ \\
+    Sqrt & K, B & $\expr(\mathrm{Sqrt}(X)) = \esqrt(\expr(X))$ \\
+    SiLU & K, B & $\expr(\mathrm{SiLU}(X)) = \esilu(\expr(X))$ \\
+    Accum & B & $\expr(\mathrm{Accum}(X, m, i)) = \ered(i, \expr(X))$ if $m = \phi$ else $\expr(X)$ \tnote{3} \\
+    \bottomrule
+    \end{tabular}
+    \begin{tablenotes}
+    \item[1] $k$ means the size of the last dimension of $A$, i.e., the reduction dimension. Matmul is performed on the inner most two dimensions and leading dimensions are batched.
+    \item[2] Sum along the dimension $d_r$ for every $k_r$ elements.
+    \item[3] Accumulate the results of $i$ for-loop iterations along fmap $m$.
+    \end{tablenotes}
+    \end{threeparttable}
+    }
+    \vspace{\captionvspace}
+\end{table}
+
+
+
+
+\subsection{Pruning via Abstract Expressions}
+\label{subsec:abstract_expression}
+
+%\oded{@JZ, @MW: Please take a look}
+
+%\oded{Here's my attempt to formalize the abstract expressions. I suggest to first explain the generation without the pruning, and only then explain the pruning in a different section/subsection.}
+
+When searching the space of possible \graphs, we aim to avoid \graph prefixes whose intermediate results cannot contribute to the desired computation.
+For example, for the input program $X \cdot Z + Y \cdot Z$,
+we can prune a prefix that computes $X \cdot Y$, but we should not prune one that computes $X + Y$, as $(X+Y) \cdot Z$ is equivalent to the input program.
+However, how can we determine whether a prefix can contribute to a desired computation while searching for that computation?
+Below, we develop a pruning technique driven by this intuition that circumvents the ``chicken and egg'' problem via \emph{abstraction}.
+We first present the abstraction---\emph{abstract expressions}---and then explain how it is used for pruning.
+Finally, we offer a theoretical guarantee that, under certain conditions, this pruning does not exclude the optimal \graph.
+
+\paragraph{Abstract expressions.}
+Recall that an edge in a \graph corresponds to a tensor-valued function of the input tensors. Intuitively, abstract expressions abstract these functions by ignoring the differences between elements of the same input tensor.
+Formally, abstract expressions are first-order logic terms over the theory of integers and uninterpreted functions.
+In a \graph, the abstract expression of each edge, denoted by $\expr(\cdot)$, is defined in \Cref{tab:expression}.
+When computing a \graph's abstract expression, all graph-defined operators are ``inlined''.
+Specifically, the expressions computed for a graph-defined operator's inputs are passed into its lower-level graph, and the resulting output expressions of that lower-level graph become the output expressions of the graph-defined operator.
+%\oded{I'm not sure if this explanation is clear enough. Maybe we can update Figure~\ref{fig:abstract_expression} to include both a graph-defined operator?} %\MW{That's a good idea if the space allows. Let me have a try.} \MW{It seems a lot of information will be involved (e.g., imap, omap, fmap, grid dim, etc) if we add a block graph, which complicates the figure a lot and may enlarge a figrue a lot too}
+\Cref{fig:abstract_expression} shows the abstract expressions for a subgraph of attention.
+
+While abstract expressions capture some information about the function computed at each edge, they also abstract away many details. For example, if $X$ is a $k \times k$ matrix, summing over the rows and summing over the columns both yield the same abstract expression---$\ered(k,\expr(X))$. But keeping $k$ as part of the abstract expression is crucial for effective pruning.
+
+%\oded{Can we say something about why we abstract some information and keep other information? Maybe give an example of why keeping the number of elements summed is useful?} \MW{An example would be multiple nested sum}
+%\ZJ{I would suggest that we remove the above paragraph --- it's weird to say the limitation without a justification}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.9\columnwidth]{figs/expr.pdf}
+    \vspace{\captionvspace}
+    \caption{Illustration of abstract expressions. The abstract expressions of tensors are annotated on edges. A human-friendly notation is used here: $\mathrm{e}^a$ denotes $\eexp(a)$, $\sum_k a$ denotes $\ered(k, a)$, $a/b$ denotes $\ediv(a, b)$, and $a*b$ denotes $\emul(a, b)$. The tensors $I_1$, $I_2$ and $O$ are all $64\times64$ matrices.}
+    \vspace{\captionvspace}
+    \label{fig:abstract_expression}
+\end{figure}
+
+\paragraph{Abstract subexpression and pruning.}
+%\oded{there is some repetition between this part and the pruning techniquers in 5.1. We can discuss and think if we want to keep it a bit reptitive, or prune one of them (I suggest keeping it here).} \MW{I prefer keeping it and simplifying sec 5.1 a bit.} \MW{Done. Remove this conversation if it looks good.}
+We use abstract expressions to prune the search space of \graphs by formalizing two relations over abstract expressions: equivalence and abstract subexpression. Specifically, we prune any \graph prefix whose abstract expression is not a subexpression of some abstract expression equivalent to that of the input program.
+%The precise theoretical guarantee of this pruning is formalized below.
+%
+%\MW{I suggest use $A_{sub}$ since it is shorter and we do not use $A_{eqexpr}$ either.}
+%\ZJ{I agree that $A_{sub}$ looks clearer.}
+We formalize abstract expressions as uninterpreted functions in first-order logic over the theory of integer arithmetic and uninterpreted functions,
+and use an SMT solver to reason about them based on two sets of axioms in \Cref{tab:axioms}: $\Aeq$ and $\Asub$.
+
+First, $\Aeq$ axiomatizes equivalence between abstract expressions.
+%(which we express by equality). 
+As will become clear below, these axioms need not be sound---it is not required that \graphs with equivalent abstract expressions are functionally equivalent, since non-equivalent \graphs can have the same abstract expression.
+%whose abstract expressions are equivalent are actually equivalent. (As mentioned earlier, non-equivalent \graphs can have identical abstract expressions.)
+Second, $\Asub$ axiomatizes the subexpression relation between abstract expressions. A key property of $\Asub$ is that whenever a \graph $G_1$ is a prefix of $G_2$---meaning $G_2$ can be constructed by extending $G_1$ with additional operators---$\expr(G_1)$ is an abstract subexpression of $\expr(G_2)$; formally, $\Asub \models \subexpr(\expr(G_1), \expr(G_2))$, where $\models$ denotes entailment modulo the theory of integer arithmetic and uninterpreted functions.
+
+During the search, \Cref{algo:generate} first computes the abstract expression of the input \lax program, denoted $E_O$, and prunes any \graph prefix $G$ if $\Aeq \cup \Asub \not\models \subexpr(\expr(G),E_O)$. That is, a graph is pruned if its abstract expression is not a subexpression of $E_O$. This check is performed using an SMT solver (Z3~\cite{z3}).
+As an optimization, the results of these checks are cached and reused, since \sys may encounter multiple \graphs with identical abstract expressions during the search.
+
+%\oded{There is some inconsistency in the notations between here and \Cref{algo:generate}, it would be best to make it consistent, and even refer to specific line numbers here.}
+\begin{table}[h]
+    \centering
+    %\caption{Properties of abstract expressions for verification. \sys checks whether an abstract expression $E_1$ is a subexpression of $E_2$ by querying the solver whether $\subexpr(E_1, E_2)$ can be derived from the axioms.}
+    \caption{Axiomatization of abstract expressions used for pruning. \sys checks whether an abstract expression $E_1$ is a subexpression of $E_2$ by querying an SMT solver to check if $\subexpr(E_1, E_2)$ is entailed by these axioms. All variables in these axioms are universally quantified.}
+    \vspace{\captionvspace}
+    \label{tab:axioms}
+    \resizebox{\columnwidth}{!}{
+    \begin{tabular}{l|l}
+    \toprule
+    {\bf Abstract Expression Property} & {\bf Comment} \\
+    \midrule
+    \multicolumn{2}{l}{\it Equivalence Axioms $\Aeq$} \\
+    \midrule
+    $\forall x,y.\ \eadd(x, y) = \eadd(y, x)$ & commutativity \\
+    $\forall x,y.\ \emul(x, y) = \emul(y, x)$ & commutativity \\
+    $\forall x,y,z.\ \eadd(x, \eadd(y, z)) = \eadd(\eadd(x, y), z)$ & associativity \\
+    $\forall x,y,z.\ \emul(x, \emul(y, z)) = \emul(\emul(x, y), z)$ & associativity \\
+    $\forall x,y,z.\ \eadd(\emul(x, z), \emul(y, z)) = \emul(\eadd(x, y), z)$ & distributivity \\
+    $\forall x,y,z.\ \eadd(\ediv(x, z), \ediv(y, z)) = \ediv(\eadd(x, y), z)$ & associativity \\
+    $\forall x,y,z.\ \emul(x, \ediv(y, z)) = \ediv(\emul(x, y), z)$ & associativity \\
+    $\forall x,y,z.\ \ediv(\ediv(x, y), z) = \ediv(x, \emul(y, z))$ & associativity \\
+    $\forall x.\ x = \ered(1, x)$ & identity reduction \\
+    $\forall x,i,j.\ \ered(i, \ered(j, x)) = \ered(i*j, x)$ & associativity \\
+    $\forall x,y,i.\ \ered(i, \eadd(x, y)) = \eadd(\ered(i, x), \ered(i, y))$ & associativity \\
+    $\forall x,y,i.\ \ered(i, \emul(x, y)) = \emul(\ered(i, x), y) $ & distributivity \\
+    $\forall x,y,i.\ \ered(i, \ediv(x, y)) = \ediv(\ered(i, x), y) $ & distributivity \\
+    $\forall x,y.\ \emul(\eexp(x), \eexp(y)) = \eexp(\eadd(x, y))$ & distributivity \\
+    $\forall x,y.\ \emul(\esqrt(x), \esqrt(y)) = \esqrt(\emul(x, y))$ & distributivity \\
+    
+    \midrule
+    \multicolumn{2}{l}{\it Subexpression Axioms $\Asub$} \\
+    \midrule
+    $\forall x,y.\ \subexpr(x, \eadd(x, y))$ & \\
+    $\forall x,y.\ \subexpr(x, \emul(x, y))$ & \\
+    $\forall x,y.\ \subexpr(x, \ediv(x, y))$ & \\
+    $\forall x,y.\ \subexpr(y, \ediv(x, y))$ & \\
+    $\forall x.\ \subexpr(x, \eexp(x))$ & \\
+    $\forall x.\ \subexpr(x, \esqrt(x))$ & \\
+    $\forall x.\ \subexpr(x, \esilu(x))$ & \\
+    $\forall x,i.\ \subexpr(x, \ered(i, x))$ & \\
+    $\forall x.\ \subexpr(x, x)$ & reflexivity \\
+    % $\forall x,y.\ \subexpr(x, y) \wedge \subexpr(y, x) \to x = y$ & antisymmetry \\
+    $\forall x,y,z.\ \subexpr(x,y) \wedge \subexpr(y,z) \to \subexpr(x, z)$ & transitivity \\
+    \bottomrule
+    \end{tabular}
+    }
+    \vspace{\captionvspace}
+\end{table}
+
+\if 0
+\begin{table}
+    \centering
+    %\caption{Properties of abstract expressions for verification. \sys checks whether an abstract expression $E_1$ is a subexpression of $E_2$ by querying the solver whether $\subexpr(E_1, E_2)$ can be derived from the axioms.}
+    \caption{Axiomatization of abstract expressions used for pruning. \sys checks whether an abstract expression $E_1$ is a subexpression of $E_2$ by querying an SMT solver to check if $\subexpr(E_1, E_2)$ is entailed by these axioms. All variables are universally quantified.}
+    \vspace{\captionvspace}
+    \label{tab:axioms}
+    \resizebox{\columnwidth}{!}{
+    \begin{tabular}{l|l}
+    \toprule
+    \multicolumn{2}{c}{\bf Abstract Expression Property} \\
+    \midrule
+    {\it Equivalence Axioms $\Aeq$} & {\it Subexpression Axioms $\Asub$} \\
+    \midrule
+    $\eadd(x, y) = \eadd(y, x)$ & $\subexpr(x, \eadd(x, y))$ \\
+    $\emul(x, y) = \emul(y, x)$ & $\subexpr(x, \emul(x, y))$ \\
+    $\eadd(x, \eadd(y, z)) = \eadd(\eadd(x, y), z)$ & $\subexpr(x, \ediv(x, y))$ \\
+    $\emul(x, \emul(y, z)) = \emul(\emul(x, y), z)$ & $\subexpr(y, \ediv(x, y))$ \\
+    $\eadd(\emul(x, z), \emul(y, z)) = \emul(\eadd(x, y), z)$ & $\subexpr(x, \eexp(x))$ \\
+    $\eadd(\ediv(x, z), \ediv(y, z)) = \ediv(\eadd(x, y), z)$ & $\subexpr(x, \ered(i, x))$ \\
+    $\emul(x, \ediv(y, z)) = \ediv(\emul(x, y), z)$ & $\subexpr(x, \esqrt(i, x))$ \\
+    $\ediv(\ediv(x, y), z) = \ediv(x, \emul(y, z))$ & $\subexpr(x, \esilu(x))$ \\
+    $x = \ered(1, x)$ & $\subexpr(x, x)$ \\
+    $\ered(i, \ered(j, x)) = \ered(i*j, x)$ & $\subexpr(x,y) \wedge \subexpr(y,z)$ \\
+    $\ered(i, \eadd(x, y)) = \eadd(\ered(i, x), \ered(i, y))$ & $\ \to \subexpr(x, z)$ \\
+    $\ered(i, \emul(x, y)) = \emul(\ered(i, x), y) $ & \\
+    $\ered(i, \ediv(x, y)) = \ediv(\ered(i, x), y) $ & \\
+    \bottomrule
+    \end{tabular}
+    }
+    \vspace{\captionvspace}
+\end{table}
+\fi
+
+\paragraph{Theoretical guarantee and the pruning-optimality tradeoff.}
+Intuitively, our pruning would keep any prefix that can lead to a \graph whose abstract expression is equivalent (according to $\Aeq$) to that of the input \lax program. Formally:
+
+\begin{theorem}[Pruning via Abstract Expressions]
+\label{thm:pruning}
+For an input \graph $G_0$, and a \graph $G$ equivalent to $G_0$,
+% Let $g$ be the abstract expression of the input program and $G$ a \graph that is equivalent to the input program.
+if $\Aeq \models E(G_0) = E(G)$ then $G$ will be generated by \Cref{algo:generate}.
+\end{theorem}
+
+\iffinal
+\begin{proof}
+By \Cref{tab:expression,tab:axioms}, we show that for any operator $\er{op}$, if $Y = \er{op}(X_1,\ldots,X_n)$, then 
+$\Asub \models \subexpr(\expr(X_i), \expr(Y))$ for $1 \leq i \leq n$.
+That is, the abstract expression of each input to $\er{op}$ is always a subexpression of $\er{op}$'s output.
+Given that $\Asub$ includes reflexivity and transitivity axioms,
+it follows that for any $G'$ that is a prefix of $G$, $\Asub \models \subexpr(\expr(G'),\expr(G))$.
+Together with the assumption that $\Aeq \models E(G_0) = E(G)$,
+we have $\Aeq \cup \Asub \models \subexpr(\expr(G'),\expr(G_0))$.
+Thus, no prefix of $G$ will be pruned, and \sys will generate $G$.
+\end{proof}
+\fi 
+
+The theorem highlights the role of abstract expressions in solving the ``chicken and egg'' problem outlined above. To decide if a prefix \graph is useful, we reason about whether it is a prefix of a useful computation \emph{in the abstract}. The choice of abstraction and the axioms $\Aeq$ represents a tradeoff between optimality and pruning.
+As \Cref{thm:pruning} shows, we are only guaranteed to find the optimal \graph whose abstract expression is equivalent to that of the input program under $\Aeq$. Stronger axioms expand the set of \graphs covered by the theorem but reduce pruning effectiveness, since more prefixes would pass the subexpression test. In particular, note that $\Aeq$ does not include cancellation rules (e.g., $\ediv(\emul(x,y),y) = y$). As a result, \sys may miss some equivalent \graphs.
+However, including such axioms would make everything a subexpression of everything, therefore nulling desired pruning.
+As our evaluation shows, the chosen $\Aeq$ yields a good balance between pruning and optimality.
+
+%\oded{What do you think about the last paragraph? It's a bit rough but I think we need to try to get these ideas across}
+
+%$\EwDiv(EwMul(A, B), B) = A$
+
+
+
+
+
+%oded{TODO: incorporate this example above:}
+ %For example, $\eadd(v_0, v_1)$ is a subexpression of $\emul(\eadd(v_1, v_0), v_0)$, while $\emul(v_0, v_1)$ is not a subexpression of $\emul(\eexp(v_0), v_1)$.
+

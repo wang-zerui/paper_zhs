@@ -1,0 +1,360 @@
+% =============================================================================
+\section{愿景：研究路线图}
+\label{sec:vision}
+% =============================================================================
+
+\Cref{tab:interactions} 中的 WRP 矩阵暴露出两个结构上最稀疏的单元，即 Router $\times$ Pool 与 Pool $\times$ Router；同时，在那些较为密集的单元里，我们已有论文也已经识别出一些尚未被真正利用的交互。下面我们提出二十一个直接由这些空白推导出来的研究方向。每个方向都围绕这样一个问题展开：语义路由器的信号架构，以及 WRP 的跨维视角，究竟独特地使什么事情成为可能。
+
+\Cref{tab:maturity} 为每个机会标注了成熟度层级。在本节中，凡是没有明确引用外部文献时，所有预计收益都建立在我们既有测量结果之上。
+
+\begin{table}[t]
+\centering
+\caption{二十一项拟议机会的成熟度与可行性。 \textbf{Tier} 表示主要障碍属于：\emph{engineering}（构件已经存在，主要欠缺集成）还是 \emph{research}（仍有开放技术问题）。}
+\label{tab:maturity}
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{c l c X}
+\toprule
+\textbf{\#} & \textbf{机会} & \textbf{Tier} & \textbf{主要障碍} \\
+\midrule
+\rowcolor{routergreen!8}
+2  & HaluGate 模型信誉路由 & Engineering & 每个 (模型, 领域) 单元的样本量 \\
+5  & 面向智能体的令牌预算约束 & Engineering & 领域特定预算模型的校准 \\
+\rowcolor{routergreen!8}
+8  & Follow-the-sun 资源池再平衡 & Engineering & 滑动窗口 CDF 估计 + FleetOpt \\
+12 & KV-cache 保留指令 & Engineering & 保留指令 API 集成 \\
+\rowcolor{routergreen!8}
+15 & 治理即代码 & Engineering & 用 WRP 约束扩展 DSL \\
+19 & 请求级 RBAC 强制执行 & Engineering & 网关钩子 + JWT 集成 \\
+\midrule
+\rowcolor{poolorange!8}
+1  & 面向会话长度路由的离线 RL & Research & credit assignment + off-policy evaluation \\
+3  & 累积式多轮风险评分 & Research & 对抗基准上的阈值校准 \\
+\rowcolor{poolorange!8}
+4  & 失败类别感知路由 & Research & 多维失败的加权 \\
+\textbf{17} & \textbf{集群学习的联合工具--模型优化} & \textbf{Research} & \textbf{联合 (tool, model) 结果表的稀疏性} \\
+\rowcolor{poolorange!8}
+18 & 网关协调的智能体循环 & Research & 端到端集群集成尚未被整体评估；子系统分别已验证 \\
+\rowcolor{poolorange!8}
+20 & 全局调用者信誉 & Research & 异构安全事件评分 + 衰减校准 \\
+21 & 路由器强制的行为承诺 & Research & 边界声明 NLU 分类器 + 误报风险 \\
+\rowcolor{poolorange!8}
+6  & 基于可观测量的资源池状态推断 & Research & prefill 速率回归 + cold start \\
+7  & 输出长度感知资源池路由 & Research & 输出长度预测方差 \\
+\rowcolor{poolorange!8}
+9  & 资源池感知级联 & Research & 级联中止阈值 + grace period \\
+10 & 在线 $(\gamma, \boundary^*)$ 联合自适应 & Research & 振荡控制 + 验证缺口 \\
+\rowcolor{poolorange!8}
+11 & 混合原型集群配置 & Research & 面向多租户的 FleetOpt 扩展 \\
+13 & 原型驱动的主动扩缩容 & Research & 原型感知预测 vs.\ 聚合基线 \\
+\rowcolor{poolorange!8}
+14 & 把能耗作为路由目标 & Research & 按资源池配置校准 tok/W 信号 \\
+16 & 闭环自适应 & Research & 各调节旋钮的交互强度 + 复合奖励 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Workload $\times$ Router}
+
+\begin{opportunity}[面向最短会话长度路由的离线 RL]
+\label{opp:session-cascade}
+在智能体工作负载中，过长的会话往往是前几轮错误路由的后果。若路由器在第 2 轮选了较弱模型，模型又在工具调用上失败，智能体就会在第 3 轮带着更长提示去重试，如此反复。一个若在起始阶段选对模型与工具即可在 3 轮内完成的会话，最终可能拖到 8 轮，而每多一轮都意味着更长提示和更多计算。
+
+路由器会观察完整会话轨迹：每轮用了哪个模型、调用了哪些工具、工具是否成功、整个会话经历了多少轮。这天然构成了离线 RL 数据集。状态可以表示为轮次编号、已尝试工具、累计上下文长度与领域；动作可以表示为 (model, tool) 选择；奖励则可定义为负的会话长度，或质量加权后的任务完成度/会话长度。来自 \Cref{sec:workload:identity} 的工作负载身份信号还能零成本增强这一状态空间，例如 system prompt 指纹提供领域先验、工具定义暴露智能体运行模式、messages 数组深度直接给出会话成熟度。
+
+\begin{frisk}
+路由器已经为 OATS 和 Feedback Detector 记录逐轮模型与工具结果，因此把这些记录组装成会话轨迹只是工程整理。真正的研究问题在于：如何做 credit assignment，如何进行 off-policy evaluation，以及它相对 OATS 的单步贪心策略究竟能把会话轮数与 token 数降到什么程度。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[HaluGate 驱动的模型信誉路由]
+\label{opp:halugate-reputation}
+Factcheck Classifier~\cite{factcheck2026}在请求阶段识别事实查询，HaluGate~\cite{halugate2025}在响应阶段给出 token 级幻觉判断。今天，这些判决会被记录，但尚未反向作用于路由决策。
+
+机会在于：路由器会长期积累 \emph{(model, domain, hallucinated)} 三元组，因此可维护一个按模型、按领域组织的准确性估计。例如“模型 A 在医疗问题上 12\% 会幻觉，在代码问题上只有 2\%；模型 B 则相反”。这样，对每个新的事实查询，路由器就能以该领域上的历史幻觉率作为实时路由信号，在成本与延迟约束内优先选择更可靠模型。
+
+\begin{frisk}
+数据收集没有新增开销，因为 HaluGate 本来就在运行。工程问题是样本量与时间漂移：每个 (model, domain) 单元需要多少判决才足够可靠，以及模型更新如何使历史信誉失效。贝叶斯估计和滑动窗口是自然方案。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[累积式多轮风险评分]
+\label{opp:cumulative-risk}
+SafetyL1~\cite{safetyl1_2026} 和 SafetyL2~\cite{safetyl2_2026}是按轮独立分类的，而多轮越狱攻击会把恶意意图拆散到多轮中，使得任何单轮都看起来不足以触发分类器。\vsr{}~\cite{vllmsr2026}通过对比嵌入对轮次序列进行判别，已经部分缓解了这一问题，但“检测到后如何做路由响应”尚未被严格形式化。
+
+这里的机会是维护一个逐会话的累积风险分数，把每一轮的边缘性 SafetyL1/L2 信号累积起来。例如某一轮只有 0.4 的风险置信度，单独看不会被拦下，但连续三轮 0.4 就可能意味着真实升级。路由器可以对这些置信度做 EMA，当分数越过阈值时，逐步执行升级措施，例如切换到专门的安全模型、降低温度，或触发人工复核。
+
+\begin{frisk}
+SafetyL1 已经输出连续置信度，因此额外计算极小。难点在于阈值校准，尤其是如何避免对合法但触碰敏感话题的多轮对话产生误报。bearer token 还能把这种逐会话累积扩展到跨会话、跨智能体的逐调用者累积。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[基于路由器结果记忆的失败类别感知路由]
+\label{opp:failure-routing}
+ErrorAtlas~\cite{erroratlas2026}表明，每个 LLM 都有独特的失败签名。当前生产路由器与 oracle 之间的差距，恰恰来自它们没有显式建模错误工具选择、错误参数、重试循环以及中途模型切换退化等失败模式。
+
+vSR 已经通过 HaluGate、SafetyL1/L2、OATS 与 Feedback Detector 观察到每次请求的结果；再加上请求结构中透露出的工具集合和工具失败历史，它就可以构建一个按 \emph{(model, domain, tool-set, failure class)} 组织的结果表。路由决策于是从“哪个模型最便宜/最准”变成“在这个领域与工具集合下，哪个模型最小化综合失败风险”。如果再加入 handoff penalty 和时间序列上的静默漂移检测，路由器就能避免高切换代价的模型组合，并对 provider 侧悄然发生的模型质量回退做出自动流量再平衡。
+
+\begin{frisk}
+这些计数器与统计量大多可以零额外成本维护。真正开放的问题是：多维失败如何汇总成一个路由分数，表该细到什么粒度才不至于稀疏，以及漂移检测该多快触发而不误报。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[智能体会话的运行时令牌预算约束]
+\label{opp:token-budget}
+智能体工作流很容易发生 token 预算爆炸：单个用户请求会触发多次 LLM 调用，而且完整历史会在每轮反复重发。幻觉、错误工具选择和参数错误又会把无效内容注入上下文，使失败轮次在后续继续产生费用。更糟糕的是，定位故障步骤本身就不可靠，于是智能体常常只能退回到全上下文重摘要。
+
+与智能体 SDK 内部的预算上限或事后结算层不同，路由器掌握逐轮真实 token 流、工具结果和历史会话成本分布，因此它才是最适合执行预算约束的地方。路由器可以维护每个活动会话的运行中 token 计数器，并借助 system prompt 指纹与消息深度来判断当前会话在所属部署中的“正常成本区间”。当某会话在当前轮次超过预期预算的 3 倍时，路由器可分级采取措施：先收缩工具目录，再压缩提示，再降级到更便宜模型，最后必要时直接终止。
+
+\begin{frisk}
+计数器本身零开销，问题在于如何做领域特定预算模型的校准，并避免过早杀死那些本应很长但仍然合理的会话。逐调用者的跨会话预算也可由 bearer token 自然扩展。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[集群学习的联合工具--模型选择优化]
+\label{opp:tool-pruning}
+当前多数智能体框架在每次 LLM 调用时都发送完整工具目录，让同一个模型既负责选工具又负责消费所有工具结果。这在三个层面上都浪费：工具目录本身大量占用上下文；逐轮贪心工具选择并不关心完整序列的总成本与总收益；同一个模型并不适合所有工具调用。
+
+这个机会要做的是，把工具选择与模型选择视为联合动作空间。路由器可以利用跨租户积累的 \emph{(domain, turn-number, tool, model)} 结果表，在分发时同时做四件事：先依据权限缩减工具目录，再依据历史成功率暴露 top-$k$ 工具，再为每个工具选择最合适的解析模型，最后结合序列级转移先验给出更符合当前阶段的偏好。
+
+\begin{frisk}
+工具可学性与逐步模型可学性分别都已有大量工作验证。真正新的是：在路由层、用同一张集群级结果表，联合优化两者。主要风险是工具与模型交叉乘积带来的稀疏性，以及“集群先验”对新颖会话的适应性。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[网关协调的智能体循环：记忆层、工具与 talk-shaped 训练]
+\label{opp:gateway-agent-loops}
+现有智能体 API 看似无状态，但实际上会在每轮重发庞大前缀、把工具输出持续塞入上下文，并在错误工具或错误模型选择后引发额外轮次。学术基准已经证明了这一问题。开放的 WRP 问题是：一个跨租户网关，是否能把动态工具表面、缓存/KV 策略、会话感知调度与拥塞控制统一起来，让那些根本没有重编译过的框架，也能获得更少 token、更少轮次和更高工具准确率。
+
+这一机会的核心并不是发明单个新机制，而是把已经分别在 ITR、Continuum、AgServe、Helium、Sutradhara、CONCUR 等系统中验证过的子机制，统一到一个网关原生控制面中。路由器借助跨租户统计，可以不仅重写工具/指令表面，还能联合决策缓存块布局、KV TTL、接纳提示以及基于身份的记忆隔离与 delegation token。
+
+\begin{frisk}
+这里最缺的不是机制，而是统一集成证据。需要在真实多租户流量上做 A/B，验证“组合这些机制”是否真的优于单独集成 ITR 或单独集成某种调度器。
+\end{frisk}
+\end{opportunity}
+
+\subsection{Workload $\times$ Router：授权与安全}
+\label{sec:vision:auth}
+
+\begin{opportunity}[面向智能体工具调用的请求级 RBAC 强制执行]
+\label{opp:rbac-enforcement}
+“Agents of Chaos”~\cite{agentschaos2025}所展示的多种未授权工具执行攻击之所以成功，是因为模型既是决策者又是执行准入者，这违反了零信任中“每个资源请求都必须在执行点被独立认证与授权”的原则。路由器恰恰是那个同时知道 bearer token 身份、看得到模型 \texttt{tool\_call} 输出、又仍处于工具真正执行之前的唯一位置。
+
+因此，路由器可以按 Kubernetes RBAC 的方式工作：先从 JWT 解出身份、角色和能力声明，再在治理 DSL 中定义按角色划分的工具权限矩阵，最后在模型做出工具调用时执行 block 或 rewrite。这样，未授权的调用者甚至在模型看到工具目录之前，就已经被收缩到安全范围之内。
+
+\begin{frisk}
+LiteLLM 的 Tool Permission Guardrail 与 AAP 已经分别提供了生产机制与 claim 结构。这里主要是工程集成工作，而不是基础原理问题。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[跨智能体威胁传播的全局调用者信誉]
+\label{opp:caller-reputation}
+在 “Agents of Chaos” 的实证场景里，同一个非 owner 会依次攻击多个智能体，而各智能体之间没有共享威胁记忆。路由器具备按 bearer token 聚合全局行为的能力，因此可以建立逐调用者的跨智能体行为画像：工具调用被拒、预算超限、安全升级、身份校验失败等事件都能被折算进一个带时间衰减的信誉分数中。
+
+这样，当低信誉调用者接触一个新的智能体时，路由器就可以主动收缩工具目录、切换到更安全的模型、降低预算上限，并向 owner 发送侧信道通知。相反，安全交互则可随着时间逐步恢复信任。
+
+\begin{frisk}
+困难在于如何给异构安全事件统一定分，以及如何设置衰减与恢复速度，从而既对持久攻击者敏感，又不至于对短暂误判的正常用户过度惩罚。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[路由器强制执行的行为承诺]
+\label{opp:behavioral-commitments}
+在一些真实攻击案例中，模型文本上已经明确表示“我不应该继续回应”或“我无权这么做”，但用户继续施压后，它仍会重新参与。问题不在模型有没有表达出边界，而在系统没有把这段边界声明变成可持久执行的状态。
+
+路由器可以把这种文本边界声明解析为一条结构化阻断规则，例如“bearer\_token\_X 对 agent\_Z 的某类操作在时长 $D$ 内一律阻断”，从而使后续请求在进入模型之前就被拒绝。这样，模型的安全推理第一次真正拥有了“牙齿”。
+
+\begin{frisk}
+最难的是区分真实边界承诺与普通措辞保留语，以及为阻断规则设置合适 TTL。它和调用者信誉体系之间也会相互作用。
+\end{frisk}
+\end{opportunity}
+
+\subsection{Router $\times$ Pool}
+
+\begin{opportunity}[Follow-the-sun 资源池再平衡]
+\label{opp:dynamic-boundary}
+FleetOpt~\cite{fleetopt2026}在线下从静态 CDF 推导最优边界 $\boundary^*$，但现实流量存在明显昼夜循环：白天偏聊天，夜间偏批量智能体。若系统能基于滑动窗口 CDF 周期性重算 $\boundary^*$，并仅在软件层重新分配 vLLM 实例到短池或长池，就能让资源池在全天候流量迁移中始终靠近最优点。
+
+\begin{frisk}
+FleetOpt 的闭式求解已存在，真正要做的是把它包进一个滑动窗口控制器，并处理切换期间的暂时性 SLO 波动。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[从路由侧可观测量推断资源池状态]
+\label{opp:pool-feedback}
+当前 WRP 矩阵中的 Pool $\times$ Router 单元仍是空白：现有工作几乎都没有把资源池状态反馈给路由决策。语义路由器今天主要只看请求本身的信号。
+
+事实上，路由器在分发过程中已经拥有足够多的代理变量：每个实例的已分发请求数、已完成请求数、每个请求的 prompt length 以及最终的 TTFT。它可以据此估计队列深度、用 (prompt\_length, TTFT) 回归得到 prefill 速率，并据此在资源池拥塞时更激进压缩、换到更空闲的实例，或者避免再把长上下文请求发给状态差的实例。
+
+\begin{frisk}
+队列估计近乎零成本；挑战在于冷启动、回归速度以及“线性回归 vs.\ 排队论估计”哪种更好。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[输出长度感知的资源池路由]
+\label{opp:output-length}
+FleetOpt 只根据提示长度做资源池划分，但真正占用 KV-cache 的是提示与输出长度之和。比如代码智能体可能只有 3K 提示，却会生成 8K 输出，总计 11K token，更像长池工作负载。若只看提示长度，它就会被错误派往短池，引发溢出与 SLO 问题。
+
+路由器可以利用领域先验和历史结果，对不同领域拟合输出长度分布或回归模型，从而在分发时用“prompt + predicted output”而不是只用 prompt 做资源池决策。
+
+\begin{frisk}
+输出长度预测的波动性明显高于 TTFT，因此保守分位数策略很重要；过于激进会把太多请求送去长池，过于乐观则会压垮短池。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[资源池感知的级联]
+\label{opp:pool-cascade}
+传统级联只比较模型质量与成本，而不看强模型所在资源池是否已经拥塞。当强池队列过深时，把请求升级过去反而会造成 TTFT 违约。
+
+借助 \Cref{opp:pool-feedback} 的状态推断，路由器可以把级联决策变成“质量差距、强池队列、SLO 剩余空间”的联合函数。若强池已满，则可改为继续使用便宜模型、先压缩后重试，或改派中间层模型。
+
+\begin{frisk}
+这里的核心研究问题是如何设置中止阈值与 grace period，从而在质量和延迟之间取得可接受的平衡。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[由路由器发出的 KV-cache 保留指令]
+\label{opp:kv-retention}
+当智能体暂停去执行工具时，推理引擎必须暂存其 KV-cache。标准 LRU 并不知道“这个会话只是临时暂停，马上就会回来”，因此会把真正重要的缓存块驱逐掉，迫使系统重新计算 70K--200K token 的长上下文。
+
+vLLM RFC~37003~\cite{vllm2026rfc37003}提出了 \texttt{RetentionDirective} API，但没有解决“谁来决定优先级”这个策略问题。语义路由器正是天然的策略权威：会话链字段、system prompt 指纹、工具集合与 OATS 的工具时延分布，都能帮助它判断一个会话是否值得保留多久、以什么优先级保留。
+
+\begin{frisk}
+这里主要是 API 打通与容量预算问题，即如何防止路由器把太多缓存都标成高优先级，最终反而让其他流量挨饿。
+\end{frisk}
+\end{opportunity}
+
+\subsection{Workload $\times$ Pool}
+
+\begin{opportunity}[由原型驱动的主动资源池扩缩容]
+\label{opp:proactive-scaling}
+像 SageServe 与 WarmServe 这样的系统已经证明，工作负载预测可以让 GPU 扩缩容从被动变成主动。但它们大都预测聚合请求量，而不考虑“流量语义组成”。
+
+语义路由器掌握领域与原型分类，因此它能输出按 archetype 划分的时间序列。如果编码智能体流量正在上升而聊天流量正在下降，那么真正该提前扩容的是长池而不是短池。也就是说，工作负载的语义组成比总请求数更能精确地预测各资源池未来需求。
+
+\begin{frisk}
+开放问题在于：这种 archetype-aware 预测，到底能否明显优于传统聚合计数预测。最自然的验证方式是把它放到 FleetSim 的昼夜模拟流量中做对比实验。
+\end{frisk}
+\end{opportunity}
+
+\subsection{三维：Workload $\times$ Router $\times$ Pool}
+
+\begin{opportunity}[压缩率与资源池边界的在线联合自适应]
+\label{opp:workload-shaping}
+\Cref{opp:dynamic-boundary} 会随着工作负载 CDF 变化而调整 $\boundary^*$，但默认把压缩率 $\gamma$ 固定不变。FleetOpt 已经证明两者本来就是耦合的：最佳压缩率依赖于资源池边界，最佳资源池边界也依赖于压缩强度。
+
+因此，一个更完整的控制器应当每隔固定时间，在滑动窗口 CDF 上同时搜索 $(\gamma, \boundary^*)$ 的最优组合，并只在收益足够明显时通过迟滞机制更新配置。对于聊天主导与智能体主导的不同原型，最佳压缩策略本就不同。
+
+\begin{frisk}
+网格搜索开销很低，真正问题是如何避免频繁振荡，以及联合优化相对“只调边界”到底有多大额外收益。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[混合原型的集群配置]
+\label{opp:mixed-archetype}
+FleetOpt 与 FleetSim 通常面向单一 CDF 原型做优化，而生产集群往往同时服务客服聊天、内部 RAG 与编码智能体等多种原型。语义路由器能实时给出各原型的占比，因此它正好提供了扩展 FleetOpt 到“加权混合 CDF”所缺失的输入。
+
+一个 60\% Archetype~1 与 40\% Archetype~3 混合的集群，很可能比“分别为最坏单原型配置”更节省，因为短池与长池的压力在时间与资源维度上互补。
+
+\begin{frisk}
+关键研究问题是：这种互补性到底强不强，是否足以抵消引入混合配置的复杂度；另一个风险则是原型分类本身若不准，会让有效 CDF 偏移。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[把能耗作为可组合路由目标]
+\label{opp:energy-signal}
+1/W 定律~\cite{onewlaw2026}已经给出了与上下文长度、资源池配置和 GPU 类型有关的闭式 tok/W 模型，但它目前主要还是离线分析工具，尚未成为请求时路由信号。
+
+这一机会就是把 1/W 模型真正操作化为 vSR 里的一个新信号类型，使路由器在比较候选资源池时，不只看成本、延迟和质量，也看能耗。这样，运营者就可以定义诸如“整个集群 tok/W 不低于某阈值”的能效 SLO。
+
+\begin{frisk}
+模型本身很快，也已有研究开始探索能耗/碳感知的 LLM 路由。最大的开放问题是，多目标之间应如何权衡，尤其在成本与能耗并不完全一致时。
+\end{frisk}
+\end{opportunity}
+
+\begin{opportunity}[面向 WRP 架构的治理即代码]
+\label{opp:governance}
+\vsr{} DSL~\cite{vllmsr2026} 与 SIRP~\cite{sirp2025}已经提供了 policy-as-code 的雏形。若进一步把 DSL 扩展到能表达 WRP 级约束，例如“PII 查询必须留在本地机房”“智能体工作负载必须走高准确率资源池”“每请求成本不得超过某个上限”，那么整个推理架构的治理就可以编译化、静态化。
+
+bearer token 进一步把这套 DSL 从“资源池、区域、成本”等基础设施属性，扩展到“角色、scope、授权声明”等调用者属性，从而让 RBAC 谓词成为治理语言的一部分，并与 \Cref{opp:rbac-enforcement} 的运行时执行形成前后配合。
+
+\begin{frisk}
+这项工作的核心挑战在于语言设计、编译器诊断以及“策略可满足性”验证，尤其是随着集群不断演化，已有策略如何持续保持可满足。
+\end{frisk}
+\end{opportunity}
+
+\subsection{顶层：闭环自适应}
+
+\begin{opportunity}[跨 WRP 调节旋钮的闭环自适应]
+\label{opp:self-adapt}
+前面的二十个机会各自围绕某个或某几个调节旋钮展开，例如模型选择、压缩率 $\gamma$、资源池边界 $\boundary^*$、保留 TTL、级联阈值、令牌预算、联合工具--模型选择、安全升级阈值、RBAC 规则、调用者信誉与行为承诺阻断。单独看时，每个回路都说得通；但一旦放到一起，它们就会互相影响。改变模型选择会改变会话长度分布，进而改变工作负载 CDF，进而影响最佳资源池边界，再进一步影响级联是否值得发生。
+
+因此，最终机会是构建一个元控制器，以 MAPE-K 的方式统一编排所有自适应回路：监控统一的逐会话结果记录，分析失败类别及其对应的责任旋钮，规划满足交互约束的联合调整，再以离线估计 + 小流量 canary 的方式逐步执行。与单独微调每个旋钮相比，这种闭环系统才真正符合 WRP 的耦合本质。
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  knob/.style={rectangle, rounded corners=3pt, draw, minimum height=6mm,
+               minimum width=22mm, font=\footnotesize\sffamily,
+               inner sep=2pt, align=center},
+  wknob/.style={knob, fill=workloadblue!15, draw=workloadblue!60},
+  rknob/.style={knob, fill=routergreen!15, draw=routergreen!60},
+  pknob/.style={knob, fill=poolorange!15, draw=poolorange!60},
+  dep/.style={-{Stealth[length=4pt]}, thick, gray!70},
+  bidep/.style={{Stealth[length=4pt]}-{Stealth[length=4pt]}, thick, gray!70},
+  every node/.append style={font=\scriptsize},
+  node distance=10mm and 14mm,
+]
+\node[wknob] (archetype) {原型\\组成\\{\tiny Opp\,11,\,13}};
+\node[wknob, right=18mm of archetype] (tokenbudget) {令牌预算\\{\tiny Opp\,5}};
+\node[rknob, below left=12mm and 4mm of archetype] (modelsel)
+  {模型选择\\{\tiny Opp\,1,\,2,\,4}};
+\node[rknob, right=10mm of modelsel] (gamma)
+  {压缩 $\gamma$\\{\tiny Opp\,12}};
+\node[rknob, right=10mm of gamma] (toolprune)
+  {工具 + 模型\\{\tiny Opp\,17,\,18}};
+\node[rknob, right=10mm of toolprune] (cascade)
+  {级联阈值\\{\tiny Opp\,9}};
+\node[rknob, right=10mm of cascade] (retention)
+  {保留 TTL\\{\tiny Opp\,10}};
+\definecolor{securityred}{RGB}{180,40,60}
+\tikzset{sknob/.style={knob, fill=securityred!12, draw=securityred!60}}
+\node[sknob, below right=12mm and -2mm of retention] (authz)
+  {RBAC + 信誉\\{\tiny Opp\,19,\,20,\,21}};
+\node[pknob, below=14mm of gamma] (taustar)
+  {资源池边界 $\tau^*$\\{\tiny Opp\,6,\,12}};
+\node[pknob, right=14mm of taustar] (poolscale)
+  {逐池扩缩容\\{\tiny Opp\,11,\,13}};
+\draw[dep] (modelsel) -- node[left, pos=0.4] {\tiny CDF 漂移} (taustar);
+\draw[bidep] (gamma) -- node[right, pos=0.4] {\tiny 耦合} (taustar);
+\draw[dep] (taustar) -- node[below, pos=0.5] {\tiny 负载变化} (cascade);
+\draw[dep] (tokenbudget) -- node[right, pos=0.4] {\tiny 压缩/降级} (taustar);
+\draw[dep] (archetype) -- node[left, pos=0.4] {\tiny 需求预测} (poolscale);
+\draw[dep] (poolscale) -- node[below, pos=0.5] {\tiny 资源池压力} (cascade);
+\draw[dep] (retention) -- node[right, pos=0.4] {\tiny 缓存命中率} (cascade);
+\draw[dep, routergreen!60] (modelsel) to[bend left=20]
+  node[above, pos=0.5] {\tiny 上下文污染} (tokenbudget);
+\draw[dep] (toolprune) -- node[above, pos=0.5]
+  {\tiny 上下文节省} (tokenbudget);
+\draw[dep, securityred!60] (authz) to[bend left=25]
+  node[below, pos=0.5] {\tiny 工具收缩} (toolprune);
+\draw[dep, securityred!60] (authz) to[bend right=20]
+  node[right, pos=0.4] {\tiny 预算上限} (tokenbudget);
+\node[above=2mm of archetype, font=\footnotesize\sffamily\bfseries,
+      color=workloadblue] {Workload};
+\node[left=2mm of modelsel, font=\footnotesize\sffamily\bfseries,
+      color=routergreen] {Router};
+\node[below left=2mm and -4mm of taustar,
+      font=\footnotesize\sffamily\bfseries,
+      color=poolorange] {Pool};
+\node[right=2mm of authz, font=\footnotesize\sffamily\bfseries,
+      color=securityred] {Security};
+\end{tikzpicture}
+\caption{WRP 各机会中的调节旋钮依赖关系。调整某个旋钮，例如模型选择，会沿着工作负载 CDF 一路传导到资源池边界与级联阈值，因此需要协调式自适应。}
+\label{fig:knob-interactions}
+\end{figure}
+
+\begin{frisk}
+MAPE-K 本身很成熟，数据库调优和云系统已经证明了多旋钮安全在线调节的可行性。这里真正开放的问题是交互强度是否足够大，值得引入一个统一元控制器；以及如何用离线日志先评估候选策略，避免把每次尝试都直接暴露给线上流量。
+\end{frisk}
+\end{opportunity}

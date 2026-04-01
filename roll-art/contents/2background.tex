@@ -1,0 +1,394 @@
+%!TEX root=../main.tex
+\section{Background}
+\label{sec:background}
+
+
+\subsection{Agentic RL Training}
+\label{subsec:multi-task-agentic}
+
+\PHB{The Training Pipeline.}
+The training pipeline for multi-task agentic RL is an iterative loop
+comprising three distinct computational stages. The first stage is a \textbf
+{rollout} for experience collection. In this stage, the agent LLM
+(actor) interacts with parallel \emph{environments} to generate training
+data. Unlike standard LLM inference, this process is \emph
+{multi-turn} and \emph{stateful}~\cite
+{kimiteam2025kimik2openagentic,deepseek_v3_2_speciale}. In each turn, the
+agent observes a state, generates an action token sequence, and submits it to
+the environment. The environment executes the action (e.g., running code,
+clicking a link) and returns feedback. This cycle repeats until a termination
+condition is met, producing a sequence of state-action pairs known as a \emph
+{trajectory}. Once a trajectory is complete, the system proceeds to
+a \textbf{reward stage}, where a \emph{reward worker} evaluates the quality
+of the agent's actions. This evaluation yields a scalar reward signal,
+computed via methods ranging from lightweight rule-based checks~\cite
+{he2025deepmath} to computationally intensive model-based judgments
+(e.g., LLM-as-a-Judge~\cite
+{son2024llmasajudgerewardmodel,zhong2024rlhfuseefficientrlhftraining}).
+Finally, the collected trajectories and rewards are consumed by the \textbf
+{training stage} to update the agent LLM’s weights using RL algorithms
+(e.g., PPO~\cite{schulman2017proximal}, GRPO~\cite{shao2024deepseekmath}). For training performance~\cite{areal}, RL researchers typically adopt \textit{synchronous} RL training which requires strict synchronization of the model weights between the rollout and training stage in each step. 
+
+
+
+\begin{table}[t]
+\centering
+\caption{Taxonomy of Adopted Agentic Environments.}
+\label{tab:env-taxomy}
+% \vspace{-5pt}
+\resizebox{0.48\textwidth}{!}{%
+\begin{tabular}{ll l c}
+\toprule
+\textbf{Environment} & \textbf{Task} \textbf{Domain}   & \textbf{Modality}     & \textbf{\#Turns} \\
+\midrule
+SWE-bench~\cite{swe-bench}   & SWE           & Text         & 30--50      \\
+WebShop~\cite{webshop}     & Web           & Text         & 5--30      \\
+FrozenLake~\cite{frozen_lake}  & Game          & Text, Visual & 20--100      \\
+GEM-math~\cite{GEM-github}    & Math+Tool Use & Text       & $<5$         \\
+GEM-game~\cite{GEM-github}    & Game          & Text         & 1            \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[tb]
+    \centering      
+    \begin{subfigure}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/overview/disaggregated_cluster.pdf}
+    \end{subfigure}    
+    % \vspace{-5pt}
+    \caption{
+        Disaggregated infrastructure for agentic RL training.
+    }
+    \label{fig:disaggregated_cluster}
+\end{figure}
+
+
+
+
+
+\PHM{Environment Heterogeneity}
+% \label{subsec:taxonomy-of-env}
+A key challenge in agentic RL is the extreme diversity of the environments,
+which dictates the system's compute profile. As summarized in \autoref
+{tab:env-taxomy}, agentic tasks vary significantly in modality and
+interaction frequency. Complex reasoning tasks like \texttt{SWE-bench}~\cite
+{swe-bench} (software engineering), \texttt{FrozenLake}~\cite{frozen_lake}
+(visual games), and \texttt{WebShop}~\cite{webshop} (eCommerce) require long
+interaction horizons (up to 30--100 turns). Frequent interactions force the
+agent LLM to repeatedly process the growing context history, making the
+workload prefill-heavy and computationally intensive. Conversely, tasks
+like \texttt{GEM-Math} and \texttt{GEM‑Game}~\cite{GEM-github} may involve
+fewer turns (up to five) but require generating longer chains of
+thought per action. These workloads are decoding-heavy, shifting the
+bottleneck from compute to memory bandwidth. This variance means that 
+the infrastructure must adapt to the specific characteristics of the current task's rollout.
+
+
+
+
+
+
+
+
+
+
+
+\subsection{Disaggregated Cluster Infrastructure}
+\label{subsec:disaggregated-cluster}
+
+\PHB{The Case for Disaggregation.} 
+The extreme heterogeneity of agentic RL workloads, ranging from
+compute-intensive training to stateful environment simulation (\S\ref
+{subsec:multi-task-agentic}), renders monolithic architectures inefficient.
+Consequently, agentic RL training must transition to a \emph
+{disaggregated infrastructure} that decouples these demand-conflicting
+computation stages into specialized resource pools. As illustrated
+in \autoref{fig:disaggregated_cluster}, in a typical disaggregated
+infrastructure, \emph{training clusters} utilize high-end, compute-optimized GPUs 
+(e.g., NVIDIA H800) for massive throughput; \emph{inference clusters} 
+leverage bandwidth-optimized hardware (e.g., H20) to serve memory-bound decoding; 
+\emph{CPU clusters} provide elastic capacity for diverse, containerized runtime 
+environments orchestrated by Kubernetes~\cite{k8s}; and \emph{serverless infrastructure}
+handles bursty, stateless workloads like reward evaluation. 
+These pools are interconnected via standard network fabrics, relying on distributed storage for persistent logging and fault tolerance.
+
+
+
+\PHM{Sync. vs. Async. Training.} 
+While disaggregation resolves resource mismatches, it introduces non-trivial
+orchestration challenges to the training paradigm that dictates 
+the trade-off between system throughput
+and algorithmic consistency.
+
+\underline{\emph{1) Synchronous Training:}}
+This paradigm enforces strict consistency by blocking the rollout stage until the
+latest model weights are received from the training cluster. In a
+disaggregated setting, however, this introduces substantial ``dependency
+bubbles'' (\autoref{fig:paradigm-all-in-one}-Left), where expensive GPUs sit \emph{idle}
+during the high-latency weight synchronization and straggler-bound
+environment steps (\S\ref{sec:motivation}). 
+
+\underline{\emph{2) Asynchronous Training:}}
+To mitigate these bubbles, systems can adopt \emph{asynchronous} paradigms
+(e.g., one-off RL training~\cite{deepscaler2025} as shown in \autoref
+{fig:paradigm-all-in-one}-Right). Here, rollout and training execute \emph{in parallel}: the
+training stage consumes trajectories generated by slightly older policies (e.g.,
+one iteration behind in one-off training), 
+while the rollout stage continuously produces new data. This approach
+effectively masks the synchronization latency and straggler effects inherent to
+disaggregation, trading a degree of policy freshness (staleness) for
+maximized hardware utilization and system throughput.
+
+
+\begin{table}[t]
+\centering
+\caption{NVIDIA GPU specifications.}
+\label{tab:nvidia-gpu-specs}
+% \vspace{-5pt}
+\small
+\begin{tabular}{lcc}
+\toprule
+Hardware Specification                & H20            & H800           \\
+\midrule
+TFLOPS         & 148            & 989.5 \\
+HBM capacity        & 96GB  & 80GB           \\
+HBM bandwidth       & 4TB/s & 3.35TB/s       \\
+NVLink bandwidth    & 900GB/s & 400GB/s      \\
+Normalized Cost~\cite{megascale-infer} & 1.00          & 2.85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{figure}[tb]
+    \centering      
+    \begin{subfigure}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/paradigm/sync_pattern.pdf}
+    \end{subfigure}    
+    \vspace{-5pt}
+    \caption{
+        Synchronous vs. asynchronous training.
+    }
+    \label{fig:paradigm-all-in-one}
+\end{figure}
+
+
+\section{Characterization and System Requirements}
+\label{sec:motivation}
+
+
+To motivate the design of \SystemName{}, we conduct a comprehensive workload
+characterization of multi-task agentic RL training. Based on these empirical
+observations, we derive a set of critical system requirements (summarized in
+the boxes below) that \SystemName{} must satisfy.
+
+\subsection{Stage Computation}
+\label{subsec:resource-req-within-stage}
+
+\PHB{Training Step Latency Breakdown.} 
+We first profile the end-to-end latency of a standard training iteration to
+identify the dominant cost components. We train Qwen3-8B/32K on 32 H800 GPUs
+using the \texttt{SWE-bench} environment (batch size 128), where the agent LLM
+interacts with a containerized sandbox for software engineering tasks. The
+interaction involves two core operations: \texttt{env.reset} for environment
+initialization via Docker image pulling and container launching, and \texttt{env.step}
+for agent's action execution.
+
+
+\begin{figure}[t]
+    \centering      
+    \includegraphics[width=\linewidth]{figs/time/Qwen3-8B-GPU16-sync_time_distribution_fixed.pdf}  
+    % \vspace{-8mm}
+    \caption{
+       Breakdown of a training step: successful runs (top, avg=365.7s) versus execution with environment failures (bottom, avg=513.3s). 
+    }
+    \label{fig:time_breakdown}
+    % \vspace{-5mm}
+\end{figure}
+
+
+\autoref{fig:time_breakdown} breaks down the latency of five \emph
+ {successful} iterations against five iterations containing \emph
+ {environment failures}. In successful runs, the average iteration time is
+ 366 seconds, with LLM generation dominating (54\%), followed by training
+ (23\%) and environment initialization (15\%). However, in iterations where
+ environment timeouts due to failures, the average time spikes to 513
+ seconds. Crucially, in these failure scenarios, \texttt{env.reset} alone
+ consumes 78\% of the rollout time, shifting the bottleneck entirely from GPU
+ computation to environment overhead. Our production data indicates these
+ failures are not rare corner cases, occurring approximately once every ten
+ iterations. While prior works~\cite{rollpacker,RhymeRL} report that LLM
+ generation dominates RL runtime (>80\%), our empirical study reveals that in
+ agentic RL, efficient management of the environment lifecycle is the
+ paramount challenge.
+
+
+
+
+\begin{figure}[tb]
+    \centering
+    \begin{subfigure}{0.235\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/disagg_motivation/osdi_frozen_lake_decoding_1024_bar.pdf}
+        \caption{\texttt{FrozenLake} \small{[Prefill-Heavy]}.}
+        \label{fig:prefill-heavy-task}
+    \end{subfigure}
+    \begin{subfigure}{0.235\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/disagg_motivation/osdi_gem_math_thinking_decoding_4096_bar.pdf}
+        \caption{\texttt{GEM-Math} \small{[Decode-Heavy]}.}
+        \label{fig:decode-heavy-task}
+    \end{subfigure}
+    \vspace{-10pt}
+    \caption{End-to-end rollout time (seconds) of different tasks on H20 and H800 GPUs across varying batch sizes.}
+    % \vspace{-5pt}
+    \label{fig:motivation-task-affinity}
+\end{figure}
+
+
+\PHM{Divergent Hardware Affinities in Generation.} 
+Modern GPUs expose different trade-offs between compute capability, memory
+capacity, and cost (\autoref{tab:nvidia-gpu-specs}). While recent RL
+systems~\cite{StreamRL,asyncflow,seamlessflow} advocate physically decoupling
+generation from training---assigning rollout to cost-effective,
+bandwidth-optimized GPUs (e.g., NVIDIA H20) and training to
+compute-optimized devices (e.g., H800)---our characterization reveals that \emph{this
+static assignment is insufficient for agentic workloads}. LLM generation
+comprises two distinct phases with opposing resource demands: the 
+compute-bound prefill phase and the memory-bandwidth-bound decoding phase. In
+environments with a few interaction turns and reasoning thinking pattern,
+most of the runtime is spent in decoding (decoding-heavy); conversely, in
+environments with many turns, the prefill phase dominates and demands high
+compute throughput (prefill-heavy). In our production clusters,
+agentic RL tasks exhibit a clear \emph{bimodal distribution}, featuring 
+either a small number of interaction turns ($< 5$) or a large number ($> 10$).
+
+
+
+
+To quantify this divergence, we run a prefill-heavy task (\texttt
+{FrozenLake}) and a decoding-heavy task (\texttt{GEM-Math}) using
+Qwen3-8B/32K for ten iterations with prefix caching enabled. For a
+cost-equivalent comparison, we execute the workloads on two distinct hardware
+configurations: one with 6 H20 GPUs and the other with 2 H800 GPUs. As shown
+in \autoref{fig:prefill-heavy-task}, the compute-dense H800 outperforms the
+H20 on \texttt{FrozenLake}, reducing end-to-end rollout time to as low as 0.53$\times$. Conversely, for \texttt{GEM-Math} (\autoref{fig:decode-heavy-task}), the
+H20's superior memory bandwidth expedites the decoding phase, the H20's higher memory
+bandwidth accelerates decoding, reducing rollout time to 0.49$\times$--0.79$\times$
+of the H800. These
+results invalidate the dogmatic assumption that generation is uniformly
+bandwidth-bound. Instead, maximizing throughput requires 
+dynamically mapping tasks to their best-fit hardware. 
+
+
+
+
+\begin{tcolorbox}[colback=blue!5!white,colframe=gray!75!black,left=1mm, right=1mm, top=0.5mm, bottom=0.5mm, arc=1mm]
+\noindent\textbf{R1:} The optimal resource allocation of LLM generation should align workload characteristics (e.g., prefill- vs. decoding-heavy, batch size) with hardware capabilities.
+\end{tcolorbox}
+
+
+
+\begin{figure}[tb]
+    \centering      
+    \begin{subfigure}{0.2\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/time/Qwen3-8B-GPU16-sync_time_cdf.pdf}
+        \caption{Env Time Distribution.}
+        \label{fig:env_time_cdf}
+    \end{subfigure}
+    \begin{subfigure}{0.27\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figs/async_env_illustration/env-long-tail.pdf}
+        \caption{Batched Env Interaction.}
+        \label{fig:sub-batched_env_interaction}
+    \end{subfigure}
+    
+    % \includegraphics[width=0.48\linewidth]{figs/time/Qwen3-8B-GPU16-sync_time_cdf.pdf}  
+    % \vspace{-3mm}
+    \caption{The analysis of environment interaction: (a) Cumulative distribution function of time (log-scaled) taken for environment initialization (\texttt{env.reset}) and environment step (\texttt{env.step}). (b) Illustration of how long-tail environments affect multi-turn rollouts under batched env interaction.
+    }
+    \label{fig:env_analysis}
+    % \vspace{-5mm}
+\end{figure}
+
+\PHB{Heavy-Tailed Environment Execution.} 
+Our production experience running thousands of concurrent environments warrant that resource isolation without interference is essential. Resource sharing can lead to severe issues, such as concurrent disk I/O exhausting shared quotas and causing cascading failures. Consequently, we employ dedicated Kubernetes clusters to manage and isolate each containerized environment.
+
+Substantial prior systems~\cite{rollpacker,StreamRL,RhymeRL} have analyzed the long-tail behavior of LLM generation. \autoref{fig:env_time_cdf} illustrates a similar long-tail distribution in the latency of \texttt{env.reset} and \texttt{env.step} operations, with the effect particularly pronounced for \texttt{env.reset}. In our internal production deployments, the long-tail delay of \texttt{env.reset} can reach hundreds of seconds, mainly due to two factors:
+(1) network contention, where hundreds of environment workers simultaneously fetching docker images can saturate network links and overwhelm the image registry service, and (2) compute and I/O contention on host nodes, where launching new containers consumes substantial CPU and disk resources.
+% These long-tail environment operations act as stragglers and degrade the rollout efficiency. 
+
+
+The long-tail environments would become stragglers and delay the end-to-end rollout latency. Specifically, the agent LLM interacts with multiple environments \emph{simultaneously}. Since underlying LLM engines execute requests in batches, it is natural to batch environment interactions with the agent LLM as well. \autoref{fig:sub-batched_env_interaction} illustrates this batched execution pattern, in which the long-tail environment behavior can significantly increase end-to-end rollout latency. Fast environments are forced to wait for the slowest ones before the next generation step can proceed. 
+Our profiling (\autoref{fig:time_breakdown}) indicates that batched environment interaction increases rollout time by up to 21.3\% compared to ideal execution, an overhead that compounds as environment failure rates increase. 
+
+
+
+\begin{tcolorbox}[colback=blue!5!white,colframe=gray!75!black,left=1mm, right=1mm, top=0.5mm, bottom=0.5mm, arc=1mm]
+\textbf{R2:} Environment execution, including \texttt{env.reset} and \texttt{env.step},
+is prone to extreme long-tail latency. To prevent stragglers from stalling the pipeline, the system must abandon batched environment interaction in favor of fine-grained, asynchronous environment management.
+\end{tcolorbox}
+
+\begin{figure}[tb]
+    \centering      
+    \includegraphics[width=\linewidth]{figs/reward/gpu_utilization_7B.pdf}  
+    \vspace{-12pt}
+    \caption{
+        Inefficient resource usage when dedicating local GPUs for reward computation.
+    }
+    \label{fig:reward_utilization}
+    % \vspace{-10pt}
+\end{figure}
+
+\PHB{Stateless Reward Computation.}
+The reward stage follows the rollout stage, and most reward computations can be implemented as \emph{stateless functions}. For lightweight code-based and rule-based rewards, the resource demand is relatively small, making it natural to offload these workers on a serverless platform for scalable and low-latency computation. The LLM-based reward computation demands intensive GPUs, contending with rollout workers for GPU resources. A common practice is to reserve dedicated GPUs for reward LLMs. As an example, in our Qwen3-8B/32K \texttt{SWE-bench} experiment with a batch size of 128, we allocate 4 H800 GPUs to a dedicated 7B reward LLM and 28 H800 GPUs to rollouts. However, the reward GPUs achieve only 7.4\% average utilization across steps (\autoref{fig:reward_utilization}). Since the reward LLM’s parameters remain fixed during training, it can be treated as a stateless function, which makes serverless deployment~\cite{Torpor, ServerlessLLM, BLITZSCALE} a promising approach to improving resource utilization.
+
+
+
+\begin{tcolorbox}[colback=blue!5!white,colframe=gray!75!black,left=1mm, right=1mm, top=0.5mm, bottom=0.5mm, arc=1mm]
+\noindent\textbf{R3:} Reward workers are stateless and typically exhibit low utilization, making them well-suited for serverless deployment to improve overall resource efficiency.
+\end{tcolorbox}
+
+
+\subsection{Inter-Stage Communication}
+\label{subsec:communication-between-stage}
+% Beyond computation, inter-stage communication is critical for agentic RL training. We next analyze two types of communication: stability-critical, small-packet \emph{trajectory transfer} and bandwidth-sensitive, large-volume \emph{weight transfer}.
+
+Beyond computation, inter-stage communication is a critical role in agentic RL training, comprising two distinct types: stability-critical, small-packet \emph{trajectory transfer} and bandwidth-intensive, large-volume \emph{weight update}.
+
+
+\begin{table}[t]
+\centering
+\caption{\small Transmission overhead from the training cluster to the inference cluster over TCP and RDMA.}
+\label{tab:llm-transmission}
+\scriptsize
+\resizebox{0.45\textwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Model} & \textbf{Size (GB)} & \textbf{TCP (s)} & \textbf{RDMA (s)} & \textbf{Speedup} \\
+\midrule
+Qwen3-8B & 15.26  & 6.911  & 5.466  & 1.264$\times$ \\
+Qwen3-14B & 27.51  & 14.437  & 5.817  & 2.482$\times$ \\
+Qwen3-32B & 61.02  & 29.649 & 9.442 & 3.140$\times$ \\
+\bottomrule
+\end{tabular}
+} % end resizebox
+\end{table}
+
+
+\PHB{Stability-Critical Trajectory Transfer.} The transmission overhead of trajectory data is small compared with the overall training time. In particular, frequent environment interactions are more likely to become the performance bottleneck due to network latency. In practice, environment interaction should prioritize \emph{network stability} over \emph{network bandwidth}. Asynchronous execution between environment interaction and LLM generation is an effective way to prevent from becoming this bottleneck.
+
+
+\PHM{Bandwidth-Intensive Weight Update.} 
+During training, the agent LLM periodically updates its weights, which must then be synchronized with the rollout stage. This weight synchronization is the dominant source of inter-stage communication overhead. We measure the end-to-end transmission cost of synchronizing model parameters between the training and inference clusters using Mooncake~\cite{qin2024mooncake} over TCP (200 Gbps Ethernet) and RDMA (400 Gbps InfiniBand), and report the results in \autoref{tab:llm-transmission}. RDMA provides higher bandwidth and lower communication overhead than TCP. In \emph{synchronous} RL training, the rollout stage can only proceed after the latest agent LLM weights have been synchronized. As a result, the substantial cost of weight transmission over low-bandwidth links can increase end-to-end training time and diminishes the speedup of disaggregated training (\autoref{fig:paradigm-all-in-one}-Left).
+
+In asynchronous training (\autoref{fig:paradigm-all-in-one}-Right),  the training and rollout stages execute in parallel on separate GPUs. Although this introduces data staleness, many prior works~\cite{rollflash,areal,RhymeRL} empirically observe that asynchronous training can preserve model quality even under a high data staleness. Given the dominant rollout overhead, asynchronous training can effectively hide both training and weight synchronization costs with rollout, thereby reducing end-to-end training latency.
+
+
+\begin{tcolorbox}[colback=blue!5!white,colframe=gray!75!black,left=1mm, right=1mm, top=0.5mm, bottom=0.5mm, arc=1mm]
+\textbf{R4:} Asynchronous RL post-training is desired to improve training efficiency, particularly in disaggregated setups.
+\end{tcolorbox}
+

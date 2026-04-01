@@ -1,0 +1,81 @@
+% =============================================================================
+\section{Dimension 3: Pool Architecture}
+\label{sec:pool}
+% =============================================================================
+
+Our fleet optimization tools~\cite{fleetopt2026, fleetsim2026,
+onewlaw2026} provide the analytical and simulation models for pool
+architecture.
+
+% -----------------------------------------------------------------------------
+\subsection{Homogeneous vs.\ Heterogeneous GPU Pools}
+\label{sec:pool:homo-hetero}
+% -----------------------------------------------------------------------------
+
+FleetOpt~\cite{fleetopt2026} derives the minimum-cost fleet
+analytically: a two-pool architecture with optimal boundary
+$\boundary^*$ satisfying an equal marginal GPU cost condition.  On
+production traces, this reduces GPU cost by 6--82\% versus
+homogeneous fleets.  inference-fleet-sim~\cite{fleetsim2026} extends
+this to heterogeneous GPU types (A10G, A100, H100) with a
+physics-informed performance model.
+
+M\'{e}lange~\cite{griggs2024melange} formulates heterogeneous GPU
+allocation as cost-aware bin packing, achieving up to 77\% cost
+reduction.  Our simulation tool~\cite{fleetsim2026} shows that the
+cheapest GPU type depends on the workload in non-obvious ways:
+A10G can beat H100 for concentrated-below workloads where
+concurrency matters more than per-token speed.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Energy and the 1/W Law}
+\label{sec:pool:energy}
+% -----------------------------------------------------------------------------
+
+The 1/W law~\cite{onewlaw2026} has direct implications for pool
+architecture: tokens per watt halves every time the context window
+doubles, because of KV-cache concurrency limits.  At 64K
+context, an H100 holds 16 sequences ($\tokW \approx 1.5$); at 4K,
+256 sequences ($\tokW \approx 17.6$).
+
+Routing topology is a stronger energy lever than GPU generation: two-pool routing gives $\sim$2.5$\times$ better
+tok/W than homogeneous; upgrading H100$\to$B200 gives
+$\sim$1.7$\times$.  The gains compose multiplicatively to
+$\sim$4.25$\times$.  For MoE models like Qwen3-235B-A22B,
+active-parameter weight streaming provides a third lever
+($\sim$37.8\,tok/W at 8K context, 5.1$\times$ better than dense
+Llama-3.1-70B).
+
+Energy optimization therefore requires routing-pool co-design; a
+homogeneous fleet cannot reach the energy frontier regardless of GPU
+generation.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Disaggregated Prefill/Decode and KV-Cache Topology}
+\label{sec:pool:disagg}
+% -----------------------------------------------------------------------------
+
+Splitwise~\cite{patel2024splitwise} and
+DistServe~\cite{zhong2024distserve} physically separate prefill and
+decode, serving $4.48\times$ more requests at equivalent SLO.
+Mooncake~\cite{qin2025mooncake} provides KV-cache-centric
+disaggregation with hierarchical offloading (GPU HBM, CPU DRAM, SSD).
+NVIDIA Dynamo~\cite{nvidia2026dynamo} enables dynamic scheduling with
+KV-cache offloading across memory hierarchies.
+
+Our inference-fleet-sim~\cite{fleetsim2026} models all three
+topologies (monolithic, two-pool-routed, disaggregated), revealing
+that disaggregation is not always beneficial: for concentrated-below
+workloads (Archetype~1) at small $\boundary_{\text{short}}$, the
+KV-cache transfer overhead exceeds the benefit.
+
+vLLM's PagedAttention~\cite{kwon2023vllm} reduces KV-cache waste to
+below 4\%, and prefix-cache-aware distributed
+scheduling~\cite{llmd2026kvcache} delivers $57\times$ speedups.  But
+for agentic workloads, standard LRU eviction is
+pathological~\cite{vllm2026rfc37003}---context-aware retention
+with session-affinity routing is needed.
+
+

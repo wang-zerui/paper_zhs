@@ -1,0 +1,242 @@
+\section{Evaluation}
+
+We first evaluate \sysname using various agentic RL tasks to show its ACT efficiency (\S\ref{sec:e2e}),
+and then highlight its scalability over RL batch size and external resource (\S\ref{sec:eval_scale}).
+Finally, we investigate the design of \sysname and its overhead (\S\ref{sec:eval_analyse})
+
+
+
+\begin{figure*}[t]
+    \begin{minipage}{0.24\linewidth}
+        \centerline{\includegraphics[width=\linewidth,trim=0 0 0 20,clip]{figures/Eval_e2e_act_code.pdf}}
+        % \vspace{-0.15in}
+        \centerline{\small (a) AI Coding.}
+        \vspace{-0.1in}
+    \end{minipage}
+    \begin{minipage}{0.24\linewidth}
+        \centerline{\includegraphics[width=\linewidth,trim=0 0 0 20,clip]{figures/Eval_e2e_act_mopd.pdf}}
+        % \vspace{-0.15in}
+        \centerline{\small (b) MOPD.}
+        \vspace{-0.1in}
+    \end{minipage}
+    \begin{minipage}{0.24\linewidth}
+        \centerline{\includegraphics[width=\linewidth,trim=0 0 0 20,clip]{figures/Eval_e2e_act_search.pdf}}
+        % \vspace{-0.15in}
+        \centerline{\small (c) DeepSearch.}
+        \vspace{-0.1in}
+    \end{minipage}
+    \begin{minipage}{0.24\linewidth}
+        \centerline{\includegraphics[width=\linewidth,trim=0 0 0 20,clip]{figures/Eval_e2e_act_sm.pdf}}
+        % \vspace{-0.15in}
+        \centerline{\small (d) MOPD+DeepSearch.}
+        \vspace{-0.1in}
+    \end{minipage}
+    \caption{ACT under different RL tasks. The numbers and arrows indicate the step durations of RL tasks.}
+    \label{fig:eval_specific_lat}
+    \vspace{-0.15in}
+    \end{figure*}
+
+    
+\subsection{Experiment Setup}
+\label{sec:setup}
+\paraf{Testbed.} The testbed consists of two components: a GPU cluster running the agentic RL framework, and a set of heterogeneous external resources managed by \sysname.
+The RL framework is deployed on a production cluster with up to 48 GPU nodes, each equipped with eight NVIDIA Hopper-architecture GPUs and interconnected via high-bandwidth NVLink and RDMA networks. We adopt VeRL~\citep{sheng2025hybridflow} as the agentic RL framework and equip it with the capacity of external resource invocation, sequence-level and asynchornous \textit{rollout}. 
+\sysname is deployed on both CPU and GPU clusters. The CPU cluster contains 15 nodes, each with 256 AMD CPU cores and 2.4 TB of memory. The GPU cluster consists of five nodes, each equipped with eight high-end NVIDIA GPUs and 3 TB of CPU memory. In addition, \sysname manages access to several external API services with enforced quotas, ranging from Google Search to PDF parsing services.
+
+\parabf{Workloads.} We select three agentic RL tasks as workloads in \S\ref{sec:e2e}. \textbf{AI coding} constructs isolated execution environments using CPUs, where environments are invoked intermittently and used to compute reward scores.
+We use an in-house dataset following the scaffold of SWEBench~\citep{jimenez2024swebench}, which is designed for production use and is more comprehensive than SWEBench.
+\textbf{DeepSearch} continuously accesses external websites to assist LLM-based question answering. Its dataset is based on BrowseComp~\citep{wei2025browsecomp}, and rewards are computed using an LLM-based judge, finetuned GPT-OSS~\citep{agarwal2025gpt}, over generated trajectories. 
+GRPO~\citep{shao2024deepseekmath} is adopted for these two workloads.
+\textbf{MOPD}~\citep{xiao2026mimo} integrates multiple RL tasks, including agentic tasks, during the \textit{rollout} phase and computes trajectory log-probabilities with respect to corresponding teacher models for alignment.
+To demonstrate improvements in mitigating over-provisioning within RL tasks, we additionally run DeepSearch and MOPD concurrently, as both require GPU resources to deploy external services.
+
+\parabf{Baselines.} 
+We design workload-specific baselines for the experiments in \S\ref{sec:e2e}, as no existing system uniformly supports all three workloads. For \textbf{AI Coding}, we deploy Kubernetes to manage the CPU cluster. Each trajectory requests the creation of a pod at the beginning of execution, allocating 0.5 CPU per pod to allow limited multiplexing, with an upper bound of four CPUs to prevent congestion. For \textbf{MOPD}, we deploy nine teacher models on the GPU cluster using SGLang~\citep{zheng2024sglang}, allocating four GPUs per model with tensor parallelism (TP). For \textbf{DeepSearch}, the baseline allows for each trajectory to independently perform API calls and retry at most three times when encountering errors or timeout after 600s. The reward service of DeepSearch is also deployed on the GPU cluster with five replicas and degree of TP as 8. As for "MOPD+Search", there are 10 reward services in total and we deploy each model with four GPUs with TP.
+
+\parabf{Metrics.}
+To compare the efficiency of \sysname and baselines, we mainly measure the average ACT.
+We also report the detailed durations for multiple stages, including LLM generation, tool invocation, and reward computation.
+All stage durations are normalized by the total duration of \sysname, so that the normalized durations of \sysname sum up to 1.
+
+\parabf{Other setup.}
+In this part, both batch sizes of RL training and external resources capacity are fixed for different workloads: 1280, 2048, 2048, respectively for AI coding, MOPD and DeepSearch. We select Qwen3-32B~\citep{yang2025qwen3} and MiMo-V2-Flash~\citep{xiao2026mimo} for the models of RL training.
+Furthermore, the concrete configuration of \sysname encompasses: $depth$ in the scheduling algorithm as 2; scalability and execution durations profiled in advance, only for reward calculation on CPUs and reward model inference on GPUs. 
+
+
+\subsection{End-to-End Performance}
+\label{sec:e2e}
+% Because GRPO~\citep{} is adopted as the RL algorithm, the concurrency of external invocations is strictly related to current trajectories, i.e. the product of the batch size and the number of samples.
+
+\begin{figure}[t]
+    \centerline{\includegraphics[width=0.6\linewidth]{figures/Eval_e2e.pdf}}
+    \vspace{-0.3in}
+    \caption{End-to-end performance for different RL tasks. Numbers in bars indicate absolute durations (s).}
+    \label{fig:eval_e2e}
+    \vspace{-0.25in}
+    \end{figure}
+    
+
+
+We evaluate End-to-End performance on multiple workloads to exhibit the generality and efficiency of \sysname. 
+Figure~\ref{fig:eval_specific_lat} shows the average ACTs over consecutive small time windows as RL training proceeds under different workloads. We observe that the ACTs under \sysname are consistently lower than those of the baselines. This result indicates that \sysname handles bursty workloads more effectively with the same amount of external resources and reduces ACTs by mitigating over-provisioning and improving the utilization of external resources. Although API calls in DeepSearch are inherently non-scalable, reasonable management of their quotas and concurrency helps avoid errors and retries caused by rate limits or timeouts, thereby reducing ACTs.
+% Moreover, due to the bursty nature of invocations in agentic RL training, peak ACTs under \sysname are significantly lower than those of the baselines—by up to xxx×—demonstrating that \sysname handles bursty workloads more effectively with the same amount of external resources by mitigating over-provisioning.
+
+We further report the average duration of ten RL training steps, referred to as \textbf{step duration}, highlighting how \sysname contributes to end-to-end training efficiency improvement. Step durations of both AI Coding and DeepSearch decrease substantially, with improvements of $1.4\times$ and $1.5\times$, respectively.
+For AI Coding, the improvement mainly comes from action-level scheduling, which increases the utilization of external CPUs.
+For DeepSearch, where API calls are not scalable, the reduction in step duration is mainly attributed to traffic control.
+For baseline, frequent API failures cause trajectories to become ineffective, reducing the pass rate of RL training and consequently making the step slow. 
+In contrast, due to the specialized pipeline of MOPD, the duration of the \textit{rollout} phase is dominated by the long-tail trajectory rather than the average trajectories.
+As a result, the improvement of step duration for MOPD is relatively small. 
+
+Figure~\ref{fig:eval_e2e} provides a detailed breakdown of trajectory durations, further illustrating the improvements brought by \sysname in external invocations.
+For AI Coding, the durations of both environment interactions and reward computation decrease significantly, by $9.0\times$ and $2.8\times$, respectively and $4.3\times$ in total.
+Specifically, the former benefits from mitigating over-provisioning within trajectories, which reduces the action queuing time, while the latter benefits from elastic allocation of DoP for scalable actions, reducing the execution time.
+MOPD benefits from multiplexing teacher models and pooling GPU resources across RL tasks, since trajectories from different RL tasks exhibit diverse and partially interleaved patterns.
+In contrast, the baseline can only serve with a fixed number of GPUs, leading to longer execution times.
+Notably, in DeepSearch, the reward duration of \sysname is slightly longer than that of the baseline due to restoration overhead, as there is only one model served by the same cluster.
+However, in the combined “MOPD+Search” setting, \sysname demonstrates substantial advantages over the baselines, similar to MOPD.
+
+
+
+\subsection{System Scalability}
+\label{sec:eval_scale}
+
+\begin{figure}[t]
+    \begin{minipage}{0.48\linewidth}
+    \centerline{\includegraphics[width=\linewidth]{figures/Eval_cpu_scale.pdf}}
+    % \vspace{-0.1in}
+    \centerline{\small (a) Scalability of CPU.}
+    \label{fig:eval_scale_cpu}
+    % \vspace{-0.15in}
+    \end{minipage}
+    \begin{minipage}{0.48\linewidth}
+    \centerline{\includegraphics[width=\linewidth]{figures/Eval_gpu_scale_new.pdf}}
+    % \vspace{-0.1in}
+    \centerline{\small (b) Scalability of GPU.}
+    \label{fig:eval_scale_cpu}
+    % \vspace{-0.15in}
+    
+    \end{minipage}
+    
+    \caption{Scalability of different external resources, in RL batch size and resource capacity.}
+    \label{fig:eval_scale}
+    \end{figure}
+
+% \begin{figure}[t]
+%     \begin{minipage}{0.48\linewidth}
+%         \centerline{\includegraphics[width=\linewidth]{figures/Eval_bs_gpu.pdf}}
+%         % \vspace{-0.15in}
+%         \centerline{\small (a) RL batch size.}
+%         % \vspace{-0.1in}
+%     \end{minipage}
+%     \begin{minipage}{0.48\linewidth}
+%         \centerline{\includegraphics[width=\linewidth]{figures/Eval_node_gpu.pdf}}
+%         % \vspace{-0.15in}
+%         \centerline{\small (b) External resource.}
+%         % \vspace{-0.1in}
+%     \end{minipage}
+%     \caption{Scalability of GPU.}
+%     \label{fig:eval_scale_gpu}
+%     % \vspace{-0.15in}
+%     \end{figure}
+
+
+We further evaluate the effectiveness of \sysname by scaling both concurrency and resource capacity.
+We focus on resources on which actions are scalable, i.e., CPUs and GPUs.
+We measure the total ACT per trajectory and report the average across trajectories under different \textbf{batch sizes} and \textbf{resource capacity}. 
+Since GRPO is adopted, we treat the number of trajectories in each batch as the RL batch size.
+
+\parabf{Scalability of CPU.}
+In Figure~\ref{fig:eval_scale}(a), all experiments are provisioned with 1280 CPU cores across five nodes as external resources. As the RL batch size increases, \sysname reduces the average ACT by $3.1\times$ to $27.7\times$ compared with the baseline.
+In particular, when the RL batch size is 1536, the Kubernetes baseline becomes heavily overloaded, triggering frequent queuing timeouts in its control plane due to insufficient resources.
+In contrast, \sysname handles this batch size with an acceptable increase in average ACT, i.e., less than $2\times$ compared to the ACT of batch size 128.
+The right figure fixes the RL batch size at 1280, which does not fully congest Kubernetes due to the principle of fairness. Under this setting, the baseline remains $1.89\times$ to $4.33\times$ slower than \sysname.
+When only 768 CPU cores are available, the improvement becomes smaller, as less resources limit the opportunities for multiplexing across trajectories under action-level scheduling.
+
+    
+% \begin{figure}[t]
+    
+%     \centerline{\includegraphics[width=\linewidth,trim=0 0 0 40,clip]{figures/gpu_scale.pdf}}
+%     \vspace{-0.1in}
+%     \caption{Scalability of GPU.}
+%     \label{fig:eval_scale_gpu}
+%     \vspace{-0.2in}
+%     \end{figure}
+    
+\smallskip \parabf{Scalability of GPU.}
+In addition to the SGLang baseline, we include ServerlessLLM~\citep{fu2024serverlessllm} as another baseline, which proposes a Model-as-a-Service (MaaS) abstraction to serve multiple models with a fewer number of GPUs.
+Similar to CPUs, experiments in Figure~\ref{fig:eval_scale}(b) Left are conducted on the five-node GPU cluster described in \S\ref{sec:setup}.
+Under high RL batch sizes, \sysname significantly outperforms both baselines.
+At batch size 2048, \sysname reduces the average ACT by $18.1\times$ compared to SGLang, while ServerlessLLM fails to serve requests at this level of concurrency (where too much timeout failures are unacceptable). 
+As a reference, at batch size 1024, \sysname outperforms SGLang and ServerlessLLM by $3.4\times$ and $101.8\times$, respectively.
+Notably, SGLang achieves slightly better latency under low concurrency, because of the restoration overhead in \sysname at a low concurrency.
+
+Figure~\ref{fig:eval_scale}(b) Right further highlights \sysname’s advantage in reducing external resource cost under a fixed batch size of 1024. \sysname is able to serve 10 reward services using only 29\% of the GPUs required by the over-provisioned baseline and achieving the same ACT.
+Although both \sysname and ServerlessLLM can deploy multiple models with fewer GPUs, ServerlessLLM has substantially higher latency, as it lacks elastic reallocation for reward services and incurs higher system overhead compared to our GPU Manager.
+
+
+\subsection{Analysis of \sysname}
+\label{sec:eval_analyse}
+\paraf{Impact of \sysname Scheduling.}
+We conduct an ablation study of the elastic scheduling algorithm on the AI Coding workload. Since the CPU computation workload is highly coupled with LLM outputs which exhibits substantial randomness, we construct a benchmark based on a real RL trace of AI coding and use it to evaluate different scheduling baselines.
+In the AI coding task, only reward-calculation actions are CPU-scalable, as they are long-tailed in execution duration and amenable to parallelization.
+We replace the elastic scheduling algorithm, that DoP dynamically ranges from 1 to 32, with two fixed DoP baselines (DoP=4 and DoP=16, chosen based on experience). As shown in Figure~\ref{fig:eval_scheduling}, the elastic scheduling algorithm consistently outperforms the fixed-DoP baselines. In particular, it reduces average ACT by $2.0\times$ compared to DoP=4 at batch size 256 and $3.0\times$ compared to DoP=16 at batch size 1280. Similarly, under limited resources (1× CPU cores), it achieves an $1.8\times$ reduction compared to DoP=4. These improvements arise from the algorithm’s ability to elastically allocate resources and adapt strategies according to resource contention.
+
+\begin{figure}[t]
+        \centerline{\includegraphics[width=0.6\linewidth]{figures/Eval_schedule.pdf}}
+        % \vspace{-0.1in}
+    \caption{Impact of \sysname scheduling.}
+    % \vspace{-0.2in}
+    \label{fig:eval_scheduling}
+    % \vspace{-0.1in}
+    \end{figure}
+
+\parabf{Overhead Analysis.}
+We further analyze the system overhead by breaking down ACTs for AI Coding (CPU-intensive) and MOPD (GPU-intensive), as reported in Table~\ref{table:overhead}.
+We find that, even if \sysname is heavily congested with batch size 1536 of AI coding, the system overhead still accounts for a small part, less than 3\% compared with the execution duration, while only 2\% for batch size 1280.
+% Even under heavy load with batch size 1536 in AI Coding, system overhead accounts for less than 3\% of execution time (2\% at batch size 1280).
+For MOPD on GPUs, overhead—primarily due to restoration—represents roughly 25\% of execution time, which cannot be overlooked.
+Fortunately, this overhead does not increase explosively with higher concurrency or more severe queueing (with RL batch size 3072), ensuring efficiency and stability under high-concurrency agentic RL training.
+
+\begin{table}[!t] 
+\centering
+\begin{tabular}{c|cccc} 
+\toprule
+\makecell[c]{\textbf{Workloads} \\ (bsz)} & 
+\makecell[c]{\textbf{Coding} \\ (1280)} &
+\makecell[c]{\textbf{Coding} \\ (1536)} & 
+\makecell[c]{\textbf{MOPD} \\ (2048)} &
+\makecell[c]{\textbf{MOPD} \\ (3072)} \\
+\midrule
+Exec Dur.                & 0.975 & 1.206 & 0.621 & 0.705 \\
+Queue Dur.               & 0.015 & 0.428 & 0.081 & 15.05 \\
+Sys. Overhead            & 0.024 & 0.036 & 0.201 & 0.240 \\ 
+\bottomrule
+\end{tabular} 
+% \vspace{0.1in}
+\caption{ACTs Breakdown.} 
+\label{table:overhead} 
+\vspace{-0.2in} 
+\end{table}
+
+\iffalse
+
+\begin{figure}[t]
+    \centerline{\includegraphics[width=0.5\linewidth]{figures/placeholder.png}}
+    \vspace{-0.1in}
+    \caption{\sysname overhead.}
+    \label{fig:eval_overhead}
+    \vspace{-0.15in}
+    \end{figure}
+    
+\parabf{Accuracy of our Modeling}
+\zyh{add one evaluation}
+
+\begin{figure}[t]
+\centerline{\includegraphics[width=\linewidth]{figures/placeholder.png}}
+\vspace{-0.1in}
+\caption{Accuracy of \sysname modeling.}
+\label{fig:eval_modeling}
+\vspace{-0.15in}
+\end{figure}
+\fi

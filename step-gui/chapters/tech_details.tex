@@ -1,0 +1,239 @@
+
+\section{Step-GUI}
+
+\subsection{Data}
+\subsubsection{Mid-train Data}
+
+We aim to build a multimodal foundation model that retains \textbf{general-purpose capabilities}, inherits rich world knowledge, and acquires \textbf{strong agentic competence}. Instead of training a specialized planner or a domain-restricted policy model, we develop a multimodal foundation model capable of understanding diverse visual environments, following complex protocols, and executing multi-step tasks.
+
+To bridge generic pretrained models and agent-specific training, we introduce a mid-train stage that equips the model with \textbf{foundational agent capabilities}. Specifically, the mid-trained model should: (i) retain and consolidate broad knowledge, including multimodal understanding, commonsense reasoning, and world knowledge; (ii) acquire fundamental visual competencies such as visual grounding, dense captioning, and fine-grained region understanding essential for GUI-based interactions; (iii) parse agent-style formats, including trajectory representations, action schemas, and observation structures; (iv) form initial instruction-to-action mappings that ground natural-language instructions into executable action sequences.
+
+We construct a mid-train data mixture that balances general knowledge retention with agent-specific skill acquisition, comprising two complementary categories:
+
+\begin{itemize}
+    \item \textbf{General Multimodal \& Knowledge Data}, which preserves broad capabilities and builds foundational visual understanding:
+    \begin{itemize}
+        \item High-quality text and multimodal data (1.9M): curated general-purpose samples to maintain language fluency and multimodal reasoning;
+        \item Knowledge-intensive data (2M): including dense captions and structured knowledge to reinforce world understanding;
+        \item Grounding data (2.7M): region-level annotations for visual grounding, enabling precise localization required by GUI agents.
+    \end{itemize}
+    
+    \item \textbf{Agent-Oriented Data}, which introduces action understanding and trajectory reasoning:
+    \begin{itemize}
+        \item Action alignment data (170K): samples that align natural-language instructions with atomic actions, bootstrapping the instruction-to-action mapping;
+        \item Trajectory data (4M): multi-step interaction sequences annotated under diverse protocols by different annotators, exposing the model to varied action formats and planning patterns;
+        \item Environment-specific data (420K): incorporating cross-platform trajectory samples from Android, Ubuntu, Windows, and macOS systems, offering comprehensive agent experiences across heterogeneous mobile and desktop environments.
+    \end{itemize}
+\end{itemize}
+Through this balanced data mixture, the mid-trained model consolidates broad world knowledge, acquires essential visual competencies, learns to parse agent-style formats, and forms initial instruction-to-action mappings.
+
+\subsubsection{Cold-start Data}
+
+Building upon the mid-trained model's foundational agent capabilities, including visual grounding, agent-style format understanding, and initial instruction-to-action mappings, the cold-start stage focuses on knowledge injection and execution refinement. Rather than continuing broad exposure, this stage addresses knowledge gaps that cause execution failures and refines agent behavior through curated trajectory data. Specifically, the cold-start stage: (i) patches knowledge gaps by injecting missing knowledge identified from trajectory execution errors, enabling the model to overcome failure modes; (ii) refines agent behavior using curated trajectory samples to shape execution patterns; and (iii) preserves general competence by maintaining multimodal reasoning and visual grounding abilities. Agent failures often stem from knowledge deficiencies rather than insufficient behavioral examples. We therefore adopt an error-driven knowledge injection strategy: diagnosing execution failures and converting the missing knowledge into VQA pairs to directly target the model's weaknesses. The trajectory data serves as a behavioral scaffold, aligning outputs with agent formats while the enriched knowledge base enables robust generalization.
+
+The cold-start data mixture (\textasciitilde1.67M samples) comprises:
+\begin{itemize}
+    \item \textbf{Knowledge Data} (864K, 52\%): 
+          constructed by analyzing execution errors from trajectory rollouts. 
+          When the model fails during trajectory execution, we identify the underlying missing knowledge (e.g., UI semantics, application behaviors, domain facts) and convert it into VQA-format samples. 
+          This targeted injection directly addresses the model's knowledge blind spots rather than providing generic world knowledge;
+    \item \textbf{Trajectory Data} (404K, 24\%): 
+          high-quality multi-step interaction sequences serving as behavioral demonstrations;
+    \item \textbf{General Multimodal Data} (284K, 17\%): 
+          high-quality samples to retain broad multimodal reasoning capabilities;
+    \item \textbf{Grounding Data} (122K, 7\%): 
+          curated localization samples essential for GUI-based interactions.
+\end{itemize}
+
+Table~\ref{tab:data-comparison} presents the data composition across mid-train and cold-start stages. While mid-train employs a large-scale mixture (\textasciitilde11.2M samples) covering diverse data types including action alignment and environment-specific data, cold-start adopts a more focused mixture (\textasciitilde1.67M samples) with a higher proportion of knowledge data (52\%) to address identified execution failures:
+\begin{table}[h]
+\centering
+\caption{Data composition comparison between mid-train and cold-start stages.}
+\label{tab:data-comparison}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Data Type} & \textbf{Mid-Train} & \textbf{Cold-Start} \\
+\midrule
+General Multimodal & 1.9M & 284K \\
+Grounding & 2.7M & 122K \\
+Knowledge & 2.0M & 864K \\
+Action Alignment & 170K & -- \\
+Trajectory & 4.0M & 404K \\
+Environment-Specific & 420K & -- \\
+\midrule
+\textbf{Total} & \textbf{\textasciitilde11.2M} & \textbf{\textasciitilde1.67M} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The cold-start stage uses a smaller data volume (\textasciitilde1.67M vs. \textasciitilde11.2M), reflecting a shift from broad exposure to focused refinement. 
+This stage emphasizes knowledge-driven optimization: identifying and patching execution failures through error-driven VQA knowledge injection, while using curated trajectory data to refine interaction patterns and execution behaviors.
+
+
+
+\subsubsection{Grounding Data}
+
+While grounding is traditionally framed as a perception-language alignment problem, this formulation becomes insufficient in the GUI domain, where the model is expected to understand and act within structured virtual environments. A graphical interface is effectively a microcosm of the world: it comprises entities, spatial hierarchies, causal affordances, and state transitions. Supervision that merely aligns text spans with visual regions fails to capture these richer semantics and often leads to brittle, appearance-driven behavior. This observation motivates a shift in how GUI grounding is formulated and trained. To succeed in GUI grounding, a model must move beyond surface-level visual matching and acquire capabilities analogous to a lightweight world model for virtual environments. In our formulation, this entails addressing three fundamental requirements:
+\begin{itemize}
+    \item \textbf{Functional semantics beyond appearance.} The model must learn that a gear icon affords settings and a trash icon affords deletion, rather than relying on surface-level visual similarity.
+    \item \textbf{Latent world state.} The model should maintain a latent representation of what is visible, what is actionable, and how the interface state evolves under candidate actions.
+    \item \textbf{World knowledge of HCI conventions.} Knowledge of human--computer conventions, layouts, and symbolic meanings enables reasoning about unseen or partially observed interfaces.
+\end{itemize}
+
+
+GUI grounding datasets face a fundamental challenge: annotations frequently contain errors (noise) and fail to accurately correspond to the semantic meaning of the interface elements they describe (misalignment). Directly scaling such data often amplifies noise rather than improving generalization. To address this, we design an iterative grounding-cleaning pipeline that progressively filters, corrects, and refines supervision using model feedback.
+
+\begin{enumerate}
+    \item \textbf{Initial grounding training.}
+    We first train an initial model on raw open-source grounding data, general multimodal data, and knowledge-augmented annotations to establish basic perceptual alignment.
+
+    \item \textbf{Pass-rate labeling with complexity scoring.}
+    The trained model performs multiple independent rollouts per sample. Each sample receives a \textbf{pass-rate label} reflecting supervision quality. Additionally, an \textbf{LLM-based complexity scorer categorizes} tasks into simple localization, functional understanding, and intent-alignment levels, decoupling failures from annotation noise versus genuinely complex semantics.
+
+    \item \textbf{Curriculum-based reliable data training.}
+    High pass-rate samples serve as reliable supervision and are organized by complexity for difficulty-aware curriculum training: simple localization tasks stabilize early-stage grounding, while functional and intent-alignment tasks are progressively introduced via curriculum SFT and reinforcement learning.
+
+    \item \textbf{Early exclusion of noisy cases.}
+    Zero pass-rate samples which mix noisy annotations and genuinely hard cases, are excluded from early training to preserve learning signal quality.
+
+    \item \textbf{Hard-case refinement.}
+    Excluded samples are revisited at later stages: failed executions are rewritten with step-by-step knowledge and enriched annotations, then reintroduced as high-quality supervision.
+\end{enumerate}
+
+
+Through this closed-loop process of pass-rate labeling, data filtering, curriculum learning, and hard-case refinement, the model gradually transitions from sparse click-based supervision to explicit modeling of interface structure, dynamics, and affordances. This grounding loop substantially improves robustness on complex grounding and agentic tasks, while relying exclusively on open-source corpora and systematic scaling of model capacity, data volume, and compute.
+
+
+\subsubsection{Trajectory Data}
+
+\begin{figure}[t]
+\centering
+  \captionsetup{justification=justified, singlelinecheck=false}
+\includegraphics[width=\linewidth]{figs/csrs.pdf}
+\caption{\textbf{Calibrated Step Reward System (CSRS) Architecture.} The system consists of a Calibration Layer that performs trajectory-level validation (success/failure) and a Data Extraction module powered by thinking models that generates seven categories of structured training data. Model-generated trajectories flow through CSRS in an iterative loop: rollout generates trajectories, CSRS processes them into high-quality training data, and training produces stronger models for the next iteration. \textit{Advantage A}: Trajectory-level validation provides high-confidence reward signals, ensuring learning stability. \textit{Advantage B}: LLM-generated chain-of-thought provides rich reasoning that enhances model understanding. Success trajectories yield all seven data types while failed trajectories contribute only knowledge-related data (categories 1-6), implementing a selective learning strategy.}
+\label{fig:csrs_architecture}
+\end{figure}
+
+To enable continuous model improvement through data flywheel iteration, we propose the Calibrated Step Reward System (CSRS), a novel data processing framework that converts model-generated trajectories into high-quality, multi-dimensional training data. CSRS serves as the critical bridge in the ``Rollout $\rightarrow$ CSRS $\rightarrow$ Training'' loop, ensuring data reliability while maximizing information extraction from each trajectory.
+CSRS introduces two synergistic mechanisms that address fundamental challenges in reward system design (see Figure~\ref{fig:csrs_architecture}): (1) \textit{trajectory-level calibration} providing high-confidence reward signals, and (2) \textit{LLM-powered data extraction} generating superior chain-of-thought reasoning. Unlike traditional step-level annotation approaches that suffer from subjectivity and high costs, our trajectory-level validation achieves $>$90\% accuracy with 10-100$\times$ lower annotation costs by focusing on objectively verifiable task outcomes.
+
+\textbf{System Architecture.}
+As illustrated in Figure~\ref{fig:csrs_architecture}, CSRS consists of two main components. The \textit{Calibration Layer} employs verifiers or human annotators to perform binary success/failure validation at the trajectory level, establishing a reliable quality anchor. The \textit{Data Extraction Module}, powered by sophisticated thinking models, then generates seven categories of training data: (1) progress tracking, (2) state summary, (3) effect prediction, (4) self-reflection, (5) state verification, (6) intent execution, and (7) action prediction. This design ensures that all generated fine-grained data is anchored by high-confidence trajectory-level labels.
+
+\textbf{Selective Learning Strategy.}
+CSRS intelligently handles trajectories of different qualities. For successful trajectories, all seven data types are extracted, encompassing both knowledge enhancement (categories 1-5) and action prediction (categories 6-7). For failed trajectories, only knowledge-related data (categories 1-6) are retained, following the principle of ``learning knowledge from failures, but not learning erroneous actions.'' This selective strategy maximizes data utility while preventing the propagation of incorrect behaviors.
+
+\textbf{LLM-Generated Knowledge Superiority.}
+A key advantage of CSRS lies in leveraging powerful LLMs to automatically generate training data. Compared to human annotators, LLMs produce: (i) significantly richer chain-of-thought reasoning with detailed multi-step analysis, (ii) consistent quality across all samples without individual variation, (iii) comprehensive domain knowledge about GUI operations and application functionalities, and (iv) 80-90\% cost reduction through automation. For instance, while human annotators might simply label ``click center button'', CSRS generates detailed reasoning: ``The text is already selected. The next step is to apply center alignment formatting. I can see the alignment buttons in the toolbar, and I will click the 'Align Center' button. After clicking it, the heading should move to the center of the document.''
+
+CSRS enables continuous model improvement through iterative training. In iteration $N$, model $M_n$ generates rollout trajectories, which are processed by CSRS to produce high-quality training data, resulting in an improved model $M_{n+1}$. As the model becomes stronger, rollout quality increases, leading to more successful trajectories and richer training data. This self-reinforcing cycle drives progressive performance enhancement: from initial success rates of 30-40\% to expert-level performance exceeding 85\% after multiple iterations.
+The combination of trajectory-level calibration and LLM-powered generation achieves an optimal balance of quality, cost, and scalability. (\textit{Advantage A}) Trajectory-level validation from verifiers or human annotations ensures reliable reward signals, reducing noise in the learning process and improving training stability. (\textit{Advantage B}) Superior reasoning generated by powerful thinking models provides rich, step-by-step explanations, enhancing model understanding and generalization. This ``coarse-grained high-confidence labels + fine-grained high-quality content'' paradigm represents a significant advancement over traditional step-level annotation methods, establishing CSRS as a key infrastructure for building high-performance GUI agents.
+
+
+\subsection{Training}
+We employ the Qwen3-VL~\cite{Bai2025Qwen3VL} series (spanning 4B, 8B parameters) as our visual-linguistic backbone. 
+To bridge the gap between general multimodal capabilities and expert GUI agency, we propose a progressive three-stage training paradigm: Mid-Training, Cold-Start Fine-Tuning, and Reinforcement Learning with Verifiable Rewards (RLVR).
+\subsubsection{Formulation}
+We formulate GUI automation as a sequential decision-making problem over the tuple $(\mathcal{Q}, \mathcal{A}, \mathcal{S}, \mathcal{O})$:
+
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item \textbf{Task Space $\mathcal{Q}$}: The set of natural language instructions that describe user intents (e.g., ``Check the battery level and send it to social media.''). Each task instance is denoted as $q \in \mathcal{Q}$.
+    
+    \item \textbf{Action Space $\mathcal{A}$}: GUI-based actions including click, scroll, swipe, type, and other interface interactions. These actions are executed purely through visual understanding without relying on structured accessibility information.
+    
+    \item \textbf{State Space $\mathcal{S}$}: The visual state of the GUI environment, represented by screen captures at each time step.
+    
+    \item \textbf{Observation Space $\mathcal{O}$}: Screenshots of the current interface along with the task instruction and historical interaction logs.
+\end{itemize}
+
+We model the agent as a parameterized policy $\pi_{\theta}: \mathcal{O} \times \mathcal{Q} \rightarrow \mathcal{A}$, where $\theta$ denotes the model parameters. Given a task $q \in \mathcal{Q}$ and visual observation $s \in \mathcal{S}$, the policy generates a sequence of outputs $o = (o_1, o_2, \ldots, o_T)$ representing the action trajectory. The objective is to optimize $\theta$ such that the policy successfully executes tasks through vision-based GUI interaction.
+
+\begin{figure}[ht] 
+  \centering
+  \includegraphics[width=1\columnwidth]{figs/train_pipeline.pdf} 
+  \captionsetup{justification=justified, singlelinecheck=false}
+  \caption{Self-Evolving Training Pipeline with Closed-Loop Data Refinement. The pipeline consists of three progressive training stages (Mid-Train, Cold-Start, and RLVR) and two parallel data flows. \textbf{Generation Data Flow:} The Policy Model generates new trajectories via Task Generator, which are verified through the CSRS to produce high-quality Knowledge Data and Trajectory Data for the next training round. \textbf{Refinement Data Flow:} Existing trajectory data undergo dual-path filtering through Self-Distillation and Rejection Sampling. This iterative loop continuously enhances data quality and model capability across rounds. }
+ 
+  \label{fig:training} 
+\end{figure}
+
+\subsubsection{Data Flow}
+Central to our approach is a self-evolving closed-loop data engine illustrated in Figure~\ref{fig:training}, which orchestrates two parallel data flows to continuously enhance both model capability and data quality across training rounds:
+
+\noindent\textbf{Generation Data Flow.} The current Policy Model (round $n$) interactively executes newly generated tasks from the Task Generator within the Rollout System. During execution, the model produces raw trajectory data capturing its step-by-step interactions with the GUI environment. These raw trajectories are then processed by CSRS, which verifies action correctness and assigns calibrated rewards to filter and refine the data into two high-quality categories: (1) \textit{Knowledge Data} containing distilled task-solving insights and reasoning patterns, and (2) \textit{Trajectory Data} capturing verified complete multi-step execution paths. These high-quality synthetic data are channeled into Cold-Start and RLVR stages of the next round ($n+1$), enabling the model to learn from its own explorations.
+
+
+\noindent\textbf{Refinement Data Flow.} In parallel, existing trajectory data undergo a dual-path filtering mechanism combining Self-Distillation and Rejection Sampling. This process partitions the data into two categories: (1) \textit{Accepted Set}---stable, high-confidence samples that consistently pass quality thresholds, recycled to Mid-Train and Cold-Start to reinforce foundational capabilities; and (2) \textit{Rejected Set}---challenging samples near the decision boundary that expose model weaknesses, exclusively routed to Cold-Start for targeted capability enhancement.
+
+This dual-flow architecture ensures that each training round benefits from both \textit{novel high-quality exploration} (Generation Data Flow) and \textit{strategic refinement of existing knowledge} (Refinement Data Flow). The iterative cycle progressively amplifies the model's grounding accuracy, general multimodal understanding, and complex reasoning capabilities in GUI scenarios.
+
+\subsubsection{Reinforcement Learning with Verifiable Rewards}
+To specialize the agent in precise reasoning and execution within the GUI domain, we employ Group Relative Policy Optimization (GRPO). The objective function is defined as:
+\begin{equation}
+J_{GRPO}(\theta) = \mathbb{E}_{\substack{q \sim P(Q), \{o_i\}_{i=1}^G \sim \pi_{\theta_{old}}(O|q)}} \left[ \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{k=1}^{|o_i|} \min \left( r_{i,k} A_i, \text{clip}(r_{i,k}, 1-\epsilon, 1+\epsilon) A_i \right) - \beta \mathbb{D}_{KL} \right]
+\label{equ: grpo}
+\end{equation}
+\noindent where $G$ is the group size, $A_i$ is the advantage computed by normalizing rewards within the group, $q$ is the task sampled from $P(Q)$, $\pi_{\theta_{old}}$ is the reference policy, $o_i$ is the trajectory generated by $\pi_{\theta_{old}}$, $r_{i,k} = \frac{\pi_{\theta}(o_{i,k}|q,o_{i,<k})}{\pi_{\theta_{old}}(o_{i,k}|q,o_{i,<k})}$ is the importance sampling ratio, $\epsilon$ is the clipping parameter, and $\beta$ controls the KL divergence regularization.
+
+
+\noindent\textbf{Fine-Grained Hybrid Reward Specification.}
+We construct a composite reward function $R(o, s)$ by integrating three distinct signal categories: verifiable spatial metrics, action-semantic validity, and model-based capability assessment.
+
+\paragraph{1) Spatial-Geometric Dense Rewards.}
+To ensure pixel-level precision, we implement a dense reward mechanism based on tolerance-normalized high-order decay. Let $\tau_x, \tau_y$ denote the predefined pixel-level tolerance thresholds.
+
+\noindent\textit{Point-based Reward:} For coordinate interactions (e.g., grounding, CLICK, LONGPRESS), we define the normalized deviation $\hat{\delta}_k = |k_{pred} - k_{gt}| / \tau_k$. The reward $r_{point}$ employs a quartic decay function to impose steep penalties for deviations beyond the tolerance zone:
+\begin{equation}
+    r_{point} = \exp \left( - \left( \hat{\delta}_x^4 + \hat{\delta}_y^4 \right) \right)
+\end{equation}
+
+\noindent\textit{BBox-based Reward:} For region grounding, we decouple the bounding box into center coordinates $(c_x, c_y)$ and dimensions $(w, h)$. We construct a composite geometric energy term $E_{geom}$ that down-weights dimensional errors by a factor of $\lambda$:
+\begin{equation}
+    E_{geom} = \hat{\delta}_{cx}^4 + \hat{\delta}_{cy}^4 + \lambda \hat{\delta}_w^4 + \lambda \hat{\delta}_h^4
+\end{equation}
+where $\lambda=0.5$. To simultaneously optimize for alignment accuracy and area overlap, the final bounding box reward $R_{bbox}$ is a weighted fusion of the geometric score and Intersection over Union (IoU):
+\begin{equation}
+    R_{bbox} = \alpha \cdot \exp(-E_{geom}) + (1 - \alpha) \cdot \text{IoU}(b_{pred}, b_{gt})
+\end{equation}
+where we set $\alpha = 0.8$ to prioritize geometric centrality while retaining IoU as a shape-consistency regularization.
+
+\paragraph{2) Action-Semantic Mixed Rewards.}
+For the GUI action space, we decouple the reward signal into action type and action value.
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+    \item \textbf{Sparse Action Type:} The validity of the chosen operation (e.g., WAIT vs. COMPLETE) is modeled as a binary sparse reward $\mathbb{I}(\hat{a}_{type} = a^*_{type})$.
+    \item \textbf{Adaptive Value Modeling:} The reward for action parameters varies by type. For trajectory-based vectors (e.g., SLIDE), we compute the cosine similarity between the predicted vector $\mathbf{v}_{pred}$ and the ground truth $\mathbf{v}_{gt}$, mapping the alignment to a dense $[0, 1]$ interval. For semantic actions requiring information retrieval (e.g., INFO, TYPE), we utilize an external LLM to verify the content, returning a scalar score $s \in [0, 1]$.
+\end{itemize}
+
+\paragraph{3) Soft Capability Rewards (LLM-as-a-Judge).}
+For abstract qualities where deterministic rules are inapplicable, we employ an LLM-as-a-Judge mechanism. 
+This module evaluates the generated trajectory based on intent consistency, fluency, and reasoning quality, providing a complementary soft signal that aligns the policy with human-preferred interaction patterns.
+
+
+\noindent\textbf{Semi-Online Exploration with Hindsight.}
+Exploration in long-horizon GUI tasks is notoriously difficult due to sparse rewards. To mitigate this, we introduce a Semi-Online training strategy. For rollout groups that fail to complete the task, we inject Ground-Truth Hints into the prompt to guide the model through the correct reasoning path during a second pass. This allows the model to experience high-reward trajectories that were previously out of its capability range, effectively converting "failed explorations" into "guided successful samples" with high advantage scores.
+
+
+\noindent\textbf{Stability \& Efficiency Enhancements.}
+To ensure stable convergence and maximize data utility, we integrate several algorithmic enhancements:
+\textbf{1) Dynamic Exploration ($\epsilon_{high}$):} We introduce a dynamic parameter $\epsilon_{high}$ to modulate the clipping range, providing greater flexibility for low-probability actions. This expands the exploration space without destabilizing the policy update.
+\textbf{2) Sample Reuse via Importance Sampling:} As illustrated in the efficiency module, data generation is computationally expensive. We employ Importance Sampling to reuse collected trajectories for multiple gradient updates. The policy is updated for $K$ iterations per rollout batch. 
+The importance sampling ratio $r_t(\theta) = \frac{\pi_\theta(o_t|q,o_{<t})}{\pi_{old}(o_t|q,o_{<t})}$ accounts for the distributional shift between the current evolving policy and the data-collecting policy, significantly improving sample efficiency while maintaining trust-region constraints.
+
+
+\noindent\textbf{Gradient Preservation for Clipping.} The gradient of Equation~\eqref{equ: grpo} without $\mathbb{D}_{KL}$ can be formulated as:
+\begin{equation}
+\begin{aligned}
+\nabla_\theta J_{GRPO}(\theta) & = \mathbb{E}_{\substack{q \sim P(Q),  \{o_i\}_{i=1}^G \sim \pi_{\theta_{old}}(O|q)}} \left[ \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{k=1}^{|o_i|}f(r_{i,k}, {A}_{i,k})\nabla_\theta \log \pi_{\theta}(o_{i,k} | q, o_{i, <k}) \right],\\
+&\text{where } f(r_{i,k}, {A}_{i,k}) = \begin{cases}
+A_i \cdot r_{i,k} & \text{if } 1-\epsilon < r_{i,k} < 1+\epsilon, \\
+\beta_1 \cdot A_i \cdot (1+\epsilon) & \text{if } r_{i,k} > 1+\epsilon, \\
+\beta_2 \cdot A_i \cdot (1-\epsilon) & \text{if } r_{i,k} < 1-\epsilon,
+\end{cases}\\
+\label{equ: gp_gradient}
+\end{aligned}
+\end{equation}
+where the gradient modulation depends explicitly on the importance sampling ratio $r_{i,k}$. 
+A critical analysis of Equation~\eqref{equ: gp_gradient} reveals an inherent instability for tokens with low baseline probabilities. For tokens where the reference probability $\pi_{\theta_{\text{old}}}$ is minimal, even marginal positive perturbations in the current policy $\pi_{\theta}$ result in a disproportionate amplification of the ratio $r_{i,k}$. Consequently, these low-probability tokens are highly susceptible to ratio explosion, prematurely triggering the upper clipping threshold $(1+\epsilon)$. 
+In standard clipping mechanisms, this saturation effectively zeros out the gradient, preventing the model from reinforcing potentially valuable but currently rare actions, a phenomenon that severely hinders the exploitation of sparse rewards. 
+To mitigate this issue and maintain effective optimization, we implement a Gradient Preservation strategy~\cite{su2025gppo}.
+As defined in the piecewise function $f(r_{i,k}, {A}_{i,k})$, we retain a scaled gradient even when the ratio exceeds the trust region, thereby ensuring continuous learning signal flow for low-probability tokens.

@@ -1,0 +1,85 @@
+\section{Beyond Lossless Speculation: OS Hyperparameter Tuning Environment}
+\label{sec:os-speculation}
+
+Thus far, our experiments have focused on \emph{lossless} speculation, where speculative actions are validated sequentially before commitment. We now turn to a \emph{lossy} setting that relaxes this step-by-step constraint.
+In latency-sensitive environments like an operating system, 
+waiting for a powerful but slow Actor (10-15s deliberation) can leave the system in a degraded state.
+Our framework uses a fast Speculator to apply immediate adjustments, 
+improving real-time performance, while the Actor deliberates. 
+This is made safe by a last-write-wins mechanism—the Actor's final decision 
+simply overwrites any speculative action, 
+removing the need for complex rollbacks. 
+This method accelerates convergence and improves reaction time, 
+which we evaluate on the \texttt{sysbench cpu} benchmark, a CPU-bound workload~\citep{sysbench}.
+%Our framework extends the work of~\cite{liargkovas2025llmTuning}, by introducing a fast, speculative loop to mitigate the deliberation latency of the expert Actor.
+
+\subsection{Experimental Setup}
+
+We tune a single parameter of Linux's Completely Fair Scheduler (CFS), \texttt{min\_granularity}, 
+which controls a task's minimum timeslice. 
+This knob strongly affects scheduling performance: smaller timeslices reduce latency but can degrade throughput, yielding a classic trade-off. Prior work~\citep{liargkovas2025llmTuning} demonstrated that an LLM-based agent can optimize this parameter; here, we extend that setup with a speculative control loop.
+
+Our system consists of a fast Speculator and a slow Actor. 
+The Speculator proposes a bounded parameter update each second using the latest performance metric. 
+The Actor, in contrast, responds every 10–15 seconds after analyzing a compressed chronology of the Speculator's recent (measurement, action) pairs.
+When the Actor's response arrives, its chosen setting is immediately applied and its state updates the Speculator's context, 
+ensuring subsequent fast steps proceed from a validated narrative rather than drifting. 
+%To manage history, the Speculator’s verbose replies are compressed into concise (value, reward) pairs 
+%before being passed to the Actor, 
+%keeping the context aligned and efficient. 
+% Safety is enforced via guardrails on the write path (see \S\ref{app:history_os})
+\vspace{-3pt}
+\paragraph{Evaluation}
+We evaluate three systems:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Actor-only}: slow but deliberative (10–15\,s interval);
+    \item \textbf{Speculator-only}: fast (1\,s interval) but non-extensive;
+    \item \textbf{Speculator–Actor}: combined system using speculative updates between Actor decisions.
+\end{enumerate}
+We are interested in (i) reaction time, (ii) convergence speed to the optimal setting, and (iii) ability to avoid local minima that trap the Speculator-only baseline.
+
+\vspace{-5pt}
+\subsection{Results}
+\begin{figure*}[t]
+ \centering % Center the entire figure content
+ % --- Left Column: The Plot ---
+ \begin{minipage}[c]{0.64\linewidth}
+  \includegraphics[width=\linewidth]{figures/os_tuning/combined_plot.pdf}
+ \end{minipage}
+ \hfill % Adds a flexible space between the two columns
+ % --- Right Column: The Table ---
+ \begin{minipage}[c]{0.35\linewidth}
+  \centering
+\begin{tabular}{l p{1.29cm}}
+  \toprule
+  \textbf{Configuration} & \textbf{Latency p95 (ms)} \\
+  \midrule
+  Untuned & 102.97\\
+  Actor-only      &  54.00 \\
+  Actor + Spec.   &  37.93 \\
+  \bottomrule
+\end{tabular}
+ \end{minipage}
+ \caption{
+ \textbf{(Left)} Comparison of \textbf{Speculator-Actor}, \textbf{Speculator-only}, and \textbf{Actor-only} convergence.
+ The Speculator shortens time spent exploring poor settings. 
+ The Speculator-only agent stabilizes quickly but at a worse final value.
+ \textbf{(Right)} Average p95 latency over a 20-second tuning experiment showing that rapid reaction offers immediate performance benefits (see \S\ref{app:speculative-mitigation}). Lower is better.}
+ \label{fig:os-speculation}
+\end{figure*}
+\vspace{-8pt}
+
+\paragraph{Speculator mitigates poor-reaction slowdowns} The Speculator dramatically improves reaction time, as observed Figure \ref{fig:os-speculation}~(Right). During the recovery period, the full Speculator-Actor system maintains an average p95 latency of 37.93 ms. This is a substantial improvement over the Actor-only baseline, which was forced to endure the poor performance for much longer and averaged 54.00 ms. The Speculator's rapid correction prevents the system from lingering in a high-latency state (initially 102.97 ms), providing immediate benefits while the slower Actor deliberates (the full experiment is detailed in \S\ref{app:speculative-mitigation}).
+
+\paragraph{Speculator accelerates convergence to optimum}
+The Speculator's high-frequency updates also significantly accelerate convergence. 
+As shown in Figure~\ref{fig:os-speculation} (Left), the Speculator-Actor system reaches an optimal setting (e.g., 0.2\,ms \texttt{min\_granularity}) in approximately 10–15 seconds. 
+In contrast, the Actor-only agent takes around 200 seconds---20x slower---and remains trapped in highly suboptimal states (e.g., latency $>$120\,ms) for a long period of time. 
+The Speculator's rapid exploration provides the Actor with a richer performance landscape, allowing it to steer the system away from these pathological regions more quickly.
+
+
+\paragraph{Speculator-only is good, but not optimal}
+Figure~\ref{fig:os-speculation} also shows that while the Speculator-only system reacts quickly, it converges prematurely to a suboptimal configuration: \texttt{min\_granularity} of 0.55\,ms (36.24\,ms latency). 
+This is significantly worse than the 0.2\,ms (30.26\,ms latency) achieved by the full Speculator-Actor system. Without the Actor's guidance, the Speculator lacks the reasoning depth to escape this local minimum.
+
+The joint Speculator–Actor system combines fast adaptation with strategic guidance, achieving both responsiveness and optimal steady-state performance.

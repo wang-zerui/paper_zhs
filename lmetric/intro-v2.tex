@@ -1,0 +1,135 @@
+\section{Introduction}
+\label{sec:intro}
+
+\noindent
+This paper studies how to efficiently route LLM requests to a cluster 
+of serving instances---the minimal model deployment unit.
+Serving LLMs has become a key building block in modern society,
+and LLM providers typically deploy clusters of instances for serving 
+where each cluster contains a \emph{global scheduler} that routes incoming requests to the instances it manages~\cite{305212,DBLP:conf/sosp/Xiang0QYZYZL0025,
+DBLP:journals/corr/abs-2505-09999, llm-d, ai-Dynamo, aigw, vllm-code}.
+Upon receiving a request, the instance generates result tokens in two phases:
+The prefill (P) phase generates the first result token, and the serving quality is measured by time-to-first-token (TTFT).
+The decode (D) phase then generates the remaining tokens in a streaming manner, and its serving quality is measured by time-per-output-token (TPOT).
+
+Providing an effective scheduling policy is crucial for cluster-level LLM serving because,
+similar to traditional request routing~\cite{DBLP:conf/asplos/DelimitrouK14,DBLP:conf/eurosys/ZhangTHJGW13,DBLP:conf/osdi/GogSGWH16},
+better placement significantly reduces overall request latency (lower TTFT and TPOT)
+thanks to factors like better load balancing across instances. 
+Low-latency serving is especially critical for current
+interactive applications such as ChatGPT~\cite{chatgpt} and copilots~\cite{copilot}, as it is key to meeting user expectations~\cite{latency-study,DBLP:conf/osdi/ZhongLCHZL0024,aws-latency}.
+Moreover, recent agentic workloads consume tokens rapidly through computational programs~\cite{claudeapi,geminiapi,openaiapi}.
+
+\iffalse
+\begin{figure}[!t]
+%        \hspace{-2mm}
+        \begin{minipage}{1\linewidth}
+        \centering
+        \includegraphics[width=1.02\linewidth, trim=0.25cm 5.5cm 37.65cm 0.25cm, clip]{figs/metrics-v1.pdf}
+        \end{minipage} \\[0pt]
+        \begin{minipage}{1\linewidth}
+        \caption{\small{%
+            \TODO{xx}
+        }}
+        \label{fig:evolve}
+        \end{minipage} \\[-20pt]
+        \end{figure}
+\fi
+
+
+Achieving a good LLM-specific scheduling policy is non-trivial:
+First, considering only load balancing between different instances---which is adopted by 
+a recent state-of-the-art serving system vLLM~\cite{vllm-code} and
+traditional request routing
+is insufficient.
+This is because the computation required to process each request is different across 
+instances due to {\kvcache},
+the intermediate context of the processed tokens (\textsection{\ref{sec:kvcache-aware}}).
+Specifically,
+if an incoming request's (partial) input tokens hit the {\kvcache} cached on an instance,
+the instance can skip generating the corresponding {\kvcache} for the hit tokens,
+thereby accelerating the subsequent prefill and decode stages.
+However,
+incorporating only {\kvcache}-aware indicators into scheduling decisions 
+(e.g., the {\kvcache} hit ratio if routing a request to an instance)
+is also insufficient,
+because it biases requests towards instances with {\kvcache} hits
+and hurts load balancing across instances 
+ (\textsection{\ref{sec:challenge-balancing}}).
+
+To balance the two objectives---{\kvcache}-awareness and load balancing, 
+three different combination strategies exist today. 
+First, linear combination strategies (i.e., weighted sum)~\cite{vllm,ai-Dynamo} combine the indicators for each objective into a single score 
+for scheduling (\textsection{\ref{sec:linear-combination}}). 
+It is the simplest strategy yet a popular choice adopted by current works 
+and one of the world's top LLM service providers ({\company}). 
+However, linear combination requires complex workload-specific hyperparameter tuning to achieve both objectives.
+Moreover, a statically tuned hyperparameter is suboptimal due to the possibly dynamically changing workloads (\textsection{\ref{sec:linear-combination}}).
+
+Second, filter-based strategies first filter out instances that are suspected to suffer from imbalanced workloads,
+and then select the instance with the most {\kvcache} hits among the remaining instances~\cite{aibrix}.
+It still requires non-trivial workload-specific tuning to determine the filtering threshold.
+Worse still, 
+its scheduling is biased towards load balancing and 
+thus cannot fully utilize the {\kvcache} cache (\textsection{\ref{sec:filter-combination}}).
+
+Finally, simulation-based strategies~\cite{305212, llm-d, DBLP:journals/corr/abs-2507-17769, DBLP:journals/corr/abs-2504-08784}
+first use a simulator to predict the expected latency of routing a request to each instance,
+and then use the latency as the scheduling score.
+The simulator estimates the latency based on its current indicators, e.g., {\kvcache} content and queued requests,
+so it can be viewed as a high-order combination of indicators used by other strategies.
+However, the effectiveness of the strategy highly relies on the accuracy of the simulator,
+which requires complex per-model, per-hardware, and per-deployment development.
+Otherwise,
+an inaccurate simulation can lead to poor scheduling performance (\textsection{\ref{sec:prediction-combination}}).
+Even with an accurate simulator, it may still fail to achieve comparable performance
+with other candidates in some cases.
+
+In this paper, we show that multiplying one indicator for {\kvcache}-awareness and 
+one indicator for load balancing 
+as the scheduling score can effectively combine the two objectives
+without complex hyperparameter tuning or any simulator.
+The key idea is that by using multiplication to replace
+the addition operation in a linear combination,
+the hyperparameters are canceled out during the score comparison among different instances.
+As a result, the score preserves a trend similar to that of a linear combination
+without requiring any hyperparameter tuning (\textsection{\ref{sec:method}}).
+
+%This may explain why we found it to be extremely robust across different workloads (\textsection{\ref{sec:eval}}).
+To make the simple multiplication work well in practice, 
+we found that careful indicator selection is important (\textsection{\ref{sec:indicators}}).
+For example,
+using the number of new prefill tokens when routing a request to an instance
+considering {\kvcache} hits as the {\kvcache}-aware indicator is
+better than {\kvcache} hit ratio.
+Additionally, using the current batch size of the instance as the load-balancing indicator
+is better than using the number of total tokens (including the decode context tokens) queued on the instance.
+Finally, the multiplication can fail in some rare cases; 
+so we mathematically derive the approximate conditions for these cases. 
+Based on the formulated conditions, we found such conditions are extremely rare in practice 
+and can be detected with our two-phase approach (\textsection{\ref{sec:m-analyze}}).
+Upon detection, we can further fall back to a load-balancing-only policy to mitigate the issue. 
+
+We have compared our method with state-of-the-art methods, including vLLM~\cite{vllm-code}, AI-Dynamo~\cite{ai-Dynamo}, LLM-D~\cite{llm-d} and
+the one used in {\company}---one of the world's largest LLM providers---on real LLM serving workloads
+covering chatbots, API calling, and coding agents (\textsection{\ref{sec:eval-setup}}).
+Evaluation on popular models covering both dense and MoE architectures confirms the benefits
+of our approach on an H20 cluster with up to 16 GPUs.
+
+We will open-source our code, including all benchmarking tools and the open-source traces, upon publication.
+
+\stitle{Discussion: PD-colocation vs. PD disaggregation. \,}
+We assume that both prefill and decode requests are served on the same instance---a setup termed
+PD-colocation.
+While there also exist deployments where prefill and decode requests are served on different instances (PD-disaggregation)~\cite{DBLP:conf/isca/PatelCZSGMB24,DBLP:conf/osdi/ZhongLCHZL0024},
+PD-colocated serving is still adopted in practice~\cite{DBLP:conf/sosp/Xiang0QYZYZL0025}
+because it is easier to maintain (no instance role management)
+and does not rely on fast networking between instances.
+Although {\company} largely deploys PD-disaggregated serving,
+some services still rely on PD-colocated deployments.
+Efficient scheduling for PD-disaggregated serving is beyond the scope of this paper. 
+
+
+
+
+

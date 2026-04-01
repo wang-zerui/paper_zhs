@@ -1,0 +1,31 @@
+% =============================================================================
+\section{维度 3：资源池架构}
+\label{sec:pool}
+% =============================================================================
+
+我们的集群优化工具~\cite{fleetopt2026, fleetsim2026, onewlaw2026}为资源池架构提供了分析模型与仿真模型。
+
+\subsection{同构 vs.\ 异构 GPU 资源池}
+\label{sec:pool:homo-hetero}
+
+FleetOpt~\cite{fleetopt2026}从分析上推导最小成本集群：它给出了满足边际 GPU 成本相等条件的双池架构及其最优边界 $\boundary^*$。在生产轨迹上，相比同构集群，这一方法可将 GPU 成本降低 6--82\%。inference-fleet-sim~\cite{fleetsim2026}又把这一点推广到异构 GPU 类型（A10G、A100、H100），并引入了物理启发的性能模型。
+
+M\'{e}lange~\cite{griggs2024melange}把异构 GPU 分配建模为成本感知的 bin packing，最高可实现 77\% 的成本下降。我们的仿真工具~\cite{fleetsim2026}则表明，最便宜的 GPU 类型会以非直观的方式依赖于工作负载：对于 concentrated-below 类工作负载，并发性比单 token 速度更重要，因此 A10G 甚至可能优于 H100。
+
+\subsection{能耗与 1/W 定律}
+\label{sec:pool:energy}
+
+1/W 定律~\cite{onewlaw2026}对资源池架构有直接含义：上下文窗口每翻倍，每瓦令牌数就会减半，因为 KV-cache 并发能力受限。在 64K 上下文时，一块 H100 只能容纳 16 条序列（$\tokW \approx 1.5$）；而在 4K 时则可以容纳 256 条序列（$\tokW \approx 17.6$）。
+
+路由拓扑是比 GPU 代际更强的能耗杠杆：双池路由相较同构集群能带来大约 $\sim$2.5$\times$ 更高的 tok/W，而 H100$\to$B200 的升级只有大约 $\sim$1.7$\times$。两者收益可以相乘，达到大约 $\sim$4.25$\times$。对像 Qwen3-235B-A22B 这样的 MoE 模型而言，活动参数权重流式传输还提供了第三个杠杆（在 8K 上下文时约为 $\sim$37.8\,tok/W，比稠密版 Llama-3.1-70B 高 5.1$\times$）。
+
+因此，能耗优化要求联合设计路由与资源池；无论 GPU 代际如何，同构集群都无法到达能效前沿。
+
+\subsection{解耦的 Prefill/Decode 与 KV-Cache 拓扑}
+\label{sec:pool:disagg}
+
+Splitwise~\cite{patel2024splitwise}与 DistServe~\cite{zhong2024distserve}在物理上把 prefill 与 decode 分离，在同等 SLO 下可服务 4.48$\times$ 更多请求。Mooncake~\cite{qin2025mooncake}提供了以 KV-cache 为中心的解耦，并支持分层卸载（GPU HBM、CPU DRAM、SSD）。NVIDIA Dynamo~\cite{nvidia2026dynamo}则支持跨多级内存的 KV-cache 卸载与动态调度。
+
+我们的 inference-fleet-sim~\cite{fleetsim2026}对这三种拓扑都建模了，即单体式、双池路由式和解耦式，并揭示出一个结论：解耦并不总是有利。对于 concentrated-below 工作负载（Archetype~1）且 $\boundary_{\text{short}}$ 较小时，KV-cache 传输开销会超过它带来的收益。
+
+vLLM 的 PagedAttention~\cite{kwon2023vllm}把 KV-cache 浪费降低到 4\% 以下，而带有前缀缓存感知的分布式调度~\cite{llmd2026kvcache}则带来了 $57\times$ 的加速。但对智能体工作负载而言，标准 LRU 驱逐是病态的~\cite{vllm2026rfc37003}，需要使用带会话亲和路由的上下文感知保留策略。

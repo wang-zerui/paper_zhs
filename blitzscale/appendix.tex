@@ -1,0 +1,70 @@
+\section{Appendix}
+\label{sec:appendix}
+
+\begin{table*}[!ht]
+	\centering
+	\begin{tabular}{lllllll}
+		\toprule
+		\textbf{Instance type}                    & \textbf{Accelerators} & \makecell{\textbf{Local SSD}\\\textbf{BW/GPU}} & \makecell{\textbf{Remote SSD}\\\textbf{BW/GPU}} & \makecell{\textbf{Network}\\\textbf{BW/GPU}} & \textbf{Has NVLink} & \textbf{Price} \\ \midrule
+		a2-ultragpu-8g \cite{googleinstance}      & 8 x A100(80\,GB)      & 2.58\,Gbps                & 0.29\,Gbps                 & 12.5\,Gbps              & \ding{51}           & 40.44 USD/h    \\
+		p4d.24xlarge\cite{awsinstance}            & 8 x A100(40\,GB)      & 2.31\,Gbps                & -                          & 100\,Gbps               & \ding{51}           & 45.039 USD/h   \\
+		ml.hpcpni2.28xlarge\cite{volcanoinstance} & 8 x A100(80\,GB)      & 4\,Gbps                   & -                          & 100\,Gbps               & \ding{55}           & 48.23 USD/h    \\
+		p4de.24xlarge\cite{awsinstance}           & 8 x A100(80\,GB)      & 2.31\,Gbps                & -                          & 100\,Gbps               & \ding{51}           & 56.328 USD/h   \\
+		a3-highgpu-8g\cite{googleinstance}        & 8 x H100              & 6.09\,Gbps                & 0.97\,Gbps                 & 100\,Gbps               & \ding{51}           & 88.25 USD/h    \\
+		a3-megagpu-8g\cite{googleinstance}        & 8 x H100              & 6.09\,Gbps                & 0.97\,Gbps                 & 200\,Gbps               & \ding{51}           & Unavailable    \\
+		p5.48xlarge \cite{awsinstance}            & 8 x H100              & 9.8\,Gbps                 & -                          & 400\,Gbps               & \ding{51}           & Unavailable    \\ \bottomrule
+	\end{tabular} \\[10pt]
+
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\textit{
+		A survey of {\maas} hardware configurations from GPU vendors.
+        }}}
+    \label{tab:vendor-hardware}
+    \end{minipage} %\\[-10pt]	
+\end{table*}
+
+\subsection{Notable implementation details}
+\label{sec:appendix-implementation}
+
+
+\nospacestitle{Network library }
+We implement a communication library
+that abstracts both NVLink and RDMA to holistically transfer parameters,
+similar to DeepEP~\cite{deepep}.
+During our implementation, we found 
+establishing communication group between machines is slow (e.g., 100\,ms) 
+when using off-the-shelf group communicators (e.g., NCCL~\cite{nccl}),
+which significantly limit the effectiveness of network-based scaling.
+Fortunately, we found that our plan only requires P2P communication between each pair of nodes. 
+Therefore, we pre-create a connection pool that supports full-mesh connections on each.
+While the compute network (RDMA) has potential scalability issue~\cite{fasst}, 
+it only occurs when transferring small payloads and can be addressed using advanced RDMA 
+transport like DCT~\cite{krcore}. 
+
+\stitle{Native serving engine with CUDA context pool. }
+Before execution, a CUDA context with loaded kernels (cuModule) must be created on GPU.
+Creating such a CUDA context takes about 500\,ms, and is non-negligible in serving instance
+autoscaling. To mitigate such an overhead, {\sys} preserves a small CUDA context pool with
+pre-loaded kernels and transfers parameters to GPU within one of the existing CUDA contexts,
+similar to an existing work~\cite{DBLP:journals/corr/abs-2405-12079}.
+Furthermore, {\sys} is built using C++ and native CUDA APIs, eliminating the overhead of initializing
+PyTorch (e.g. \texttt{dlopen}).
+
+\stitle{Fault tolerance. }
+When machine failures occur, 
+we will autoscale new instances using our scaling mechanism. 
+One problem is that cached parameters on the failed machine are lost, 
+so we need to redistribute these parameters to other machines to maintain 
+our global parameter pool invariant. 
+For other components in the system like 
+scheduler or monitor failures, we follow the same procedure
+in existing work for recovery~\cite{DBLP:conf/usenix/Romero0YK21,DBLP:journals/corr/abs-2401-14351}. 
+
+
+
+\subsection{Hardware configurations for {\maas}}
+\label{sec:appendix-hardware}
+
+\noindent
+Table~\ref{tab:vendor-hardware} lists the hardware configurations backed by typical 
+{\maas} systems. 

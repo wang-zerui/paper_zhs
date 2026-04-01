@@ -1,0 +1,30 @@
+\section{设计原则}
+\label{sec:design-principle}
+为满足多任务 agentic 训练在解耦式基础设施上的需求，我们提出以下三项设计原则。
+
+\subsection{P1：基于硬件亲和性的工作负载映射}
+第一项原则是根据\textit{硬件亲和性}把工作负载映射到资源上，以满足 \textbf{R1}。用户不仅可以在阶段粒度定义资源类型集合，例如让训练跑在 GPU、环境跑在 CPU，还可以在轨迹粒度上进行更细的调度。例如在 rollout 阶段，将 prefill 主导、且未触及显存瓶颈的轨迹路由到 H800，而把 decoding 主导的轨迹安排到 H20。奖励阶段同样可以细分：奖励 LLM 跑在 GPU，而代码沙箱运行在 CPU。这样的细粒度映射能够更充分地榨取异构硬件效率。
+
+\subsection{P2：细粒度异步执行}
+第二项原则针对 \textbf{R2} 与 \textbf{R4}，即利用细粒度异步来应对解耦式 agentic 训练中的多样化通信模式。
+
+\noindent\textbf{轨迹级 rollout 调度。}
+传统方法~\cite{verl} 通常把 LLM 生成、环境交互和奖励计算按批次串行组织，这会造成明显资源浪费与高 rollout 延迟。与之相对，轨迹级调度把三者编排成持续流动的流水线：一条轨迹在做环境交互时，另一条轨迹可以进行 LLM 生成，第三条轨迹则进行奖励计算。这样既能减少资源空闲，又能隐藏环境通信延迟，并提升系统对环境不稳定性的耐受能力。
+
+\noindent\textbf{受控的 rollout-train 同步。}
+异步 RL 训练允许 rollout 与 training 并行推进。rollout 持续产出轨迹，training 消费轨迹并周期性地把新权重同步给推理工作者。\SystemName{}将“已完成轨迹的消费速率”作为显式控制对象，让实践者可以通过异步边界来在训练稳定性、系统吞吐以及权重同步开销之间进行平衡。
+
+\subsection{P3：状态感知计算}
+第三项原则满足 \textbf{R3}：系统按组件的状态属性组织计算。无状态组件的输出仅由输入决定，天然适合在 serverless 平台上优化。
+
+\noindent\textbf{Rollout：LLM 生成。}
+生产系统通常使用 serverful 架构部署 LLM 生成，以获得更低时延与更高吞吐。近期工作如 Tinker~\cite{tml2025tinker} 开始研究 RL rollout 的弹性服务，但其设计主要围绕 LoRA~\cite{hu2021loralowrankadaptationlarge}，而工业级 LLM 更迫切的需求仍是全参数训练。
+
+\noindent\textbf{Rollout：环境。}
+环境天然是有状态的：代码工作区、浏览器页面或游戏状态都会随着动作不断演化。因此，同一条轨迹的所有动作必须路由到同一个持久环境实例上，也就是说系统必须提供会话亲和性。
+
+\noindent\textbf{无状态奖励。}
+奖励工作者读取轨迹并输出标量值，不需要记住过去评估历史，非常适合共享、多租户的 \textit{Reward-as-a-Service}。它可以按需从零扩容到很大规模，从而最大化资源利用率。
+
+\noindent\textbf{Training。}
+训练阶段天然有状态，需要专用 GPU 集群承载。这一阶段需要与 rollout 异步协同，但自身不适合迁移到无服务器模式。

@@ -1,0 +1,567 @@
+\documentclass[10pt,letterpaper,twocolumn]{article}
+\usepackage[letterpaper,margin=0.75in,columnsep=0.25in]{geometry}
+\setlength{\parskip}{2.3pt}
+
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{newunicodechar}
+\newunicodechar{–}{--}
+\setmainfont{Times New Roman}
+\setsansfont{Arial}
+\setmonofont{Menlo}
+\setCJKmainfont{STSong}
+\setCJKsansfont{STSong}
+\setCJKmonofont{STSong}
+
+\usepackage{subfigure}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[english]{babel}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{amsthm}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm2e}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+  commentstyle=\color{codegreen},
+  keywordstyle=\color{magenta},
+  stringstyle=\color{codepurple},
+  basicstyle=\ttfamily\footnotesize,
+  breakatwhitespace=false,
+  breaklines=true,
+  captionpos=b,
+  keepspaces=true,
+  numbersep=5pt,
+  showspaces=false,
+  showstringspaces=false,
+  showtabs=false,
+  tabsize=2
+}
+\lstset{style=mystyle}
+
+\renewcommand{\abstractname}{摘要}
+\floatname{algorithm}{算法}
+\newtheorem{theorem}{定理}
+\newtheorem{definition}{定义}
+\newtheorem{lemma}{引理}
+\setlength{\columnsep}{0.25in}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{2.3pt}
+\pagestyle{plain}
+\makeatletter
+\newcommand{\@zhabstract}{}
+\newcommand{\zhabstract}[1]{\gdef\@zhabstract{#1}}
+\renewcommand{\maketitle}{%
+  \twocolumn[{%
+    \begin{@twocolumnfalse}
+    \maketitlehook
+    \begin{center}
+      {\LARGE\bfseries \@title \par}
+      \vspace{1em}
+      {\normalsize \@author \par}
+    \end{center}
+    \vspace{0.5em}
+    \noindent\textbf{\abstractname}\quad \@zhabstract\par
+    \vspace{1em}
+    \end{@twocolumnfalse}
+  }]%
+}
+\newcommand{\maketitlehook}{}
+\makeatother
+
+\begin{document}
+
+\title{Colossal-Auto：大规模模型并行化与激活检查点的统一自动化}
+
+\author{
+Yuliang Liu$^{a}$, Shenggui Li$^{a}$, Jiarui Fang$^{a}$, Yanjun Shao$^{a,b}$, Boyuan Yao$^{a,b}$, Yang You$^{*,c}$\\[0.5em]
+\normalsize HPC-AI Technology Inc.$^a$ \quad 复旦大学$^b$ \quad 新加坡国立大学$^c$\\
+\normalsize * 通讯作者：youy@comp.nus.edu.sg
+}
+
+\zhabstract{
+近年来，大规模基础模型在多个领域持续刷新性能上限，但其训练过程也越来越依赖复杂的分布式并行与显存优化技术。流水并行、张量并行和激活检查点已经是常见手段；然而，现有工作大多分别优化分布式执行计划和激活检查点计划，缺少统一建模与联合搜索的方法。与此同时，静态规划又高度依赖精确的计算量与显存开销估计，而传统做法通常需要真实执行算子，代价高且容易失真。
+
+本文提出 Colossal-Auto，一个面向 PyTorch 的自动并行系统，用于联合搜索算子内并行（intra-op parallelism）与激活检查点策略。系统通过符号执行收集计算图与硬件信息，使用分层两阶段求解器在给定显存预算下搜索近似最优执行方案，并最终将普通的串行 PyTorch 模型重写为可直接运行的分布式版本。我们的实现还提供一个轻量级符号分析器，能够以极低成本为任意 PyTorch 模型估计内存与计算开销。源码已在 \href{https://github.com/hpcaitech/ColossalAI}{ColossalAI} 中公开。
+}
+
+\maketitle
+
+\section{引言}
+
+基础模型~\cite{bommasani2021opportunities} 已成为人工智能领域的主流范式。BERT~\cite{bert}、GPT-3~\cite{gpt-3} 和 Vision Transformer~\cite{https://doi.org/10.48550/arxiv.2010.11929} 等模型拥有海量参数，并在超大规模数据集上训练。随着参数量持续增长，模型性能通常随之提升；但代价是单卡 GPU 的高速显存越来越难以容纳训练过程中的参数、优化器状态与激活。即便 batch size 只有 1，训练一个百亿参数模型也可能需要超过 80GB 的显存。因此，现代大模型训练通常必须采用分布式方案，GShard~\cite{gshard}、FairScale~\cite{FairScale2021}、Megatron-LM~\cite{shoeybi2019megatron} 和 DeepSpeed~\cite{deepspeed} 等系统都提供了不同的扩展策略。
+
+然而，要为一个具体模型和具体集群配置找到最优分布式执行计划，仍然需要大量专家经验。以 SPMD 风格的算子内并行为例，搜索空间极其庞大：一方面，张量的不同维度都可能被切分；另一方面，设备又可以组织成任意维度的 device mesh。更复杂的是，一个算子的输出会成为下游算子的输入，而上下游对张量布局的要求可能完全不同，因此需要额外的 layout redistribution。已有方法通常只支持较低维度的 mesh 和切分方式，难以穷尽所有转换情形。与此同时，激活重计算~\cite{act-ckpt} 和模型数据卸载~\cite{ren2021zero, fang2022parallel} 等显存优化策略又会显著改变可行搜索空间，使最优并行方案更加依赖全局联合考虑。
+
+现有自动并行系统如 Alpa~\cite{zheng2022alpa} 和 FlexFlow~\cite{jia2019beyond} 已展示出自动搜索执行计划的潜力，但仍存在两个明显限制。首先，激活检查点已经成为训练基础模型时几乎不可或缺的技术，而这些系统并没有把它作为联合优化对象。其次，已有方案在复杂硬件拓扑上的泛化能力不足，例如常见实现通常只把设备组织为二维 mesh，难以适配更复杂的连接结构。
+
+本文提出一个基于 PyTorch~\cite{paszke2019pytorch} 的自动算子内并行系统，它能够把普通串行模型代码编译为高效的并行执行代码。除并行化外，系统还能在满足显存预算的前提下自动生成高效的激活检查点策略。为此，我们在分析阶段同时收集硬件信息和计算图信息，采用层次化优化方法搜索执行计划，并生成最终运行时代码。本文的主要贡献如下：
+
+\begin{itemize}
+    \item 提出一种提前联合优化算子内并行与激活检查点的方法。
+    \item 设计一种启发式张量布局转换算法，支持任意维度 device mesh 上不同 sharding spec 间的高效转换。
+    \item 实现一个基于 meta-execution 的符号分析器，能够在细粒度计算图上同时收集计算与显存开销。
+\end{itemize}
+
+\section{背景}
+
+由于 Nvidia GPU 等常见加速器的显存有限，单设备训练大模型很容易触发 OOM，因此分布式训练已成为突破单卡显存上限的必要手段。工业界和学术界已经提出了大量用于提升集群训练效率的方法，下面分别介绍与本文最相关的几类技术。
+
+\begin{figure*}[ht!]
+    \centering
+    \includegraphics[width=1\textwidth]{img/new_overview.pdf}
+    \caption{Colossal-Auto 的整体工作流}
+    \label{fig: workflow}
+\end{figure*}
+
+\subsection{数据并行}
+
+数据并行是最常见的分布式训练方式，因为它实现简单且易于接入。在 $N$ 张 GPU 上进行数据并行时，训练数据被切分为 $N$ 份，模型副本复制到每张卡上，各卡用本地数据独立前向与反向，再在反向阶段同步梯度。Horovod~\cite{horovod} 和 PyTorch DistributedDataParallel~\cite{pytorch-distributed} 都可以在较小代码改动下提供这种能力。
+
+数据并行的主要问题是显存冗余：每张卡都要持有完整参数。随着 GPU 数量增加，吞吐量可以上升，但单卡可训练模型规模并不会自然扩大。为解决这一问题，DeepSpeed~\cite{deepspeed} 提出了 ZeRO~\cite{rajbhandari2020zero}，在数据并行过程中切分优化器状态、梯度和模型参数，从而显著降低冗余。此外，DeepSpeed 还支持 offloading~\cite{zero-infinity}，可将暂时不用的张量从 GPU 挪到 CPU 甚至 NVMe，进一步扩大可用内存空间。
+
+\subsection{流水并行}
+
+除按样本切分外，还可以按层切分模型。GPipe~\cite{gpipe}、PipeDream~\cite{pipedream}、Chimera~\cite{chimera} 和 Megatron-LM~\cite{shoeybi2019megatron} 都采用了流水并行思路：将模型拆成若干连续层块，每个块映射到一个设备上，前向时传递激活，反向时传递梯度。这样模型规模会随设备数量增长而扩展。其代价是流水线气泡时间，即部分设备在某一时刻处于空闲。为减少这一浪费，Megatron-LM 提出了交错流水，Chimera 提出了双向流水，都能显著降低 bubble time。
+
+\subsection{张量并行}
+
+张量并行通过切分参数张量并以 SPMD 方式执行训练。GShard~\cite{gshard} 允许用户为选定张量显式标注切分方案，并通过数据流分析推断其他张量的切分。Megatron-LM~\cite{shoeybi2019megatron} 则面向 Transformer~\cite{transformer} 设计了行切分和列切分的线性层并行方式，应用于注意力和前馈模块。这样可以同时降低单卡计算量和显存占用，使模型扩展到数十亿参数。
+
+张量并行与数据并行、流水并行相互正交，通常会组合使用。考虑到节点内通信通常快于跨节点通信，实践中张量并行往往局限在单机内，而跨机更多使用流水并行，以更好利用硬件带宽~\cite{shoeybi2019megatron}。
+
+\subsection{自动并行}
+
+上述策略大多需要用户显式制定规则，而自动并行系统则试图根据模型和硬件自动搜索执行方案。FlexFlow~\cite{flexflow}、Tofu~\cite{tofu} 和 Alpa~\cite{zheng2022alpa} 都属于这一方向。尤其是 Alpa，从新的视角统一了并行搜索：它把数据并行和张量并行都看作算子内并行，把流水并行视作算子间并行；前者用 ILP 搜索张量切分，后者借助 TeraPipe~\cite{terapipe} 用动态规划搜索模块分段。
+
+\subsection{激活检查点}
+
+激活检查点~\cite{act-ckpt, dtr} 通过以算换存的方式减少单卡显存占用。当对一组连续层启用检查点时，前向阶段只保存最后一层输出，而不保存中间激活；反向阶段再触发重计算，临时恢复中间结果用于梯度求解。这样可以显著降低中间激活的显存成本，为更大模型腾出空间。由于它本身不切分张量，所以与其他并行方式是正交的。Rotor~\cite{herrmann2019optimal}、Pofo~\cite{beaumont2021efficient}、Checkmate~\cite{jain2020checkmate} 和 POET~\cite{patil2022poet} 都研究了在给定显存预算下自动寻找最优检查点策略的问题。
+
+\section{设计}
+
+虽然前述技术已经显著降低了分布式训练门槛，但仍缺少一个能够把它们统一起来、真正做到自动化的系统。Alpa 已统一数据、张量和流水并行，但并未纳入激活检查点。本文希望把激活检查点也纳入统一规划之中，生成同时考虑并行方式与重计算策略的近似最优执行计划。当前实现主要聚焦于算子内并行；算子间并行会在后续工作中补充。
+
+Colossal-Auto 建立在 PyTorch FX~\cite{torch-fx} 之上。系统输入是普通的、非分布式的 PyTorch 模型；输出则是已经应用高效算子内并行和自动选择激活检查点的 PyTorch 模型。由于输出仍然是 PyTorch 模型，它与 ZeRO-Offload~\cite{ren2021zero}、PatrickStar~\cite{fang2022parallel, huang2022elixir} 等运行时优化仍然兼容。示例如下。
+
+\begin{lstlisting}[language=Python, label=demo, caption=用户只需极小改动即可接入系统的示例。]
+model = resnet50(num_classes=10)
+
+# convert original model to optimized model
+model = autoparallelize(model, input_sample)
+
+criterion = torch.nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(model.parameters())
+
+# a normal training loop
+for epoch in range(NUM_EPOCHS):
+    for img, label in data_loader:
+        optimizer.zero_grad()
+        output = model(img)
+        train_loss = criterion(output, label)
+        train_loss.backward(train_loss)
+        optimizer.step()
+\end{lstlisting}
+
+系统整体流程如图~\ref{fig: workflow} 所示，可分为三个核心部分：分析器、两阶段求解器和代码生成器。分析器负责提前收集计算图、算子开销和硬件拓扑信息；求解器在这些信息上搜索满足显存约束的高效执行计划；生成器再把计划应用回原始图，并重新编译出可运行代码。
+
+\section{分析器}
+
+分析器是为 PyTorch 构建的静态分析系统。由于 PyTorch 采用动态图执行，程序运行前很难直接获得完整图结构与精确开销信息。我们基于 PyTorch FX 模块~\cite{torch-fx} 提前提取静态计算图，并在其上进行元信息分析。
+
+分析器包含三个部分：用于收集计算与显存开销的符号分析器、用于探测硬件拓扑和带宽的集群探测器，以及用于搜索张量布局转换路径并记录转换代价的张量布局管理器。
+
+\subsection{符号分析器}
+
+为了评估并行策略和激活检查点策略，我们需要知道每个节点的浮点运算量与显存消耗。但在 PyTorch 的动态图语义下，这类信息通常只能在真实运行时获得，难以在搜索前离线使用。
+
+PyTorch FX 提供的 symbolic tracing 使这一目标变得可行。符号跟踪不会真正执行算子，而只推断输出张量的元数据，例如 shape 和 dtype，如图~\ref{fig: symbolic} 所示。我们在此基础上扩展了更广泛的操作、控制流以及 PyTorch meta tensor 支持。在跟踪过程中，系统为每个节点附加元信息，并通过符号执行收集其计算开销（TFLOPs）和显存开销（Byte）。由于整个过程只做模拟而不做真实计算，分析开销很低。
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\textwidth]{img/meta_execution.pdf}
+    \caption{符号执行示意}
+    \label{fig: symbolic}
+\end{figure}
+
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{img/overall.png}
+    \caption{符号显存分析精度评估}
+    \label{fig: evaluation}
+\end{figure*}
+
+为评估分析器精度，我们在十余种主流模型上进行了实验，包括 VGG\_16、ResNet50、ViT 和 GPT2 等。图~\ref{fig: evaluation} 表明，符号分析得到的显存估计结果与真实执行值非常接近。
+
+\subsection{集群探测器}
+
+我们采用 Alpa~\cite{zheng2022alpa} 中的 device mesh 概念来抽象参与训练的设备。device mesh 可以把一组物理设备组织成逻辑二维网格，例如 8 张 GPU 可以视为 $1\times 8$ 或 $2\times 4$ mesh。在逻辑 mesh 中，同一维上的所有设备都参与相同类型的计算和集合通信，因此如果同一轴上的设备带宽差异较大，通信瓶颈就会由最慢链路决定。
+
+Alpa 默认假设同一节点内设备间带宽一致，但现实集群常常更复杂，例如只有部分相邻 GPU 之间有 NVLink，其余只能走 PCI-e。为更好适配这类环境，我们的集群探测器会主动测量通信时延和带宽，并据此恢复更细粒度的拓扑结构。测得的带宽与时延信息不仅可用于构造更合理的 device mesh，也会进一步注入到后续代价模型中。
+
+\subsection{张量布局管理器}
+
+在算子内并行中，同一个张量可能有多种不同布局，因此需要一种表示方法来描述切分方式。我们沿用了 Alpa 的 SPMD 风格 sharding spec。对于一个 $N$ 维张量，其 sharding spec 记为 $X_0X_1...X_{n-1}$，其中每个 $X_i$ 属于 $\{S, R\}$；若某一维记为 $S_j$，表示该维沿 device mesh 的第 $j$ 个轴切分。若一个 $S$ 带有多个下标，则表示沿多个 mesh 轴共同切分。
+
+当上游和下游算子需要的 sharding spec 不一致时，就必须执行 layout conversion，也称 redistribution。现有方法大致有两类。枚举式方法预先穷举所有可能情况并查表转换，但随着 mesh 维度提升，枚举规模会迅速膨胀。逐维转换方法则按照张量维度顺序依次把源 spec 转成目标 spec，虽然总能得到一条可行路径，但通常并不高效。
+
+为此，我们提出一种基于启发式搜索的转换算法，如算法~\ref{alg: layout conversion} 所示。算法从源 spec 出发，生成所有单步可达 spec，然后利用相似度函数选出与目标 spec ``差异最小'' 的候选，作为下一步搜索起点，直到到达目标 spec。
+
+\RestyleAlgo{ruled}
+\begin{algorithm}[h]
+\caption{张量布局转换路径搜索}
+\label{alg: layout conversion}
+\KwData{$source\_spec, target\_spec$}
+\KwResult{$transform\_path$}
+$total\_step \leftarrow 0$\;
+$transform\_path \leftarrow []$\;
+$transform\_path[total\_step] \leftarrow source\_spec$\;
+\While{$min\_diff \neq 0$}{
+$min\_diff \leftarrow \infty$\;
+$valid\_transforms \leftarrow Transform(source\_spec)$\;
+\ForAll{$sharding\_spec \in valid\_transforms$}{
+$diff \leftarrow Heuristic(sharding\_spec, target\_spec)$\;
+\If{$diff < min\_diff$}{
+$source\_spec \leftarrow sharding\_spec$\;
+$transform\_path(total\_step) \leftarrow source\_spec$\;
+}
+}
+$total\_step \mathrel{+}= 1$\;
+$transform\_path(total\_step) \leftarrow source\_spec$\;
+}
+\Return $transform\_path$\;
+\end{algorithm}
+
+\noindent\textbf{单步变换。} 在我们的布局管理器中，会改变 sharding spec 的基础操作只有三种：all-gather、shard 和 all-to-all。对每个操作产生的单步合法转换都加入候选集合。例如，$S_0R$ 的单步转换集合可以是 [$RR$, $S_0S_1$, $S_{01}R$, $RS_0$]。如果某一转换要求张量维度大小不能整除对应 mesh 轴大小，则该转换无效。
+
+\noindent\textbf{启发式函数。} 我们按维度衡量两个 sharding spec 的差异，因此源 spec $s$ 与目标 spec $t$ 的差异可写为
+\begin{center}
+$\sum_{\substack{i \in (0, 1, \dotsc, dim(s)-1)}} dim\_diff(s[i], t[i])$。
+\end{center}
+
+\textit{Dim difference} 会累积每个维度所需转换操作的代价。这里的代价并不直接等于真实通信时间，而是用于描述两个 dim spec 之间的结构差异。由于 shard 是片上操作，而 all-gather 需要跨设备通信，我们给 all-gather 更高权重；若两个 dim spec 间需要多步转换，还会额外施加 step penalty。例如，$S_0 \rightarrow S_1$ 需要经过 $S_0 \rightarrow R \rightarrow S_1$，因此
+$dim\_diff(S_0, S_1) = cost(all\_gather) + cost(shard) + step\_penalty$。
+
+\noindent\textbf{对求解器的支持。} 布局管理器不仅给出转换路径，也会记录从源 spec 到目标 spec 的通信开销。该开销用 alpha-beta 代价模型估计，其中 alpha 和 beta 由集群探测器测得。为了避免运行时重复搜索，我们还把已经求解过的源目标 spec 对缓存下来，运行时直接复用。
+
+\section{两阶段求解器}
+
+系统通过两个层次搜索执行计划：算子内并行和激活检查点。这样的层次化设计有两个直接好处。第一，算子内并行搜索时间与图中节点数量正相关，而未插入激活重计算的图更小，因此能显著降低求解时间。第二，以往激活检查点工作通常不考虑分布式训练中的通信开销，导致在分布式模型上性能欠佳；我们把通信成本显式纳入激活检查点建模，从而得到更好的联合方案。
+
+\subsection{算子内并行求解器}
+
+我们的求解器改造自 Alpa 的 ILP 算子内并行求解器~\cite{zheng2022alpa}，并加入若干工程优化，以兼顾通用性和求解效率。
+
+由于 PyTorch FX 捕获的操作还不够底层，节点种类很多，若逐个节点为其匹配切分策略会导致复杂度很高。为此，我们增加了一层策略生成抽象：先使用 node dispatcher 根据操作类型把节点路由到对应的 strategy generator。例如，addbmm、bmm 和 matmul 可以共享同一个生成器，大多数一元逐元素操作也可以共享一类生成器。采用这一方式后，要支持 GPT2 模型仅需二十种以内的策略生成器。
+
+我们还进一步做了几项复杂度削减。首先，借助 AoT 符号分析和分层搜索，算子内并行阶段只考虑前向图，从而显著减少节点数。其次，对 getitem、简单 elementwise、slice 等计算代价很低的节点进行合并。最后，那些既不接收张量输入也不产生张量输出的节点，例如标量加法，会直接从图中移除。通过这些优化，求解器能够在可接受时间内完成搜索。
+
+\subsection{激活检查点求解器}
+
+激活检查点求解器接收已经分布式化的计算图，并搜索最优子图来应用 activation checkpoint。
+
+\subsubsection{建模}
+
+我们继承 Rotor~\cite{herrmann2019optimal} 的自动激活检查点算法。该算法把模型视为由 $L$ 个阶段构成的链，每个阶段既可以是一层，也可以是一组层。对任意阶段 $\ell$，其前向激活 $a^{\ell}$ 和反向激活 $\delta^{\ell-1} = \frac{\partial \mathcal{L}}{\partial a^{\ell}}$ 可以写成：
+
+\begin{equation}
+\begin{gathered}
+F^{\ell}: a^{\ell}=f_{\ell}\left(\theta^{\ell}, a^{\ell-1}\right) \\
+B^{\ell}: \delta^{\ell-1}=\bar{f}_{\ell}\left(\theta^{\ell}, \delta^{\ell}, \bar{a}^{\ell}, a^{\ell-1}\right) \\
+\frac{\partial \mathcal{L}}{\partial \theta^{\ell}}=\bar{g}_{\ell}\left(\delta^{\ell}, \bar{a}^{\ell}, a^{\ell-1}\right)
+\end{gathered}
+\end{equation}
+
+其中，$\theta^{\ell}$ 表示阶段 $\ell$ 前向计算涉及的参数集合，$\bar{a}^{\ell}$ 表示反向传播所需的中间激活集合。
+
+在此基础上，激活检查点调度涉及的主要操作列于表~\ref{tab:act_ops}。
+
+\begin{table}[H]
+    \resizebox{0.47\textwidth}{!}{
+    \centering
+        \begin{tabular}{|c|c|c|c|c|}
+            \hline
+            操作 & 输入 & 输出 & 时间 & 显存开销 \\
+            \hline
+            \multirow{2}{*}{$F_{all}^{\ell}$} & $\{a^{\ell - 1}\}$ & $\{a^{\ell - 1}, \bar{a}^{\ell}\}$  & \multirow{2}{*}{$u_f^{\ell}$} & \multirow{2}{*}{$o_f^{\ell}$} \\
+            & $\{\bar{a}^{\ell - 1}\}$ & $\{\bar{a}^{\ell - 1}, \bar{a}^{\ell}\}$ & & \\
+            \hline
+            \multirow{2}{*}{$F_{ck}^{\ell}$} & $\{a^{\ell - 1}\}$ & $\{a^{\ell - 1}, a^{\ell}\}$ & \multirow{2}{*}{$u_f^{\ell}$} & \multirow{2}{*}{$o_f^{\ell}$} \\
+            & $\{\bar{a}^{\ell - 1}\}$ & $\{\bar{a}^{\ell - 1}, a^{\ell}\}$ & & \\
+            \hline
+            $F_{\varnothing}^{\ell}$ & $\{a^{\ell - 1}\}$ & $\{a^{\ell}\}$ & $u_f^{\ell}$ & $o_f^{\ell}$ \\
+            \hline
+            \multirow{2}{*}{$B^{\ell}$} & $\{\delta^{\ell}, \bar{a}^\ell, a^{\ell - 1}\}$ & $\{\delta^{\ell - 1}\}$ & \multirow{2}{*}{$u_b^{\ell}$} & \multirow{2}{*}{$o_b^{\ell}$} \\
+            & $\{\delta^{\ell}, \bar{a}^\ell, \bar{a}^{\ell - 1}\}$ & $\{\delta^{\ell - 1}, \bar{a}^{\ell - 1}\}$ & & \\
+            \hline
+        \end{tabular}
+    }
+    \caption{激活检查点相关操作}
+    \label{tab:act_ops}
+\end{table}
+
+为了与算子内并行求解器衔接，我们进一步把每个阶段上的通信时间和通信显存开销也纳入建模，记号如表~\ref{tab:comm_ops}。
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|c|c|c|}
+        \hline
+        阶段 & 时间 & 显存开销 \\
+        \hline
+        前向通信 & $u_{fcomm}^{\ell}$ & $o_{fcomm}^{\ell}$ \\
+        \hline
+        反向通信 & $u_{bcomm}^{\ell}$ & $o_{bcomm}^{\ell}$ \\
+        \hline
+    \end{tabular}
+    \caption{通信开销}
+    \label{tab:comm_ops}
+\end{table}
+
+据此，我们把 Rotor 中的主定理扩展为考虑通信成本的版本：
+
+\begin{theorem}
+    $C_{BP} (s, t, m)$ 表示在可用显存为 $m$ 时，从阶段 $s$ 到阶段 $t$（$t \geq s$）执行任意合法 persistent sequence 的最优时间，则有
+    \begin{equation}
+        \begin{aligned}
+            C_{BP}(s, s, m) & = \begin{cases}u_f^s + u_{fcomm}^s + u_b^s + u_{bcomm}^s & m \geq m_{\text {all }}^{s, s} \\
+            \infty & m<m_{a l l}^{s, s}\end{cases} \\
+            C_{BP}(s, t, m) & =\min \left(C_1(s, t, m), \quad C_2(s, t, m)\right)
+        \end{aligned}
+    \end{equation}
+    
+    其中
+    \begin{equation}
+        \begin{aligned}
+            C_1(s, t, m) & = \begin{cases}\min _{s^{\prime}=s+1 \ldots t} C_{ck}\left(s, s^{\prime}, t, m\right) & m \geq m_{\varnothing}^{s, t} \\
+            \infty & m<m_{\varnothing}^{s, t}\end{cases} \\
+            C_2(s, t, m) & =\begin{cases}
+            C_{all}(s, t, m) & m \geq m_{all}^{s, t} \\
+            \infty & m<m_{all}^{s, t}
+            \end{cases}
+        \end{aligned}
+    \end{equation}
+
+    且
+    \begin{equation}
+        \begin{aligned}
+            C_{ck}\left(s, s^{\prime}, t, m\right) & =\sum_{k=s}^{s^{\prime}-1} u_f^k+C_{B P}\left(s^{\prime}, t, m-\omega_a^{s^{\prime}-1}\right) \\
+            & + C_{B P}\left(s, s^{\prime}-1, m\right) \\
+            C_{all}(s, t, m) & =u_f^s + u_{fcomm}^s + C_{B P}\left(s+1, t, m-\omega_{\bar{a}}^s\right) \\
+            & + u_b^s + u_{bcomm}^s
+        \end{aligned}
+    \end{equation}
+
+    并且
+    \begin{equation}
+        \begin{aligned}
+            & m_{\varnothing}^{s, t}=\max \begin{cases}
+            \omega_\delta^t+\omega_a^s+o_f^s + o_{fcomm}^s \\
+            \omega_\delta^t+\max _{s+1 \leq j<t}\left\{\omega_a^{j-1}+\omega_a^j+o_f^j + o_{fcommm}^j\right\}\end{cases}\\
+            & m_{a l l}^{s, t}=\max\begin{cases}
+            \omega_\delta^t+\omega_{\bar{a}}^s+o_f^s + o_{fcomm}^s\\
+            \omega_\delta^s+\omega_{\bar{a}}^s+o_b^s + o_{bcomm}^s
+        \end{cases}
+        \end{aligned}
+    \end{equation}
+    \label{thm:act_main_thm}
+\end{theorem}
+
+沿用 Rotor 的动态规划过程，只需把原公式替换为上述扩展版本，就可以在激活检查点搜索时自然纳入算子内并行引入的通信成本。
+
+\subsubsection{线性化}
+
+先前工作~\cite{herrmann2019optimal, beaumont2021efficient} 通常要求网络满足线性化假设，也就是模型应近似为串行结构：一层的输出只传给下一层，而不额外分支到其他层，如图~\ref{fig: arch} 所示。
+
+\begin{figure}[h!]
+  \includegraphics[width=0.45\textwidth]{img/linearize_graph.pdf}
+  \caption{线性化计算图}
+  \label{fig: arch}
+\end{figure}
+
+但现代模型通常并不满足这一假设，ResNet~\cite{he2016deep} 和 Transformer~\cite{transformer} 中都存在大量残差连接。过去的做法往往需要人工把模型重写为 \texttt{torch.nn.Sequential}，这对研究者和工程师都不够友好。借助 \texttt{torch.fx}，我们可以直接访问前向计算图及节点的父子关系，于是可以在图上做依赖分析，自动寻找合适的分段位置，使求解器可以在 node group 粒度上满足线性化要求。
+
+\begin{definition}
+我们在网络线性化中使用如下概念：
+\begin{itemize}
+    \item \textbf{Node}：计算图中的节点，对应一个操作。
+    \item \textbf{Graph}：神经网络的计算图，默认视为有向无环图（DAG）。
+    \item \textbf{Node group}：求解器真正处理的 ``节点''；线性化后网络由一系列 node group 构成。
+    \item \textbf{End of a node group}：按拓扑序遍历图时，把节点持续追加到当前 group 中；若某节点被判定为当前 group 的结束点，则之后开始构造下一个 group。
+    \item \textbf{Existing dependencies}：动态维护的依赖池。处理某节点时，先移除其父节点对依赖池的贡献，再把它对子节点引入的新依赖加入池中。
+\end{itemize}
+\end{definition}
+
+依据上述定义，我们的基本规则是：若某节点在移除其父节点依赖后，依赖池中的现存依赖全部清零，则把该节点视为一个 node group 的结束点。这样就可以自动线性化诸如 ResNet-152~\cite{he2016deep} 这类经典残差网络。
+
+\subsubsection{Common Node}
+
+尽管上述规则已能在线性化许多网络，但 Transformer 类模型仍带来额外挑战。这类模型经常在训练过程中使用 attention mask 等常量，而这些常量节点会被大量算子共享。如果不特殊处理，依赖关系会把整张图粘连成一个超大 group，无法有效线性化。
+
+\cite{lai2022merak} 引入了 common node 机制来消除此类依赖，但其识别方式主要依赖 ``子节点数量超过阈值'' 的经验规则。我们给出一个更明确的定义：
+
+\begin{definition}
+若某节点是不可微的，则将其标记为 common node。例如 PyTorch 中的 attention mask 常为 \texttt{bool} 类型，不会在训练中创建梯度；类似 \texttt{getattr}、\texttt{getitem} 这类 Python 操作同样不可微。
+\label{def: common-node}
+\end{definition}
+
+进一步地，common node 的属性可以在图中传播：
+
+\begin{lemma}
+若满足以下任一条件，则某节点也会被标记为 common node：
+\begin{itemize}
+    \item 该节点的所有父节点都已被标记为 common node；
+    \item 该节点对应的操作本身不可微，例如 \texttt{getattr}、\texttt{getitem} 等。
+\end{itemize}
+\label{lem:cnodeprop}
+\end{lemma}
+
+实际操作时，只需把网络输入中的原始 common node（例如 Transformer 的 attention mask）先标记出来，再按上述规则传播，就能扩展 common node 集合，并在网络线性化时忽略这些节点的依赖影响。
+
+\subsubsection{完整线性化规则}
+
+在上述机制之外，还有两点需要在线性化中同时考虑。第一，算子内并行会引入通信节点，但在激活检查点建模时无需把它们显式拆成额外阶段，只需把通信节点与其父节点放在同一个 group 中。第二，现代 DNN 中广泛存在 in-place 操作，例如 ResNet 里 BatchNorm 后的原地 ReLU。把这类操作及其父节点一并归组，有助于更准确地估计显存占用。
+
+综合考虑后，我们得到最终的网络线性化算法，如算法~\ref{alg: network linearization} 所示。
+
+\begin{algorithm}
+\caption{网络线性化算法}
+\label{alg: network linearization}
+\KwData{计算图 $\mathcal{G}$，common node 集合 $\mathcal{C}$}
+\KwResult{线性化后的图 $\bar{\mathcal{G}}$}
+\SetKwFunction{sink}{is\_sink}
+\SetKwProg{Fn}{Function}{:}{}
+\Fn{\sink{$deps\_pool, Node$}}{
+\eIf{$deps\_pool$ 为空，且 $Node.children$ 中不存在 in-place 或通信操作}{
+\Return True\;
+}{\Return False\;
+}
+}
+$\bar{\mathcal{G}} \gets []$\;
+$Current\_Node \gets []$\;
+$deps\_pool \gets \{\}$\;
+\For{$Node$ in $\mathcal{G}$}{
+\If{$Node$ 不是 placeholder}{
+        \For{$Parent$ in $Node.parents$}{
+            \If{$Parent$ 不是 placeholder 且属于 common node}{
+                $deps\_pool[Parent] -= 1$\;
+            }
+        }
+        append $Node$ to $Current\_Node$\;
+        \If{\sink{$deps\_pool, Node$}}{
+            append $Current\_Node$ to $\bar{\mathcal{G}}$\;
+            $Current\_Node \gets []$\;
+        }
+        \If{$Node$ 满足引理~\ref{lem:cnodeprop}}{
+            append $Node$ to $\mathcal{C}$\;
+        }{
+            $deps\_pool[Node] \gets len(Node.children)$\;
+        }
+    }
+}
+\Return $\bar{\mathcal{G}}$\;
+\end{algorithm}
+
+\subsection{联合两个求解器}
+
+两个求解器虽然都以 ``在显存预算下最小化执行时间'' 为目标，但它们对显存预算的使用方式不同。如果二者共享同一个固定预算，算子内并行求解器通常已经会把显存压到预算边界，从而让激活检查点阶段失去作用；如果把两类决策完全联合建模，又会导致求解复杂度过高，难以在可接受时间内完成。
+
+为此，我们让算子内并行求解器在一组离散预算 $[(1+\alpha)^n]$ 上分别求解，其中 $n \in [0, 9]$、$\alpha$ 为扩展系数。对于每个预算点，都得到一个对应的最优算子内并行方案，再将其输入激活检查点求解器。最终从所有预算点产生的候选计划中，选出总执行时间最短的那个作为最终执行计划。
+
+\section{生成器}
+
+生成器负责把原始的非分布式计算图转换为应用最优执行计划后的图，并将其重新编译成 PyTorch 代码。为实现这一点，我们设计了一组图编译 pass，以及面向优化后 Graph IR 的代码生成逻辑。
+
+\subsection{编译 pass}
+
+首先，我们设计了与通信相关的 pass，根据执行计划插入所需通信节点。这里主要有两类通信：一类是保证数值正确性的通信，例如局部求和后插入 all-reduce；另一类是为了把张量转换成下游节点要求的布局而执行的 redistribution。
+
+其次，我们实现了参数切分 pass，用于对模块参数进行分片，并额外添加 hook 来处理梯度通信。为了提高训练效率，我们使用额外的 CUDA stream，让异步梯度通信尽可能与反向计算重叠。
+
+最后，我们加入 reshape conversion pass，用来调整 transpose、reshape 等节点的参数，使其适配搜索得到的执行计划。这样做的原因是，某些 reshape 类操作的参数可能仍基于原始输入张量的形状，而不是切分后张量的形状。
+
+\subsection{代码生成}
+
+PyTorch FX~\cite{torch-fx} 原生支持从给定 Graph 生成语义等价的 Python 代码。为了支持自动激活检查点，我们对其代码生成流程做了扩展。
+
+在激活检查点搜索结束后，我们会为每个节点打上所属 checkpoint block 的索引。所有索引相同的节点会被打包成一个 activation checkpoint block。代码生成器首先为每个 block 生成一个封装函数，然后再用 PyTorch 内置的 checkpoint 机制包裹这些函数，从而在反向阶段自动保留必要输入并触发重计算。最后，原始计算图中属于该 block 的节点会被替换为相应的 checkpoint 包装调用。
+
+\section{评估}
+
+实验在 8 张 Nvidia A100（80GB）GPU 上进行。需要注意的是，其中只有 4 对相邻 GPU 之间通过 NVLink 互连，其余链路通过 PCI-e 连接。
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{|c|c|c|c|}
+        \hline
+        实验 ID & GPU 数量 & Hidden size & 参数量（十亿）\\
+        \hline
+        $\alpha$ & 1 & 2048 & 0.409\\
+        \hline
+        $\beta$ & 2 & 4096 & 1.221\\
+        \hline
+        $\gamma$ & 4 & 8192 & 4.053\\
+        \hline
+        $\delta$ & 8 & 16384 & 14.550\\
+        \hline
+    \end{tabular}
+    \caption{\textbf{实验中 GPT2 的模型配置。层数固定为 4，序列长度固定为 1024。之所以选择相对较少的层数，是因为流水并行通常会把模型切成若干分区，而每个分区中的 Transformer block 数量往往与这里的设置处于同一量级。}}
+    \label{tab:experiment setting}
+    \vspace{-1.9em}
+\end{table}
+
+在 weak scaling 设置下，问题规模会随设备数量同步扩大。我们将本方案与 Megatron-LM~\cite{shoeybi2019megatron}（1D tensor parallelism）、Optimus~\cite{https://doi.org/10.48550/arxiv.2104.05343}（2D tensor parallelism）以及 3D tensor parallelism~\cite{https://doi.org/10.48550/arxiv.2105.14450} 进行比较。具体配置见表~\ref{tab:experiment setting}，性能结果见表~\ref{tab: experiment performance}。随着问题规模增大，DDP 会出现 OOM，因此未纳入比较。
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{|c|c|c|c|c|}
+        \hline
+        实验 ID & Megatron & Optimus & 3D TP & 本文方法\\
+        \hline
+        $\alpha$ & 0.161 & 0.161 & 0.161 & 0.161\\
+        \hline
+        $\beta$ & 0.324 & - & - & 0.332\\
+        \hline
+        $\gamma$ & 0.528 & 0.368 & - & 0.604\\
+        \hline
+        $\delta$ & 0.728 & - & 0.715 & 0.824\\
+        \hline
+    \end{tabular}
+    \caption{\textbf{Weak scaling 性能。模型设置见表~\ref{tab:experiment setting}。这里用训练过程总 PFLOPS 衡量性能。}}
+    \label{tab: experiment performance}
+    \vspace{-2em}
+\end{table}
+
+结果表明，本文系统在所有设置下都取得了最佳性能。原因在于我们的求解器显式利用了集群拓扑信息，使执行计划能够自适应硬件结构。例如，在该实验环境中，系统会在跨 NUMA 节点的设备之间更倾向于采用类似数据并行的策略，而在同一 NUMA 节点内的 4 张 GPU 之间采用类似张量并行的策略。这样既避免了跨 NUMA PCI-e 链路上的高成本张量并行通信，又能把低带宽链路上的通信与反向计算重叠起来。
+
+\section{未来工作}
+
+\subsection{为更多算子构建策略生成器}
+
+在算子内并行阶段，我们需要为每个算子生成全部合法并行策略。尽管当前只需不到二十类 strategy generator 就能支持 GPT2，但要覆盖 PyTorch 中约 2000 个算子仍然是一项繁重工作。随着 PyTorch 2.0 的 PrimTorch 把约 2000 个算子规范化到约 250 个原语算子上，这一问题会明显缓解，也更有可能真正枚举完整策略集合。
+
+\subsection{两阶段求解器的系统性评估}
+
+本文已经在 ResNet50~\cite{he2016deep} 上应用了两阶段求解器，但针对基础模型~\cite{bommasani2021opportunities} 的更完整评估仍需后续补充。一些实验仍涉及工程性 patch，未来会进一步完善。
+
+\subsection{支持算子间并行}
+
+当前系统只联合搜索算子内并行和激活检查点。后续我们将把算子间并行也纳入统一执行计划，并沿用本文的自动化方法进行搜索。
+
+\section{结论}
+
+本文提出 Colossal-Auto，用于联合搜索算子内并行与激活检查点，从而为大规模模型生成近似最优的分布式训练方案。系统通过分析器收集硬件性能与计算图代价信息，利用两阶段求解器搜索高质量执行计划，并最终把普通 PyTorch 模型重新编译为分布式模型。高效的分布式训练策略设计一直高度依赖专家经验；我们希望该系统能够显著降低大模型训练的使用门槛，并在后续工作中继续提升其鲁棒性和通用性。
+
+\newpage
+\input{main.bbl}
+
+\end{document}

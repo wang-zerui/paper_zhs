@@ -1,0 +1,239 @@
+\section{Pseudo Code for ACTs Approximation}
+\label{app:pc_approx}
+The pseudo code for ACTs approximation is shown as Algorithm~\ref{alg:approx}.
+
+\begin{algorithm}[h!]
+\caption{ACTs Approximation.}
+\label{alg:approx}
+    \begin{footnotesize}
+    \begin{algorithmic}[1]
+    \Require The waiting queue of actions $W$, the executing queue $E$, the $depth$ of performing approximation of objective
+        \Function{getApproximatedObjective}{$C_j, R_j$}
+            \State $AC_j \gets W.\text{split}(R_j) - C_j$ \algcomment{Actions to be scheduled the next step}
+            \State $exactObj,~newHeap \gets \text{DPArrange}(R_j, C_j)$
+            \State $approxObj \gets newHeap.\text{estimate}(AC_j)$
+            \State \Return $exactObj + approxObj$
+        \EndFunction
+
+        \Statex
+        
+        \Function{estimate}{$heap, C$}
+        \State $obj \gets \inf, ~heap \gets \text{copy}(heap)$
+        \For{$d=1 \rightarrow depth$}
+        \State $T_0 \gets C[0].\text{getDur}(d),~ts \gets heap.\text{pop}()$
+        \State $tmpObj \gets 0,~tmpHeap \gets \text{copy}(heap)$
+        \State $tmpObj+=ts+T_0,~tmpHeap.\text{push}(ts+T_0)$
+        \For{$i=1 \rightarrow |C|$}
+        \State $T_i \gets C[i].\text{getDur}(),~ts \gets heap.\text{pop}()$
+        \State $tmpObj+=ts+T_i,~tmpHeap.\text{push}(ts+T_i)$
+        \EndFor
+        \If{$tmpObj < obj$}~$obj \gets tmpObj$
+        \EndIf
+        \EndFor
+        \State \Return $obj$
+        \EndFunction
+    \end{algorithmic}
+    \end{footnotesize}
+
+\end{algorithm}
+
+
+
+
+
+
+\section{Unified DPArrange Algorithm}
+\label{app:udp}
+
+Actually, solving the optimal discrete allocation among several scalable candidates and available units is a classical variant of Multi-dimensional Bin Packing problem.
+However, due to the heterogeneous topologies of different resource types, the function \texttt{DPArrange} mentioned in \S\ref{sec:design_scheduling} cannot be fully covered by the classical algorithm to solve Multi-dimensional Bin Packing problem. Therefore, we propose a unified DP algorithm that is topology-agnostic, as shown in Algorithm~\ref{alg:unified_dp}, and coordinates with the design of \texttt{DP Operator} of heterogeneous resource managers.
+
+With the topology-agnostic DPArrange algorithm, we are only required to implement several primitives defined in \texttt{Basic DP Operator} for each specialized topology. \texttt{Basic DP Operator} is applicable to the topology of CPU Manager, while we devise a chunk-wise \texttt{Basic DP Operator} for GPU Manager, as shown in Algorithm~\ref{alg:gpu_dp}.
+
+We define a topology-aware DP operator over GPU chunks of sizes \{1,2,4,8\}.
+Each DP state is represented by a tuple $(a, b,c,d)$, indicating the number of available chunks of each size, and is linearized into a unique scalar index via a mixed-radix encoding, ensuring a collision-free and finite DP state space.
+The start state corresponds to the minimal supported chunk configuration determined by the cluster scale.
+Given a task requiring $k$ GPUs, the predecessor operator greedily decomposes $k$ using available chunks from larger to smaller sizes, allowing chunk splitting while preserving power-of-two constraints.
+If the decomposition is feasible, the operator transitions to the encoded residual chunk state; otherwise, the transition is invalid.
+This operator enables dynamic programming to reason explicitly about GPU topology while remaining compatible with standard one-dimensional DP formulations.
+
+
+\begin{algorithm}[t!]
+
+\caption{Topology-Agnostic DPArrange}
+\label{alg:unified_dp}
+\begin{footnotesize}
+\begin{algorithmic}[1]
+\Require 
+    A set of scalable tasks $C = \{c_1, \dots, c_m\}$,
+    available resource units $U$,
+    supported unit sets $\mathcal{S} = \{S_1, \dots, S_m\}$,
+    resource manager $\mathcal{M}$, and its DP operator $\mathcal{O}$
+\Ensure
+    Optimal execution time $T^\star$,
+    allocation $\{k_1, \dots, k_m\}$
+
+\State $n \gets \min\{\textsc{End}(U),~\textsc{End}(\mathcal{S})\}$
+\If{$n < m$}
+    \State \Return \textbf{error} \algcomment{Each task requires at least one unit}
+\EndIf
+
+\State Initialize DP table $dp[i][j] \gets \infty$ for $0 \le i \le m,~0 \le j \le n$
+\State Initialize choice table $choice[i][j] \gets 0$
+\State $dp[0][0] \gets 0$
+
+\State $start_{prev} \gets 0$
+\State $start_{cur} \gets \mathcal{O}.\textsc{Start}(S_1)$
+
+\For{$i = 1 \rightarrow m$}
+    \For{$j = start_{cur} \rightarrow n$}
+        \ForAll{$k \in S_i$} \algcomment{Units assigned to task $c_i$}
+            \State $j' \gets mathcal{O}.\textsc{Prev}(j, k)$
+            \If{$j' < start_{prev}$ \textbf{or} $\neg \mathcal{O}.\textsc{IsValid}(j', S_{1:i-1})$}
+                \State \textbf{continue}
+            \EndIf
+            \State $T_i(k) \gets \mathcal{O}.\textsc{GetDuration}(c_i, k)$
+            \If{$dp[i-1][j'] + T_i(k) < dp[i][j]$}
+                \State $dp[i][j] \gets dp[i-1][j'] + T_i(k)$
+                \State $choice[i][j] \gets k$
+            \EndIf
+        \EndFor
+    \EndFor
+    \State $start_{prev} \gets start_{cur}$
+    \State $start_{cur} \gets mathcal{O}.\textsc{Start}(S_{1:i+1})$
+\EndFor
+
+\State $j \gets n$
+\For{$i = m \rightarrow 1$}
+    \State $k_i \gets choice[i][j]$
+    \State $j \gets mathcal{O}.\textsc{Prev}(j, k_i)$
+\EndFor
+
+\State \Return $dp[m][n],~\{k_1, \dots, k_m\}$
+
+\Statex
+\Statex \textbf{Basic DP Operator}
+
+\Function{Start}{$\mathcal{S}$}
+    \State \Return $\sum_i \min(S_i)$
+\EndFunction
+
+\Function{End}{$X$}
+    \If{$X$ is a unit list}
+        \State \Return $|X|$
+    \Else
+        \State \Return $\sum_i \max(S_i)$
+    \EndIf
+\EndFunction
+
+\Function{Prev}{$j, k$}
+    \State \Return $j - k$
+\EndFunction
+
+\Function{IsValid}{$r, X$}
+    \If{$r < 0$}
+        \State \Return \textbf{false}
+    \EndIf
+    \If{$X = \emptyset$}
+        \State \Return $(r = 0)$
+    \EndIf
+    \ForAll{$u \in X_1$}
+        \If{$u \le r$ \textbf{and} $\textsc{IsValid}(r - u, X_{2:})$}
+            \State \Return \textbf{true}
+        \EndIf
+    \EndFor
+    \State \Return \textbf{false}
+\EndFunction
+
+\end{algorithmic}
+\end{footnotesize}
+\end{algorithm}
+
+
+\begin{algorithm}[t!]
+\caption{GPU-Topology-Aware DP Operator}
+
+\label{alg:gpu_dp}
+\label{alg:gpu_dp_operator}
+\begin{footnotesize}
+\begin{algorithmic}[1]
+
+\Require
+Maximum available chunk counts $(N_1, N_2, N_4, N_8)$ for chunk sizes $\{1,2,4,8\}$
+
+\vspace{0.3em}
+\Statex \textbf{State Representation:}
+\Statex A state is $(a,b,c,d)$ where
+\Statex $a \in [0,N_1],~b \in [0,N_2],~c \in [0,N_4],~d \in [0,N_8]$
+
+\vspace{0.5em}
+\Function{Encode}{$a,b,c,d$}
+    \State \Return $a
+    + (N_1+1)\cdot b
+    + (N_1+1)(N_2+1)\cdot c
+    + (N_1+1)(N_2+1)(N_4+1)\cdot d$
+\EndFunction
+
+\vspace{0.3em}
+\Function{Decode}{$j$}
+    \State $a \gets j \bmod (N_1+1)$
+    \State $j \gets \lfloor j / (N_1+1) \rfloor$
+    \State $b \gets j \bmod (N_2+1)$
+    \State $j \gets \lfloor j / (N_2+1) \rfloor$
+    \State $c \gets j \bmod (N_4+1)$
+    \State $j \gets \lfloor j / (N_4+1) \rfloor$
+    \State $d \gets j$
+    \State \Return $(a,b,c,d)$
+\EndFunction
+
+\vspace{0.5em}
+\Function{Start}{$\mathcal{S}$}
+    \Statex $\mathcal{S}$: supported unit sets of all tasks
+    \State $(a_{\min},b_{\min},c_{\min},d_{\min}) \gets$ minimal required chunks inferred from $\mathcal{S}$
+    \State \Return \textsc{Encode}$(a_{\min},b_{\min},c_{\min},d_{\min})$
+\EndFunction
+
+\vspace{0.5em}
+\Function{IsValid}{$j$}
+    \State $(a,b,c,d) \gets \textsc{Decode}(j)$
+    \If{$a<0$ \textbf{or} $b<0$ \textbf{or} $c<0$ \textbf{or} $d<0$}
+        \State \Return \textbf{false}
+    \EndIf
+    \If{$a>N_1$ \textbf{or} $b>N_2$ \textbf{or} $c>N_4$ \textbf{or} $d>N_8$}
+        \State \Return \textbf{false}
+    \EndIf
+    \State \Return \textbf{true}
+\EndFunction
+
+\vspace{0.5em}
+\Function{Prev}{$j, k$}
+    \State $(a,b,c,d) \gets \textsc{Decode}(j)$
+    \State $need \gets k$
+
+    \State $use_d \gets \min\bigl(d, \lfloor need/8 \rfloor\bigr)$
+    \State $need \gets need - 8 \cdot use_d$
+
+    \State $use_c \gets \min\bigl(c, \lfloor need/4 \rfloor\bigr)$
+    \State $need \gets need - 4 \cdot use_c$
+
+    \State $use_b \gets \min\bigl(b, \lfloor need/2 \rfloor\bigr)$
+    \State $need \gets need - 2 \cdot use_b$
+
+    \State $use_a \gets \min(a, need)$
+    \State $need \gets need - use_a$
+
+    \If{$need > 0$}
+        \State \Return $\bot$ \algcomment{Not enough chunks to satisfy $k$}
+    \EndIf
+
+    \State $a' \gets a - use_a$
+    \State $b' \gets b - use_b$
+    \State $c' \gets c - use_c$
+    \State $d' \gets d - use_d$
+
+    \State \Return \textsc{Encode}$(a',b',c',d')$
+\EndFunction
+
+\end{algorithmic}
+\end{footnotesize}
+\end{algorithm}

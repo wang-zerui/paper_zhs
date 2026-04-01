@@ -1,0 +1,52 @@
+\section{Preliminaries and Motivating Observations}
+\label{sec:prelim}
+
+\paragraph{Turn-level agentic training.}
+Let $\tau$ be an interaction trajectory collected in agentic tasks. Decomposing $\tau$ at assistant decision boundaries gives $\tau=(s_{0},a_{0}^*,\ldots,s_{T},a_{T}^*)$, where $s_{t}$ is the full interaction history from the beginning of trajectory $\tau_i$ up to, but not including, the $t$-th assistant action, and $a_{t}^*$ is the demonstrated assistant completion at that state.
+In turn-level agentic training, an \emph{action} is the full assistant completion at a model-call boundary, instead of an individual token. The standard negative log-likelihood loss for SFT is given by
+\begin{align*}
+    \mathcal{L}_{\mathrm{sft}}(\theta) = -\mathbb{E}_{\tau \sim \mathcal{D}_{\mathrm{sft}}, (s_t,a_t^*) \sim \tau} [\log \pi_\theta(a^*_t \mid s_t)].
+\end{align*}
+Let $\pi_0$ denote the reference policy, E2E RL samples rollouts from $\pi_{\old}$ and optimizes the GRPO~\citep{shao2024deepseekmath} objective given by:
+\begin{align*}
+    \mathcal{J}_{\mathrm{GRPO}}(\theta) = \mathbb{E}_{\substack{s \sim \mathcal{D}_{\pi_{\old}} \\ a_i \sim \pi_{\old}(\cdot \mid s)}} \left[ \frac{1}{G} \sum_{i=1}^G \min \left( w_i(\theta) \hat{A}_i, \operatorname{clip}(w_i(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_i \right) - \beta \KL(\pi_\theta(\cdot \mid s) \parallel \pi_0(\cdot \mid s)) \right]
+\end{align*}
+where $w_i(\theta) = \frac{\pi_\theta(a_i \mid s)}{\pi_{\old}(a_i \mid s)}$ is the importance sampling weight, $\mathcal{D}_{\pi_{\old}}$ denotes the distribution of states $s_t$ from the on-policy rollout trajectories, and 
+\begin{equation}
+\hat{A}_i
+=
+\frac{
+r_i-\frac{1}{G}\sum_{j=1}^G r_j
+}{
+\mathrm{std}(\{r_j\}_{j=1}^G) + \epsilon_{\mathrm{std}}
+}.
+\label{eq:group_adv}
+\end{equation}
+represents the advantage normalized across the group of $G$ sampled end-to-end rollouts.
+
+\paragraph{Local RL from expert trajectories.}
+To circumvent the computational overhead associated with full end-to-end trajectory generation, we consider a local RL paradigm. In this setting, instead of unrolling full interactions from the initial environment state until termination, we condition the policy on intermediate expert states $s_t$ derived directly from the SFT dataset and then conduct targeted, turn-level rollouts from these states. Given expert trajectory dataset $\mathcal{D}_{\mathrm{sft}}=\{\tau_i\}_{i=1}^N$, the simplest attempt to adapt it for local RL goes as follows: first sample a state $s_t$, then sample actions from $\pi_{\theta}(\cdot \mid s_t)$ and reward the action only when it exactly matches the demonstrated continuation:
+\begin{equation}
+r_{\mathrm{strict}}(s,a)=\mathbf{1}[a=a^*(s)].
+\label{eq:strict_reward}
+\end{equation}
+This formulation represents the most direct translation of SFT demonstrations into a local RL framework: the interaction history is rigidly anchored to the expert trace, the subsequent action is sampled on-policy, and credit is sparsely assigned only for perfect replication of the demonstrated completion. However, empirical evaluations in $\tau^2$-Bench reveal that this naive local RL strategy yields merely marginal gains over standard behavior cloning on identical data, achieving an accuracy of $57.34$ compared to $58.44$ for same-data SFT. Consequently, this simplistic conversion of expert demonstrations into local RL episodes via exact-match reward functions proves inadequate for driving meaningful performance improvements.
+
+
+\paragraph{Motivating observations.}
+Through our preliminary experiments, we identify two bottlenecks in allocating rollout budgets and assigning local credit. \emph{First, turns with uniformly successful or failed actions are uninformative under group-normalized RL.} Indeed, if a batch of rewards $\{r_i\}_{i=1}^G$ consists entirely of zeros or ones, then the normalized advantage in Eq.~\eqref{eq:group_adv} evaluates to zero. Empirically on $\tau^2$-bench and SWE-Bench, $71\%$ of randomly sampled turns yield a $0$ learning signal, meaning they are uniformly solved or uniformly failed and contribute nothing to the gradient. \emph{Second, exact-match local credit is too strict.} In generative action spaces, many tool calls, shell commands, or search steps are locally acceptable without matching the single demonstrated string exactly. Comparing exact matching to a more permissive verifier-based reward $r_{\mathrm{func}}$ (introduced in Section~\ref{sec:pivotrl_method}), we define the miss rate as $\Pr\!\left[
+r_{\mathrm{strict}}(s,a)=0
+\;\middle|\;
+r_{\mathrm{func}}(s,a)=1
+\right].$
+% \begin{equation}
+% \mathrm{MissRate}
+% =
+% \Pr\!\left[
+% r_{\mathrm{strict}}(s,a)=0
+% \;\middle|\;
+% r_{\mathrm{func}}(s,a)=1
+% \right].
+% \label{eq:miss_rate}
+% \end{equation}
+A high miss rate means that exact matching erroneously discards rollouts that are functionally correct at the local decision point. These two bottlenecks map directly to the two ingredients of PivotRL: we first filter for \emph{pivots} (informative turns that continue to produce mixed outcomes), and then replace exact-match local credit with a verifier that rewards locally acceptable actions.

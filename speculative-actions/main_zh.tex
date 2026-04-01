@@ -1,0 +1,222 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference}
+\usepackage[UTF8,scheme=plain,fontset=fandol]{ctex}
+\defaultfontfeatures{Ligatures=TeX}
+\setmainfont{Times New Roman}
+\setsansfont{Arial}
+\setmonofont{Menlo}
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip = 0pt plus 1pt
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xspace}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{wrapfig}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage[most]{tcolorbox}
+\usepackage{makecell}
+\usepackage[capitalise]{cleveref}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{eso-pic}
+
+\renewcommand{\abstractname}{摘要}
+\renewcommand{\figurename}{图}
+\renewcommand{\tablename}{表}
+\renewcommand{\refname}{参考文献}
+\renewcommand{\proofname}{证明}
+\floatname{algorithm}{算法}
+\renewenvironment{abstract}{\vskip.075in\centerline{\large\textbf{摘要}}\vspace{0.5ex}\begin{quote}}{\par\end{quote}\vskip 1ex}
+
+\crefname{figure}{图}{图}
+\Crefname{figure}{图}{图}
+\crefname{table}{表}{表}
+\Crefname{table}{表}{表}
+\crefname{section}{节}{节}
+\Crefname{section}{节}{节}
+\crefname{subsection}{小节}{小节}
+\Crefname{subsection}{小节}{小节}
+\crefname{algorithm}{算法}{算法}
+\Crefname{algorithm}{算法}{算法}
+\crefname{proposition}{命题}{命题}
+\Crefname{proposition}{命题}{命题}
+\crefname{assumption}{假设}{假设}
+\Crefname{assumption}{假设}{假设}
+\crefname{theorem}{定理}{定理}
+\Crefname{theorem}{定理}{定理}
+
+\algrenewcommand\algorithmicrequire{\textbf{输入：}}
+\providecommand{\leftsquigarrow}{\mathrel{\leadsto}}
+
+% Theorem styles
+\theoremstyle{plain}
+\newtheorem{theorem}{定理}
+\newtheorem{lemma}[theorem]{引理}
+\newtheorem{proposition}{命题}
+\newtheorem{corollary}[theorem]{推论}
+\newtheorem{assumption}[theorem]{假设}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{定义}
+\newtheorem{example}[theorem]{例}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{注}
+
+\newcommand{\addwarningwatermark}{%
+    \AddToShipoutPictureBG*{%
+        \AtPageCenter{%
+            \makebox(0,0){%
+                \rotatebox{45}{\textcolor[gray]{0.90}{\fontsize{4.0cm}{4.0cm}\selectfont WARNING}}%
+            }%
+        }%
+    }%
+}
+
+\title{Speculative Actions：用于更快智能体系统的无损框架\\
+\large 非官方中文翻译（仅供个人学习）}
+
+\author{Naimeng\,Ye\thanks{共同一作},\, Arnav\,Ahuja\footnotemark[1],\, Georgios\,Liargkovas\footnotemark[1],\, Yunan\,Lu\footnotemark[1],\, Kostis\,Kaffes, Tianyi\,Peng \\
+哥伦比亚大学\\
+美国纽约州纽约市 \\
+\texttt{\{ny2336, aa5790, gl2902, yl4021, kk3664, tp2845\}@columbia.edu}
+}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\iclrfinalcopy
+\begin{document}
+
+\addwarningwatermark
+\maketitle
+
+\begin{center}
+\small\textbf{WARNING：}本文档为 arXiv:2510.04371《Speculative Actions: A Lossless Framework for Faster Agentic Systems》的非官方中文翻译版，仅供个人学习使用；原文版权归原作者所有，请勿传播或用于商业用途。
+\end{center}
+
+\begin{abstract}
+尽管工业界和学术界对 AI 智能体的兴趣持续升温，但它们在环境中的执行通常依然很慢，从而制约了训练、评估与部署。例如，两个最先进智能体之间下一盘国际象棋，可能就需要数小时。一个关键瓶颈在于，智能体行为是按顺序展开的：每一步动作都需要一次 API 调用，而这些调用往往耗时不短。受微处理器中的推测执行以及大语言模型推理中的推测解码启发，我们提出\emph{推测动作（speculative actions）}：一个面向通用智能体系统的无损框架，利用更快的模型预测可能的动作，从而并行执行多个步骤。我们在三类智能体环境上评估了该框架：博弈、电商与网页搜索；同时还在操作系统环境中考察了其一个“有损”扩展。在所有场景中，推测动作都能在下一动作预测上取得可观准确率（最高可达 55\%），并转化为显著的端到端延迟下降。此外，采用更强的猜测模型、top-$K$ 动作预测、多步推测以及面向不确定性的优化，还能够进一步提升效果，为现实世界中部署低延迟智能体系统开辟出一条有前景的路径。
+\end{abstract}
+\vspace{-10pt}
+
+\section{引言}
+\label{sec:intro}
+由大语言模型（LLM）驱动的智能体，正在从一次性预测逐渐转向在复杂环境中持续运行的过程：浏览器、操作系统、游戏引擎、电商系统以及人类工作流，都是典型例子。
+这些环境并非附属品；它们决定了智能体能观察到什么、能做什么，通过接口和速率限制约束其推进过程，并主导端到端延迟。
+在实践中，智能体的行为会展开为一系列环境步骤（工具调用、MCP 服务器请求、人类参与式查询，以及进一步的 LLM 调用），而每一步都具有不可忽视的往返时间与成本。
+随着能力不断提升，一个新的瓶颈浮现出来：环境中的“动作响应时间”（time-to-action）。
+即使准确率很高，如果智能体在两步之间停顿过久，它也难以胜任交互式使用或高吞吐自动化场景。
+
+\begin{table}[h]
+\centering
+\setlength{\tabcolsep}{8pt}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{*{4}{c}}
+\toprule
+\makecell{\textbf{操作系统任务}\\ \citep{abhyankar2025osworld}} &
+\makecell{\textbf{深度研究}\\ \citep{openai2025deepresearch}} &
+\makecell{\textbf{数据流水线}\\ \citep{jin2025elt}} &
+\makecell{\textbf{Kaggle 国际象棋对局}\\ \citep{KaggleGameArena}} \\
+\midrule
+10--20 分钟 & 5--30 分钟 & 30--45 分钟 & 1 小时 \\
+\bottomrule
+\end{tabular}
+\caption{\centering \textbf{当前最先进 AI 智能体在不同任务/环境上的预计耗时。}}
+\label{tab:Agent-Wall-Time}
+\end{table}
+
+如\cref{tab:Agent-Wall-Time}所示，AI 智能体在不同环境中完成一次运行往往需要数十分钟乃至数小时；而当强化学习或提示词优化需要进行成百上千次迭代时，这一代价还会急剧放大\citep{agrawal2025gepa}。
+
+从根本上说，这种低效来自 API 调用的内在串行性。
+因此，本文提出一个简单的问题：
+\vspace{-7pt}
+\begin{quote}
+\emph{智能体与环境的交互，是否必须严格按顺序进行？}
+\end{quote}
+我们的回答是否定的。
+受微处理器中的推测执行与 LLM 推理中的推测解码启发，我们提出\emph{推测动作}：一个通用框架，使智能体能够利用更快的模型预测并暂时推进最可能的下一步动作，同时让较慢的真实执行者（强大的 LLM、外部工具，或人类）在后台补上。
+从效果上看，智能体会对环境交互进行“预布置”（预取数据、发起安全的并行调用、准备可逆副作用），使真正的关键路径从“等待”变成“验证”。
+当较慢的评估者确认这些猜测时，进展已经提前发生；若它们不同意，则系统仍按常规方式执行。
+最终得到的是一种\emph{表面上等价于顺序执行、内部却并行且机会主义的无损接口}。
+
+更具体地说，在这样的智能体中，推测动作会在环境循环里引入两个角色：
+
+\begin{itemize}[leftmargin=*]
+    \item \emph{Actor(s)}（执行者）：权威但较慢的执行方（如能力更强的 LLM、外部 API/工具、环境自身的响应，或人类），其输出提供了正确性与副作用所依赖的真实结果。
+    \item \emph{Speculator(s)}（推测器）：廉价、低延迟的模型，用于预测下一步环境操作，即动作本身、其参数以及预期观测或状态变化。它可以是更小的 LLM、同一 LLM 的简化用法（减少提示词与推理步骤），或者领域启发式方法。
+\end{itemize}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figures/Speculative_figure_1.pdf}
+    \caption{我们在国际象棋环境中的框架示意图。当 Actor 发起一次 LLM 调用以决定下一步走法时，Speculator 会使用一个更快的模型来猜测该走法。这些猜测使后续步骤对应的 API 调用能够并行发起；一旦猜测被验证，系统便能通过并行化获得时间收益。整个过程在后台运行，因此对用户而言，这是无损的加速。}
+    \label{fig:figure_1}
+\end{figure}
+
+一个关键设计目标，是相对于环境原始语义保持无损性：与严格顺序执行的智能体相比，推测动作不应降低最终结果质量。
+我们通过以下机制实现这一点：(a) 语义守卫（Actor 在提交前确认状态转移等价），(b) 安全包络（只允许幂等、可逆或沙箱化的推测性副作用），以及 (c) 修复路径（当猜测被否决时进行回滚或补偿动作）。
+在许多环境中（如网页搜索流水线、结账前的购物车、沙箱中的操作系统级操作），这些模式都很自然且易于实现。
+
+\textbf{我们能否猜中智能体的下一次 API 调用？} 我们表明，在实践中，API 意图往往可以以相当合理的准确率被猜中。具体来说，我们在四类环境中展示了推测动作，每种环境都凸显了智能体延迟的不同方面：
+\begin{itemize}[leftmargin=*]
+    \item \textbf{回合制博弈}（如国际象棋）：Speculator 可以在等待轮到自己时预测对手的走法。参见\cref{fig:figure_1}。
+    \item \textbf{电商场景}：在与人类顾客对话时，Speculator 可以主动推断其意图（如退货），并提前安全地触发工具调用（如检查退货资格）。
+    \item \textbf{多跳网页搜索}：在等待慢速外部调用（如 Wikipedia）返回结果时，Speculator 可以基于自身知识库猜测答案，并继续执行后续搜索查询。
+    \item \textbf{操作系统（有损扩展）}：可逆的推测性动作可以立即响应工作负载与环境变化，在 Actor 完成确认前就提升端到端应用性能。
+\end{itemize}
+
+在这些场景中，我们都观察到显著加速：下一次 API 调用的预测准确率最高达到 55\%，端到端无损加速最高达到 20\%。这些结果基于一个简单的单步推测实现；若引入自适应推测等更先进技术，还能进一步提升。我们的代码已公开发布在 \url{https://github.com/naimengye/speculative-action}。
+
+\subsection{相关工作}
+\label{sec:related}
+
+\paragraph{微处理器中的推测}
+推测最初出现在计算机体系结构中，通过在结果尚未确定前提前执行指令来提高并行性\citep{tomasulo1967efficient}；当预测错误时再回滚，随后它成为高性能处理器的核心机制之一\citep{lam1992limits}。针对利用微体系结构推测执行的安全漏洞，\citep{mambretti2019speculator} 提出了 Speculator，用于分析 CPU 的推测行为。
+
+\paragraph{推测式程序执行}
+线程级推测会把原本顺序的程序片段并行执行。其前提是假定这些程序片段彼此独立、能够安全并行；若后来发现线程之间存在数据依赖，则必须进行回滚并解决冲突\citep{10.1145/2938369}。最近，\citep{liargkovas2023shell} 探索了利用跟踪与隔离技术，以推测但安全的方式乱序运行 shell 脚本。
+
+\paragraph{LLM 推理中的推测解码}
+同样的“预测—验证”模式近来被应用到了大语言模型上。
+推测解码通过让一个较小的草稿模型提出 token，再由一个更大的目标模型成批验证这些 token，从而加速自回归推理；正确的 token 被提交，失败的则重新生成\citep{leviathan2023fast,zhang2024beyond,chen2023acceleratinglargelanguagemodel}。
+在推理层面，推测也被用于加速思维链过程\citep{wang2025acceleratinglargelanguagemodel,wang2025efficientreasoningllmsspeculative,fu2025scaling}。
+在所有这些场景中，推测都通过并行执行可能的未来步骤及其验证，来降低顺序流水线的延迟。
+
+\paragraph{推测的其他应用}
+推测已广泛用于多种系统场景。例如，Speck\citep{nightingale2008parallelizing} 用它并行化原本顺序的安全检查，AutoBash\citep{su2007autobash} 则用它在隔离环境中测试配置变更。最近，\cite{farias2024speeding} 又提出了一种面向 GPU 的推测式策略仿真技术，用于优化供应链系统。
+
+\textit{受这些工作启发，我们提出了一个面向智能体系统的推测框架，以实现无损执行加速。} 我们的方法与近期对规划任务中的 LLM API 调用进行推测的研究方向一致（\cite{hua2024interactivespeculativeplanningenhance}, \cite{guan2025dynamicspeculativeagentplanning}），但把这一思想推广到了\textbf{整个智能体环境}：不仅推测 LLM 调用，也推测内部和外部工具 API、MCP 服务器 API，甚至人类响应。这由此形成了一个统一的智能体推测框架，与智能体系统中新近兴起的“环境”视角和 MCP 视角高度一致，为突破 AI 智能体训练与部署中的瓶颈提供了强有力的机制。
+
+\section{框架}
+\label{framework}
+\input{sections/framework_zh}
+
+\section{环境}
+
+下面我们将在三类环境中实例化推测动作：国际象棋、电商对话，以及多跳网页搜索。选择这三类环境，是为了分别突出不同的延迟瓶颈（推理、工具/API 往返，以及信息检索）。
+在每种情况下，我们都将一个快速的 Speculator 与一个缓慢的 Actor 配对，并实现\cref{alg:speculative-k}。我们报告预测准确率以及端到端节省的时间。
+
+\label{sec:environments}
+\input{sections/chess_zh}
+\input{sections/ecommerce_zh}
+\input{sections/hotpotqa_zh}
+\input{sections/hyperparameter_tuning_zh}
+\input{sections/conclusion_zh}
+
+\bibliography{iclr2026_conference}
+\bibliographystyle{iclr2026_conference}
+
+\appendix
+\input{sections/appendix_zh}
+
+\end{document}

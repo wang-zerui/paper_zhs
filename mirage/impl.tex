@@ -1,0 +1,61 @@
+\section{Implementation}
+\label{sec:impl}
+
+\begin{table}
+    \centering
+    \caption{DNN benchmarks used in our evaluation.}
+    \vspace{\captionvspace}
+    \footnotesize
+    \label{tab:benchmarks}
+    \begin{tabular}{l|l|l}
+    \toprule
+    {\bf Name} & {\bf Description} & {\bf Base Architecture} \\
+    \midrule
+    GQA & Group-query attention & \llama-3-70B~\cite{grattafiori2024llama3herdmodels}\\
+    QKNorm & QK normalization with attention & Chameleon-7B~\cite{chameleonteam2024chameleon} \\
+    RMSNorm & RMS normalization with linear & \llama-2-7B~\cite{llama2}\\
+    LoRA & Low-rank adaptation & GPT-3-7B-LoRA~\cite{llama-7b-lora} \\
+    GatedMLP & Gated multi-layer perceptron & Falcon-7B~\cite{falcon40b}\\
+    nTrans & Normalized Tarnsformer & nGPT-1B~\cite{loshchilov2024ngpt}\\
+
+    \bottomrule
+    \end{tabular}
+    \vspace{\captionvspace}
+    \vspace{\captionvspace}
+\end{table}
+
+\sys is implemented in 30K lines of code in C++, CUDA, and Python. Kernel operators are implemented with the cuDNN and cuBLAS libraries~\cite{cudnn, cublas}, and block and thread operators are implemented using cuTLASS~\cite{cutlass} and CUDA PTX.
+%
+For each input tensor program, \sys automatically generates and verifies potential \graphs. 
+For each verified \graph, \sys produces CUDA source code for all custom kernels of the \graph and compiles the code into binary using the CUDA compiler.
+%
+This approach enables just-in-time (JIT) compilation and deployment for general tensor programs, and the generated kernels can be directly integrated into a PyTorch program with a few lines of code changes. 
+%
+\sys's SMT and ILP solvers are implemented using Z3 4.12.6~\cite{z3}. %\oded{I moved this here}
+
+Our implementation supports the operators listed in \Cref{tab:expression}.
+%\oded{Is this list needed? Can't we just say: ``Our implementation supports the operators listed in \Cref{tab:expression}''. If we still want to list everything in the text, I still think we should refer to the table.}
+%\oded{What about repeat? It appears in Fig. 3}
+%
+\sys can be extended to include new operators, such as variants of convolution or matrix multiplication, at the kernel, block, and/or thread levels.
+%For each new operator, \sys requires (1) an implementation that computes the operator's output over finite fields, and (2) a floating point implementation of the operator at the kernel, block, and/or thread levels. (1) is used by the probabilistic equivalence verifier for examining \graph equivalence, and (2) is used for generating optimized tensor programs.
+%Moreover, to allow the \graph generator to discover \graphs containing the new operator, \sys needs an extension to the equivalence axioms $\Aeq$ regarding the properties for the new operator.
+%\MW{I explained how to adapt the generator for the new operator. Do you think we need more?}\ZJ{I think this is sufficient}
+%\oded{I suggest the following rewrite to the last few sentences:
+To support a new linear operator, \sys requires (1) a float-pointing implementation of the operator at the kernel, block, and/or thread levels, which is used by the \graph optimizer to generate CUDA kernels; (2) an implementation of the operator over modular arithmetic (see \S\ref{sec:verify}); and (3) an extension to the abstract expression axioms $\Aeq$ and $\Asub$ for the operator (see \S\ref{subsec:abstract_expression}).
+%}
+%
+
+To utilize \Cref{thm:zero_test,thm:prob}, random tests should be performed with sufficiently large prime numbers $p$ and $q$ and iterated multiple times. Our current implementation uses the largest values of $p$ and $q$ whose product fits in 16-bit integers (i.e., $p=227, q=113$) to run these random tests on GPUs. We leverage \sys's GPU optimizations--such as keeping intermediate results in shared memory--to accelerate the search procedure.
+We also perform a single random test without iterating it and compare all elements of the output tensors.
+We note that this equivalence verification procedure does not introduce false negatives.
+While it could, in theory, introduce false positives, we have not observed any in practice.
+For these reasons, we consider this procedure sufficient for the search process and plan to add a final verification step that provides the theoretical guarantees only for the best \graph at the end of the optimization process.
+
+\paragraph{Equivalence verification for non-\lax programs.} While \sys can generate \graphs for arbitrary tensor programs, the probabilistic equivalence verifier is limited to \lax programs and does not support certain DNN operators such as ReLU~\cite{relu}. 
+As an alternative, we have developed a solver-based verifier for arbitrary tensor programs. The verifier relies on user-provided mathematical properties of individual operators (e.g., linearity, associativity, commutativity, and distributivity) defined in first-order logic and uses these properties to verify equivalence using an automated theorem prover. Compared to the probabilistic equivalence verifier, the solver-based verifier supports more general programs, while requiring additional manual effort to specify the properties of each new operator. A detailed discussion of the solver-based verifier is beyond the scope of this paper.
+
+\if 0
+One of our benchmarks, MLP, uses the {\tt ReLU} non-linear operator, which is not natively supported by \sys.
+To apply \sys to MLP, we replace {\tt ReLU} by exponentiation, which is also a non-linear function and is not used by MLP. We then change exponentiation in the resulting optimized \graph back to {\tt ReLU} and verify equivalence by manual examination\footnote{Alternatively, we have developed a solver-based method to verify arbitrary non-\lax programs in first order logic, which is beyond the scope of this paper.}.
+\fi

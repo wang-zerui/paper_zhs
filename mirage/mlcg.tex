@@ -1,0 +1,199 @@
+\section{Multi-Level Graph Representation}
+\label{sec:hcg}
+
+\sys uses a \graph to specify the execution of a tensor program on GPUs.
+%
+%Different from a computation graph, whose nodes and edges represent DNN operators performed by kernels and tensors saved in GPU device memory, 
+A \graph contains hierarchical graphs at multiple levels to represent computation at the kernel, block, and thread levels\footnote{For simplicity, we use the term {\em block} to refer to a thread block of a CUDA kernel and {\em thread} to refer to a single CUDA thread.}.
+This section first describes the GPU hierarchy and uses \Cref{fig:mugraph} as a running example to introduce the key components of a \graph. 
+
+%\MW{Do we want to mention layouts in this section?}\ZJ{Done.}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/gpu-hierarchy-crop.pdf}
+    %\vspace{-2em}
+    \caption{GPU compute and memory hierarchy.}
+    \vspace{\captionvspace}
+    \label{fig:gpu_hierarchy}
+\end{figure}
+
+\paragraph{GPU hierarchy.} \Cref{fig:gpu_hierarchy} shows the hierarchy of today's GPUs. Computations on GPUs are organized as {\em kernels}, each of which is a function executed simultaneously on multiple GPU cores in a single-program-multiple-data (SPMD) fashion.
+A kernel includes a grid of {\em thread blocks}, each of which is executed on one GPU streaming multiprocessor and includes multiple {\em threads} to perform computation on individual data elements. 
+%
+Each thread is associated with a per-thread {\em register file}, and all threads within a thread block can access {\em shared memory} to enable collective operations.
+%
+Finally, all inputs and outputs of a kernel are stored in GPU {\em device memory}.
+
+\begin{figure}
+    \subfloat[Computation graph for RMSNorm and MatMul.] {
+    \includegraphics[scale=0.3]{figs/rms_norm_kernel_graph-crop.pdf}
+    \label{fig:rms_norm_baseline}
+    }
+    \\
+    \subfloat[The best \graph discovered by \sys.]{
+    \includegraphics[scale=0.3]{figs/rms_norm_mugraph-crop.pdf}
+    \label{fig:rms_norm_mlso}
+    }
+    %\vspace{\captionvspace}
+    \caption{\Cref{fig:rms_norm_baseline} is the computation graph for RMSNorm and MatMul. \Cref{fig:rms_norm_mlso} shows the best \graph discovered by \sys for computing RMSNorm and MatMul, which fuses the computation in a single kernel to reduce device memory access and kernel launch overhead, outperforms existing approaches by 1.9$\times$. Numbers in brackets indicate tensor shapes, and numbers in braces show the \imap, \omap, or \fmap for the corresponding operators. }
+    \vspace{\captionvspace}
+    \label{fig:mugraph}
+\end{figure}
+
+
+\paragraph{Kernel graph.}
+%
+Each tensor program corresponds to one {\em kernel graph}, where each node represents a kernel running on an entire GPU, and each edge is a tensor shared between kernels. All tensors in a kernel graph are stored in GPU device memory since different kernels cannot share data in register files or shared memory.
+%
+Each node in a kernel graph can be a {\em pre-defined} kernel operator supported by existing kernel libraries such as convolution by cuDNN~\cite{cudnn} and matrix multiplication by cuBLAS~\cite{cublas}.
+%For example, all nodes in the kernel graph shown in \Cref{fig:mugraph_kernel} are pre-defined kernel operators, whose implementations are available in existing kernel libraries.
+%
+In addition, to enable fine-grained inter-kernel optimizations such as kernel fusion, a node in a kernel graph can also be a {\em graph-defined} kernel operator, whose semantic and behavior are defined by a lower-level (i.e., block) graph.
+As an example, the kernel operator in \Cref{fig:rms_norm_mlso} is a graph-defined operator specified by a block graph.
+
+\paragraph{Block graph.} A {\em block} graph specifies computation associated with a thread block\footnote{In the CUDA programming model, a kernel's computation is defined as computations for independent thread blocks.}, where each node denotes a {\em block operator} specifying computation within a block, and each edge (blue arrows in \Cref{fig:rms_norm_mlso}) is a tensor shared between block operators.
+%
+\sys stores all intermediate tensors within a block graph in GPU {\em shared memory} for two considerations.
+%\MW{I don't think the following two can be summarized as reasons. The first reason is the property of GPU hierarchi and does not explain much about our design.}
+%\ZJ{I still think it is a reason --- using shared memory allows \sys to reduce device access. Does ``considerations'' seem better than ``reasons''?} \MW{I like considerations better.}
+%
+First, GPU shared memory offers much higher bandwidth than device memory, and this design allows \sys to reduce device memory access by maximally saving intermediate results in shared memory.
+%
+Second, for tensors whose sizes exceed shared memory capacity and must be stored in device memory, \sys uses these tensors to split computation into multiple block graphs, each of which only contains tensors in shared memory. This separation does not introduce additional access to device memory.
+
+%
+Each block graph is also associated with properties specifying its execution, which we introduce below.
+
+\begin{figure}
+    \centering
+    \subfloat[$\er{imap} = \{x\leftrightarrow \er{column}\}$, $\er{fmap}=\{i\leftrightarrow \er{row}\}$]{
+        \includegraphics[scale=0.42]{figs/mapping_example_1_v2-crop.pdf}
+    }
+    \\
+    \subfloat[$\er{imap}=\{x\leftrightarrow \phi, y\leftrightarrow \er{row}\}$, $\er{fmap}=\{i\leftrightarrow \er{column}\}$]{
+        \includegraphics[scale=0.42]{figs/mapping_example_2_v2-crop.pdf}
+    }
+    \vspace{\captionvspace}
+    \caption{Demonstrating how an input tensor is partitioned across blocks and for-loop iterations with \imap and \fmap.}
+    \vspace{\captionvspace}
+    \label{fig:mapping}
+\end{figure}
+
+\paragraph{Grid dimensions.} All blocks within a kernel are organized into a mesh with up to 3 dimensions, identified as $x$, $y$, and $z$. A block graph is associated with up to three {\em grid dimensions} that specify the number of blocks along the $x$, $y$, and $z$ dimensions. The block graph in \Cref{fig:rms_norm_mlso} launches $128$ blocks.
+%First, the CUDA programming model only supports up to 3-dimensional kernel launch (i.e., the thread blocks launched within a kernel are organized by a matrix with up to 3 dimensions), and correspondingly each thread block is associated with a {\em grid size} that specifies the number of thread blocks along each dimension. The two thread block graphs in \Cref{fig:mugraph_mlso} launches $80$ (i.e., $8\times 10$) and $64$ thread blocks respectively.
+%
+
+First, for each input tensor to a graph-defined kernel operator (e.g., $X$, $G$, and $W$ in the kernel graph in \Cref{fig:rms_norm_mlso}), the associated block graph contains an {\em \imap}, which specifies how the input tensor is partitioned into sub-tensors for individual blocks.
+%
+For each grid dimension (i.e., $x$, $y$, or $z$),
+%whose size is larger than 1\MW{We don't require the size to be larger than 1 since the definition of imap still work for dimension of size 1. It is just implementation detail. If we mention it here, we then miss the discussion for size-1 case.},
+the \er{imap} maps it to either (1) a data dimension of the input tensor or (2) a special {\em replica} dimension $\phi$.
+For (1), the mapped data dimension is {\em equally partitioned} across blocks along the grid dimension. For (2), the input tensor is {\em replicated} across these blocks.
+%
+For example, the block graph in \Cref{fig:rms_norm_mlso} takes three inputs---$\overline{X}$, $\overline{G}$, and $\overline{W}$---representing the input tensors to each block.
+For $\overline{W}$, its $\imap=\{x\leftrightarrow d\}$ indicates that the $d$ dimension of tensor $W$ is partitioned into 128 equally sized chunks. As a result, $\overline{W}$ has shape $[h=1024, d=32]$.
+
+Second, for each output tensor of a block graph (e.g., $\overline{Z}$ in \Cref{fig:rms_norm_mlso}), the block graph includes an {\em \omap}, which specifies how the outputs of all blocks are concatenated to construct the final output of the kernel operator.
+%
+In an \omap, each grid dimension must map to a data dimension of the output tensor, since different blocks must store disjoint tensors in device memory.
+%
+For $\overline{Z}$ with shape $[b=16, d=32]$ in \Cref{fig:rms_norm_mlso}, its $\omap =\{x\leftrightarrow d\}$ indicates that blocks with the same $x$ index are concatenated along the $d$ dimension, resulting in a tensor $Z$ with shape $[b=16, d=4096]$.
+%
+
+\paragraph{For-loop body.} To fit large input tensors in shared memory and to overlap data loading from device memory with computation, a block graph can include a {\em for-loop body}, which is executed multiple times to complete a kernel.
+Often, the for loop in a kernel is followed by some post-processing. For example, when computing an average value, the for loop would perform the summation of $n$ values and the post-processing would divide by $n$. 
+\Sys specifies the for-loop body of a block graph using {\em input iterators}, {\em for-loop accumulators}, and all operators in between, as shown in the orange box in \Cref{fig:rms_norm_mlso}). 
+Each input tensor to a block graph first passes through an {\em input iterator}, which loads part of the tensor (e.g., $\overline{X}$, $\overline{G}$, and $\overline{W}$) from device memory into shared memory.
+Each input iterator is associated with an {\em \fmap} to specify which part of the input tensor to load in each iteration. Formally, the \er{fmap} maps each for-loop dimension to either (1) a data dimension of the input tensor or (2) the replica dimension $\phi$. 
+Similar to \imap, the tensor is equally partitioned along that dimension for (1) and replicated for (2).
+%
+\Cref{fig:mapping} shows how an input matrix is partitioned across blocks and for-loop iterations using different \imap and \fmap.
+
+Each block graph is also associated with a {\em for-loop dimension}, which determines how many iterations the for-loop body is executed to complete the kernel. In addition, \sys uses {\em for-loop accumulators} (e.g., the two {\tt Accum} operators in \Cref{fig:rms_norm_mlso}) to accumulate intermediate results computed in each iteration (using standard accumulators, e.g., summation and max) and store the accumulated results in shared memory. Once the for-loop body is completed, \sys proceeds to execute the remaining operators outside the for-loop body directly on the accumulated results. An {\em output saver} then saves the final result from shared memory back to device memory.
+
+
+\ZJ{Old version: \bf{For-loop dimensions.} To fit large input tensors in shared memory and overlap data loading with computation, a second property associated with each block graph is {\em for-loop dimensions}, which collectively specify how many times the for-loop body of the block graph is executed to complete a kernel.
+\Sys defines the for-loop body of a block graph using {\em input iterators}, {\em for-loop accumulators}, and all operators in between.
+%
+Specifically, each input tensor to a block graph first passes through an {\em input iterator}, which loads part of the tensor (e.g., $\overline{X}$, $\overline{G}$, and $\overline{W}$) from device memory into shared memory.
+%
+Each input iterator is associated with an {\em \fmap} to specify which part of the input tensor to load in each iteration. Formally, the \er{fmap} maps each for-loop dimension to either (1) a data dimension of the input tensor or (2) the replica dimension $\phi$. 
+Similar to \imap, the tensor is equally partitioned along that dimension for (1) and replicated for (2).
+%
+\Cref{fig:mapping} shows how an input matrix is partitioned across blocks and for-loop iterations using different \imap and \fmap.
+\newline 
+In addition, \sys uses {\em for-loop accumulators} (e.g., the two {\tt Accum} operators in \Cref{fig:rms_norm_mlso}) to accumulate intermediate results across iterations in shared memory.
+\newline
+The block graph in \Cref{fig:rms_norm_mlso} has a for-loop dimension $i=16$, indicating all operators in the for-loop body (highlighted in xxx) are executed 16 times to finish the associated graph-defined kernel operator. Operators outside of the for-loop body are performed directly on the accumulated results and are thus executed once before saving the outputs of the block graph back to device memory.}
+
+\ZJ{To be removed: In addition, a block graph contains {\em for-loop accumulators} (e.g., the two {\tt Accum} operators in \Cref{fig:rms_norm_mlso}) to accumulate its outputs across iterations in shared memory.
+%
+Similar to an input iterator, a for-loop accumulator is also associated with an \er{fmap} to specify how outputs from different iterations are combined to produce accumulated results. 
+Specifically, the \er{fmap} maps each for-loop dimension either to a data dimension, which results in concatenation of outputs along that dimension, or the replica dimension $\phi$, which results in accumulation of results in shared memory.}
+
+\paragraph{Thread graph.} A {\em thread graph} further reduces computation scope from a block to a single thread. Similar to a block graph, each thread graph is also associated with {\em block dimensions}, which specify the organization of threads within the block, and {\em for-loop dimensions}, which define the total number of iterations to finish the defined computation. Each thread graph includes {\em input iterators}, each of which loads an input tensor (e.g., $\overline{\overline{A}}$ and $\overline{\overline{B}}$ in \Cref{fig:rms_norm_mlso}) from shared memory into register files, and {\em output savers}, each of which stores an output tensor from register files back to shared memory (e.g., $\overline{\overline{C}}$).
+%
+A thread graph is the lowest-level graph in a \graph and contains only pre-defined thread operators.
+
+\paragraph{Tensor layout.} Each tensor in the kernel, block, or thread graph is associated with a {\em tensor layout} (omitted in \Cref{fig:mugraph} for simplicity), specifying how the tensor is linearized in memory.
+%
+Note that tensor layouts affect only the performance of a \graph and have no impact on its output correctness.
+
+\begin{definition}[\graph Validity]
+A \graph $G$ is \emph{valid} if: (1) for each kernel, block, and thread operator $o\in G$, its input and output tensors match the specification of $o$; (2) all tensors in each kernel, block, and thread graph can reside in GPU device memory, shared memory, and register file, respectively; and (3) for each block and thread graph with a for-loop body, any path from an input to an output passes through exactly one input-iterator, one for-loop accumulator, and one output saver.
+%it computes the same function as the input tensor program; (2) the input tensor shapes satisfy the constraints of each operator; and (3) all tensors in each kernel and block graph can reside in the device and shared memory, respectively.
+\end{definition}
+
+\paragraph{Comparison with prior work.}
+%Prior work has introduced a variety of intermediate representations (IRs) for tensor programs~\cite{tillet2019triton, tvm, ansor}.
+Prior work separately considers algebraic~\cite{TASO, wang2021pet} or schedule transformations~\cite{halide, tvm, autohalide}, while \graphs can represent both in a uniform way.
+Specifically, the grid and for-loop dimensions and their corresponding mappings (i.e., \imap, \omap, and \fmap) to tensor dimensions constitute a comprehensive search space of possible schedules for graph-defined operators. The hierarchical graphs across the kernel, block, and thread levels allow \sys to explore algebraic transformations at these levels.
+
+%A key difference between \graph and the tensor program representations used in prior work~\cite{tillet2019triton, tvm, ansor} is that \graph provides a holistic approach to representing both algebraic and schedule transformations through its hierarchical graph-based representation, while existing approaches only capture one type of transformations.
+%
+%\MW{We should simply this paragraph since it overlaps a lot with the intro.}
+%First, existing schedule-based optimizers such as Triton, TVM, and Ansor, require users to {\em manually} split a tensor program's computation into kernels and explicitly specify the computation for each kernel~\cite{tillet2019triton, tvm, ansor}.
+%
+%This design prevents them from automatically exploring various algebraic transformations.
+%
+%Second, today's tensor algebra superoptimizers, such as TASO and PET, focus on algebraic transformations at the kernel level by considering a single-layer computation graph~\cite{TASO, wang2021pet}.
+%
+%This approach makes them unable to explore inter-kernel optimizations or fine-grained transformations at the block or thread level.
+%Compared with existing approaches, \graph captures both algebraic and schedule transformations and interleaves these two types of transformations at the kernel, block, and thread levels.
+%
+%Specifically, the grid and for-loop dimensions and their corresponding mappings (i.e., \imap, \omap, and \fmap) to tensor dimensions constitute a comprehensive search space of possible schedules for graph-defined operators, and the hierarchical graphs at the kernel, block, and thread levels allow \sys to explore algebraic transformations at these levels.
+%This design allows \sys to automatically discover complex optimizations that require combining algebraic and schedule transformations, including FlashAttention~\cite{dao2023flash}, FlashDecoding~\cite{hong2024flashdecoding}, and other \graphs that outperform them.
+%while enabling these optimizations in existing systems requires manual implementation and verification (e.g., more than 600 lines of code in Triton~\cite{tillet2019triton}). 
+
+\if 0
+\subsection*{Older version}
+\paragraph{Comparison with prior work.}
+Prior work has introduced a variety of intermediate representations (IRs) for tensor programs~\cite{tillet2019triton, tvm, ansor}.
+A key difference between \graph and existing IRs is that \graph provides a holistic approach to representing both algebraic and schedule transformations through its hierarchical graph-based representation, while existing IRs only capture one type of transformations.
+%
+\MW{We should simply this paragraph since it overlaps a lot with the intro.}
+First, existing schedule-based optimizers such as Triton, TVM, and Ansor, require users to {\em manually} split a tensor program's computation into kernels and explicitly specify the computation for each kernel~\cite{tillet2019triton, tvm, ansor}.
+%
+This design prevents them from automatically exploring various algebraic transformations.
+%
+Second, today's tensor algebra superoptimizers, such as TASO and PET, focus on algebraic transformations at the kernel level by considering a single-layer computation graph~\cite{TASO, wang2021pet}.
+%
+This approach makes them unable to explore inter-kernel optimizations or fine-grained transformations at the block or thread level.
+
+Compared with existing approaches, \graph captures both algebraic and schedule transformations and interleaves these two types of transformations at the kernel, block, and thread levels.
+%
+Specifically, the grid and for-loop dimensions and their corresponding mappings (i.e., \imap, \omap, and \fmap) to tensor dimensions constitute a comprehensive search space of possible schedules for graph-defined operators, and the hierarchical graphs at the kernel, block, and thread levels allow \sys to explore algebraic transformations at these levels.
+This design allows \sys to automatically discover complex optimizations that require combining algebraic and schedule transformations, including FlashAttention~\cite{dao2023flash}, FlashDecoding~\cite{hong2024flashdecoding}, and other \graphs that outperform them, while enabling these optimizations in existing systems requires manual implementation and verification (e.g., more than 600 lines of code in Triton~\cite{tillet2019triton}). 
+\fi
+
+\if 0
+\subsection*{An Even Older version}
+The execution of a tensor program represented by a \graph can also be expressed using the intermediate representations introduced in prior work such as Triton~\cite{triton} and TVM~\cite{tvm}. There are two key differences between \sys and prior work. 
+%
+First, \graph's hierarchical graph representation enables multi-level superoptimization for tensor programs, allowing \sys to automatically discover sophisticated tensor program optimizations that require combining algebraic and schedule transformations at the kernel, block, and thread levels.
+%
+As a result, \sys is able to automatically discover FlashAttention~\cite{dao2023flash}, while existing approaches require users to manually specify the computation for each individual kernel (i.e., the separation of {\tt softmax} and reordering of element-wise division and matrix multiplication), and implementing FlashAttention requires more than 600 lines of code even in high-level programming languages such as Triton~\cite{triton_flashattention}.
+Second, by enabling multi-level superoptimization, \sys can discover \graphs that significantly outperform the best existing programs for a variety of workloads.
+%This approach allows \sys to represent both algebraic and schedule optimizations in a unified representation, and interleaves the two types of optimizations at the kernel, block, and thread levels.
+\fi

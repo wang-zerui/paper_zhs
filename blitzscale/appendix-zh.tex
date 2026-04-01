@@ -1,0 +1,69 @@
+\section{附录}
+\label{sec:appendix}
+
+\begin{table*}[!ht]
+	\centering
+	\begin{tabular}{lllllll}
+		\toprule
+		\textbf{实例类型} & \textbf{加速器} & \makecell{\textbf{本地 SSD}\\\textbf{带宽/GPU}} & \makecell{\textbf{远程 SSD}\\\textbf{带宽/GPU}} & \makecell{\textbf{网络}\\\textbf{带宽/GPU}} & \textbf{含 NVLink} & \textbf{价格} \\ \midrule
+		a2-ultragpu-8g \cite{googleinstance}      & 8 x A100(80\,GB) & 2.58\,Gbps & 0.29\,Gbps & 12.5\,Gbps & \ding{51} & 40.44 USD/h \\
+		p4d.24xlarge\cite{awsinstance}            & 8 x A100(40\,GB) & 2.31\,Gbps & -          & 100\,Gbps  & \ding{51} & 45.039 USD/h \\
+		ml.hpcpni2.28xlarge\cite{volcanoinstance} & 8 x A100(80\,GB) & 4\,Gbps    & -          & 100\,Gbps  & \ding{55} & 48.23 USD/h \\
+		p4de.24xlarge\cite{awsinstance}           & 8 x A100(80\,GB) & 2.31\,Gbps & -          & 100\,Gbps  & \ding{51} & 56.328 USD/h \\
+		a3-highgpu-8g\cite{googleinstance}        & 8 x H100         & 6.09\,Gbps & 0.97\,Gbps & 100\,Gbps & \ding{51} & 88.25 USD/h \\
+		a3-megagpu-8g\cite{googleinstance}        & 8 x H100         & 6.09\,Gbps & 0.97\,Gbps & 200\,Gbps & \ding{51} & 不可用 \\
+		p5.48xlarge \cite{awsinstance}            & 8 x H100         & 9.8\,Gbps  & -          & 400\,Gbps  & \ding{51} & 不可用 \\ \bottomrule
+	\end{tabular} \\[10pt]
+
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\textit{
+		来自 GPU 云厂商的 {\maas} 硬件配置概览。
+        }}}
+    \label{tab:vendor-hardware}
+    \end{minipage}
+\end{table*}
+
+\subsection{值得说明的实现细节}
+\label{sec:appendix-implementation}
+
+\nospacestitle{网络库。 }
+我们实现了一个通信库，
+统一抽象 NVLink 和 RDMA，
+从而整体性地完成参数传输，
+这一点与 DeepEP~\cite{deepep} 类似。
+在实现过程中我们发现，
+如果直接使用现成的组通信器（例如 NCCL~\cite{nccl}），
+跨机器建立通信组的开销较大（例如 100\,ms），
+这会显著限制基于网络扩缩容的效果。
+幸运的是，我们的计划只需要节点对之间的 P2P 通信。
+因此，我们预先构建了一个连接池，
+支持各节点之间的全互连连接。
+尽管计算网络（RDMA）在可扩展性上存在潜在问题~\cite{fasst}，
+但这主要出现在小负载传输场景中，
+并且可以通过 DCT~\cite{krcore} 等先进 RDMA 传输机制来缓解。
+
+\stitle{带 CUDA 上下文池的原生服务引擎。 }
+在执行之前，GPU 上必须先创建一个带已加载内核（cuModule）的 CUDA 上下文。
+创建这样一个 CUDA 上下文大约需要 500\,ms，
+在服务实例自动扩缩容中不可忽略。
+为降低该开销，{\sys} 维护了一个小规模 CUDA 上下文池，
+其中预先加载好常用内核，
+然后在已有 CUDA 上下文中把参数传入 GPU，
+这一做法与已有工作~\cite{DBLP:journals/corr/abs-2405-12079} 类似。
+此外，{\sys} 使用 C++ 与原生 CUDA API 构建，
+从而消除了初始化 PyTorch（例如 \texttt{dlopen}）带来的额外开销。
+
+\stitle{容错。 }
+发生机器故障时，
+我们会利用自身的扩缩容机制自动扩出新的实例。
+其中一个问题是，故障机器上的缓存参数会一并丢失，
+因此需要把这些参数重新分发到其他机器上，
+以维持全局参数池的不变式。
+对于调度器、监控器等其他组件的故障，
+我们沿用现有工作中的恢复流程~\cite{DBLP:conf/usenix/Romero0YK21,DBLP:journals/corr/abs-2401-14351}。
+
+\subsection{{\maas} 的硬件配置}
+\label{sec:appendix-hardware}
+
+\noindent
+表~\ref{tab:vendor-hardware} 列出了典型 {\maas} 系统所依赖的硬件配置。

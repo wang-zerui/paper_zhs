@@ -1,0 +1,82 @@
+\section{Related work}
+\label{sec:related}
+
+\iffalse
+\vspace{-1.ex}
+\stitle{Optimizations on prefill \& decode disaggregation}
+Both~\cite{strati2024djvu} and~\cite{zhong2024distserve} proposed prefill phase and decode phase disaggregation to XXXX.
+Since these work still reserve a full copy of model parameters for disaggregated phases,
+they are orthogonal to our method.
+\fi
+
+\nospacestitle{Optimizing model serving without autoscaling. }
+Serving models at scale is non-trivial.
+A significant body of research focuses on how to efficiently utilize GPUs to accelerate model serving~\cite{DBLP:conf/osdi/ZhongLCHZL0024,DBLP:journals/corr/abs-2404-09526,vllm,alpaserve,DBLP:conf/osdi/YuJKKC22,DBLP:conf/isca/PatelCZSGMB24,298501,kvcache},
+e.g., 
+Orca~\cite{DBLP:conf/osdi/YuJKKC22} proposes iterative-scheduling and selective batching. 
+AlphaServe~\cite{alpaserve} employs pipeline parallelism to better handle load spikes,
+but it cannot adjust pipeline instances dynamically.
+%DistServe~\cite{DBLP:conf/osdi/ZhongLCHZL0024} and Splitwise~\cite{DBLP:conf/isca/PatelCZSGMB24}
+%disaggregate the instances into prefill and decode pools to better
+%handle the unique characteristics of these two phases.
+These systems assume running on a fixed pool of GPUs,
+and we have shown the
+necessity of dynamically adjusting pool size and how to achieve so efficiently with {\sys}.
+{\sys} complements these single-instance model serving systems with fast autoscaling mechanisms:
+we build upon them for fast model serving on a single instance,
+and additionally provide ultra-fast scaling when the system needs to change
+the number of serving instances.
+
+\stitle{Dynamic scaling serving instances. }
+Dynamically scaling serving instances is challenging, mainly because the size of model weights is huge
+and still increasing,
+so loading them to the accelerators (data plane) is time-consuming.
+Some existing works accelerate the loading~\cite{pipeswitch, DBLP:conf/eurosys/JeongBA23, DBLP:conf/asplos/MiaoSDXL0J24, DBLP:conf/osdi/SunHZXZL024}:
+For example, both PipeSwitch~\cite{pipeswitch} and DeepPlan~\cite{DBLP:conf/eurosys/JeongBA23} leverage the layer-by-layer character of models
+to overlap the inference and parameter loading to hide the loading cost. 
+They only focus on host-to-device loading and such overlap is not live especially when the models are large.
+SpotServe~\cite{DBLP:conf/asplos/MiaoSDXL0J24} and Llumnix~\cite{DBLP:conf/osdi/SunHZXZL024}
+realize live migration but migration cannot fully unleash the computing
+capabilities of both instances.
+{\sys} provides a new mechanism to scale serving instances lively during parameter loading,
+resulting in throughput increase even with unfinished loading,
+which we have shown critical in reducing latencies under bursty workloads.
+
+A concurrent work $\lambda$Scale~\cite{yu2025lambdascale} also focuses on using network to accelerate model autoscaling. 
+The key difference is that $\lambda$Scale scatters the parameters scaling on multiple instances
+to reduce the time for scaling at the cost of decreased serving throughput,
+while {\sys} seamlessly scales full parameters on all instances with a similar speed,
+yet does not sacrifice the throughput thanks to our multicast-chain-based scaling.
+Moreover, during scaling {\sys} has a gradually increasing throughput thanks to our live scaling
+while $\lambda$Scale is still a stop-the-world approach.
+\iffalse
+The key difference is that $\lambda$Scale mixes multiple new instances during scaling in a pipeline parallelism manner, allowing 
+each instance to start serving when receiving fewer parameters (i.e., several layers of one PP stage), while {\sys} preserves an independent abstraction of each scaling instance. 
+In detail, $\lambda$Scale uses multi-step binomial multicast for different pipeline stages, so multicast time increases as the number of scaling instances grows. 
+Meanwhile, {\sys} employs multiple broadcast chains and leverages aggregated network bandwidth, achieving reduced multicast time even as the number of scaling instances grows. 
+Moreover, $\lambda$Scale adopts a new-new collaborative execution pattern, resulting in a stepwise throughput increase 
+because each new instance must transfer one PP stage before execution.
+In contrast, {\sys}'s collaborative execution follows a new-old fashion, with throughput increasing gradually during the scaling process, 
+further eliminates stop-of-the-world time in serverless LLM inference. 
+The idea of {\sys} can be seamlessly combined with $\lambda$Scale and achieve ultra-fast autoscaling.
+\fi
+
+
+\stitle{Accelerating coldstart in serverless computing. }
+Accelerating model scaling builds upon coldstart acceleration in
+serverless computing~\cite{sock,sand,FAASM,DBLP:conf/asplos/DuYXZYQWC20,DBLP:conf/asplos/Ustiugov0KBG21,DBLP:conf/eurosys/SaxenaJSKA22,DBLP:conf/usenix/WangCTWYLDC21},
+which focuses on starting general-purpose computing instances like containers. 
+We built upon these works, e.g., for accelerating container startup time,
+yet designed efficient network-based live autoscale tailored for model scaling
+with the domain-specific knowledge of model serving.
+\iffalse
+For example, serving instances still need to start up containers first.
+A key difference is that current general-purpose acceleration techniques,
+e.g., on-demand loading~\cite{DBLP:conf/eurosys/WangHW19,mitosis}
+that skips loading all data, are not applicable to model serving
+because models require all parameters for execution.
+{\sys} overcomes this challenge by leveraging domain-specific knowledge of the layer-by-layer execution
+pattern of models for acceleration.
+Meanwhile, our multicast is tailored for model serving
+as the instance sizes are orders of magnitude larger than the container sizes in traditional serverless computing.
+\fi

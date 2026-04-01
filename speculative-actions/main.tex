@@ -1,0 +1,271 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference,times}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xspace}
+\usepackage{todonotes}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{wrapfig}
+\usepackage{enumitem}
+\usepackage[most]{tcolorbox}
+\usepackage{minted}
+% \usepackage{times}
+\usepackage{makecell} 
+\usepackage[capitalise]{cleveref}
+\usepackage{amsthm}
+\usepackage{txfonts}
+
+% Theorem styles
+\theoremstyle{plain} % default: italic text, bold heading
+\newtheorem{theorem}{Theorem}% [section] means numbering resets per section
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\theoremstyle{definition} % upright text, bold heading
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark} % italic heading, normal text
+\newtheorem{remark}[theorem]{Remark}
+
+
+
+\def\addauthnote#1#2{
+    \expandafter\def\csname#1\endcsname##1{\todo[inline,size=\footnotesize,color=#2]{\textbf{\underline{\texttt{#1}}:} ##1}\xspace}
+}
+
+\addauthnote{kostis}{green!25}
+\addauthnote{georgios}{yellow!30}
+\addauthnote{naimeng}{blue!25}
+\addauthnote{lucy}{orange!25}
+\addauthnote{tianyi}{red!25}
+
+
+\title{Speculative Actions: A Lossless Framework for Faster Agentic Systems}
+
+% Authors must not appear in the submitted version. They should be hidden
+% as long as the \iclrfinalcopy macro remains commented out below.
+% Non-anonymous submissions will be rejected without review.
+
+\author{Naimeng\,Ye\thanks{Equal contribution},\, Arnav\,Ahuja\footnotemark[1],\, Georgios\,Liargkovas\footnotemark[1],\, Yunan\,Lu\footnotemark[1],\, Kostis\,Kaffes, Tianyi\,Peng \\
+Columbia University\\
+New York, New York, USA \\
+\texttt{\{ny2336, aa5790, gl2902, yl4021, kk3664, tp2845\}@columbia.edu}
+}
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
+\begin{document}
+
+
+\maketitle
+
+\begin{abstract}
+Despite growing interest in AI agents across industry and academia, their execution in an environment is often slow, hampering training, evaluation, and deployment. For example, a game of chess between  two state-of-the-art agents may take hours. A critical bottleneck is that agent behavior unfolds sequentially: each action requires an API call, and these calls can be time-consuming. Inspired by speculative execution in microprocessors and speculative decoding in LLM inference, we propose \emph{speculative actions}, a lossless framework for general agentic systems that predicts likely actions using faster models, enabling multiple steps to be executed in parallel. We evaluate this framework across three agentic environments: gaming, e-commerce, web search, and a ``lossy'' extension for an operating systems environment. In all cases, speculative actions achieve substantial accuracy in next-action prediction (up to 55\%), translating into significant reductions in end-to-end latency. Moreover, performance can be further improved through stronger guessing models, top-$K$ action prediction, multi-step speculation, and uncertainty-aware optimization, opening a promising path toward deploying low-latency agentic systems in the real world.
+\end{abstract}
+\vspace{-10pt}
+\section{Introduction}
+\label{sec:intro}
+Large language model (LLM)-driven agents are shifting from single-shot predictions to processes that run inside rich environments: browsers, operating systems, game engines, e-commerce stacks, and human workflows.
+These environments are not incidental; they determine what the agent can observe and do, gate progress through interfaces and rate limits, and dominate end-to-end latency.
+In practice, the agent’s behavior unfolds as a sequence of environment steps (tool calls, MCP server requests, human-in-the-loop queries, and further LLM invocations), each with non-trivial round-trip time and cost.
+As capabilities improve, a new bottleneck emerges: time-to-action in the environment.
+Even when accuracy is high, an agent that pauses too long between steps is impractical for interactive use or high-throughput automation. 
+
+
+\begin{table}[h]
+\centering
+\setlength{\tabcolsep}{8pt}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{*{4}{c}} % 4 tasks
+\toprule
+\makecell{\textbf{OS Tasks}\\ \citep{abhyankar2025osworld}} &
+\makecell{\textbf{Deep Research}\\ \citep{openai2025deepresearch}} &
+\makecell{\textbf{Data Pipeline}\\ \citep{jin2025elt}} &
+\makecell{\textbf{Kaggle Chess Game}\\ \citep{KaggleGameArena}} \\
+\midrule
+10–20 min & 5–30 min & 30–45 min & 1 hour \\
+\bottomrule
+\end{tabular}
+\caption{\centering \textbf{Estimated time state-of-the-art AI agents spend on various tasks/environments.}}
+\label{tab:Agent-Wall-Time}
+\end{table}
+As shown in Table \ref{tab:Agent-Wall-Time}, AI agents may require tens of minutes to hours to complete a single run across different environments, a cost that grows significantly when hundreds or thousands of iterations are needed for reinforcement learning or prompt optimization \citep{agrawal2025gepa}.
+
+
+Fundamentally, this inefficiency arises from the inherently sequential nature of API calls.
+Thus, we ask a simple question in this paper:
+\vspace{-7pt}
+\begin{quote}
+\emph{Must an agent interact with its environment in a strictly sequential manner?}
+\end{quote}
+Our answer is no.
+Inspired by speculative execution in microprocessors and speculative decoding for LLM inference, we propose \emph{speculative actions}: a general framework that allows agents to predict and tentatively pursue the most likely next actions using faster models, while slower ground-truth executors (powerful LLMs, external tools, or humans) catch up.
+In effect, the agent stages environment interactions (prefetching data, launching safe parallel calls, and preparing reversible side effects) so that validation, not waiting, is the critical path.
+When those slower evaluators confirm the guesses, progress has already been made; when they disagree, we execute as usual.
+The result is an \emph{as-if-sequential, lossless interface with parallel, opportunistic internals}.
+
+Concretely, in such agents, speculative actions introduce two roles in the environment loop:
+
+\begin{itemize}[leftmargin=*]
+    \item \emph{Actor(s)}: authoritative but slower executors (e.g., more capable LLMs, external APIs/tools, the environment’s own responses, or humans) whose outputs materialize the ground truth for correctness and side effects.
+    \item \emph{Speculator(s)}: 
+    inexpensive, low-latency models that predict the next environment step, i.e., the action, its arguments, and the expected observation or state delta. Examples include smaller LLMs, simplified use of the same LLM with reduced prompts and reasoning steps, and domain heuristics.
+\end{itemize}
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\linewidth]{figures/Speculative_figure_1.pdf}
+    \caption{Illustration of our framework in a chess-playing environment. While the Actor issues an LLM call to decide the next move, the Speculator uses a faster model to guess it. These guesses enable parallel API calls for the next steps, and once a guess is verified, the system gains time through parallelization. The process runs in the backend, ensuring a lossless speedup for the user.}
+    \label{fig:figure_1}
+\end{figure}
+
+% This design yields three practical acceleration modes:
+
+% \begin{itemize}[leftmargin=*]
+%     \item \emph{LLM-for-LLM} speculation: a fast model predicts the output (or sufficient control signals) of a slower, stronger model so the environment pipeline can keep moving without blocking on the validator.
+%     \item \emph{LLM-for-tool} (or human) speculation: a model predicts likely API/human responses, enabling early environment interactions such as pre-issuing idempotent reads, warming caches, reserving items with TTLs, or staging purchases and forms pending confirmation.
+%     \item \emph{Proactive action under deadline}: when the cost of inaction in the environment exceeds the expected penalty of a suboptimal move, a fast model takes a reversible or low-stakes action immediately (hold a seat, start a cancellable job, quickly adjust an OS policy), with later correction if needed.
+% \end{itemize}
+
+A key design goal is losslessness relative to the environment’s baseline semantics: speculative actions should not degrade final outcomes versus a strictly sequential agent.
+We achieve this with (a) semantic guards (actors confirm equivalence of state transitions before commit), (b) safety envelopes (only idempotent, reversible, or sandboxed speculative side effects), and (c) repair paths (rollback or compensating actions when a guess is rejected).
+In many environments (e.g., web search pipelines, shopping carts before checkout, and OS-level operations in a sandbox) these patterns are natural and inexpensive to implement.
+
+
+\textbf{Can we guess the next API calls of agents?} We show that, in practice, API intents can often be guessed with reasonable accuracy. In particular, we demonstrate speculative actions across four environments, each highlighting different aspects of agent latency:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Turn-based gameplay} (e.g., chess): the Speculator can predict the opponent's move while waiting for its turn.
+See \cref{fig:figure_1}.
+    \item \textbf{E-commerce}: while conversing with a human shopper, the Speculator can proactively infer the shopper's intent (e.g., returning an item), and safely trigger tool calls in advance (e.g., checking return eligibility).
+    % \item \textbf{Web search \& question answering}
+    \item \textbf{Multi-hop web search}: while awaiting results from slow external calls (e.g., Wikipedia), the Speculator can guess answers from its knowledge base, and execute subsequent search queries.
+ 
+    % network-bound pipelines benefit from speculative query execution, snippet extraction, and prefetching.
+    \item \textbf{Operating systems (lossy extension)}: speculative, reversible actions react immediately to workload and environment changes, boosting end-to-end application performance while actors confirm.
+\end{itemize}
+
+% Across these settings, we observe substantial acceleration---up to 50\% accuracy in predicting the next API calls and 30\% end-to-end lossless speedup. These results are achieved with a simple implementation using single-step speculation, and can be improved upon performance can be further boosted with advanced techniques such as adaptive speculation.  Qualitatively, users experience truly interactive agents that feel responsive even when authoritative components are slow.
+
+Across these settings, we observe substantial acceleration---up to 55\% accuracy in predicting the next API calls and 20\% end-to-end lossless speedup. These results are achieved with a simple implementation using single-step speculation, and can be improved upon with advanced techniques such as adaptive speculation. We make our code publicly available at \url{https://github.com/naimengye/speculative-action}.
+% Qualitatively, users experience truly interactive agents that feel responsive even when authoritative components are slow.
+
+
+\subsection{Related Work}
+\label{sec:related}
+
+\paragraph{Speculation in microprocessors}
+Speculation emerged in computer architecture to increase parallelism
+by executing instructions before their outcomes were resolved~\citep{tomasulo1967efficient}, 
+rolling back when predictions were wrong and became central to high-performance processors~\citep{lam1992limits}. In light of security vulnerabilities that exploit microarchitectural speculative execution, \citep{mambretti2019speculator} developed Speculator to analyze CPU speculation behavior. 
+
+\paragraph{Speculative program execution} Thread-level speculation executes sequential program fragments in parallel. It assumes that those program fragments are independent and can be safely parallelized, but must roll back and resolve conflicts if it turns out some threads are data dependent~\citep{10.1145/2938369}. Recently, \citep{liargkovas2023shell} explored the use of tracing and containment to speculatively but safely run shell scripts out of order.
+
+\paragraph{Speculative decoding in LLM inference}
+The same predict-verify pattern was recently applied to large language models. 
+Speculative decoding accelerates autoregressive inference 
+by using a small draft model to propose tokens that a larger target model verifies in batches, 
+committing correct ones and regenerating failures~\citep{leviathan2023fast,zhang2024beyond,chen2023acceleratinglargelanguagemodel}. 
+%Refinements include adaptive draft lengths~\citep{liu2025adaptive}, 
+%ensembles~\citep{lee2024inbatch,fu2025fast},
+%and online distillation to continually adapt the draft model~\citep{liu2023online,zhou2023distillspec,ouyang2024temperature,gui2024boosting}. 
+At the reasoning level, speculation has also been used to accelerate chain-of-thought processes~\citep{wang2025acceleratinglargelanguagemodel,wang2025efficientreasoningllmsspeculative,fu2025scaling}.
+In all cases, speculation reduces latency in sequential pipelines by executing likely future steps in parallel with their validation.
+
+\paragraph{Other applications of speculations} Speculation has been widely applied in a number of systems contexts. For example, Speck~\citep{nightingale2008parallelizing} uses it to parallelize otherwise sequential security checks, and AutoBash~\citep{su2007autobash} uses it to test configuration changes in isolation. More recently, \cite{farias2024speeding} developed a speculative, GPU-friendly policy simulation technique for optimizing supply chain systems. 
+
+\textit{Motivated by these work, we propose a speculative framework for agentic systems to achieve lossless execution speedups.} Our approach is aligned with recent studies that speculate LLM API calls for planning tasks (\cite{hua2024interactivespeculativeplanningenhance}, \cite{guan2025dynamicspeculativeagentplanning}), but generalizes the idea to the \textbf{entire agentic environment}—by not only speculating LLM calls, but also internal and external tool APIs, MCP-server APIs, and even human responses. This yields a unified framework for agentic speculation, particularly consistent with the emerging “environment” and MCP perspectives on agentic systems, providing a powerful mechanism for breaking the bottleneck in the training and deployment of AI agents.
+
+% \paragraph{From token speculation to agent speculation} 
+% Speculation has also been applied in higher-level system contexts. 
+% For example, Speculator~\citep{mambretti2019speculator} let kernel processes bypass stalls, 
+% Speck~\citep{nightingale2008parallelizing} parallelized security checks,
+% and AutoBash~\citep{su2007autobash} tested configuration fixes in isolation. 
+% More recently, hS~\citep{liargkovas2023shell} used tracing and containment to speculatively execute shell scripts out of order.  \cite{farias2024speeding} parallelized speculative actions in a supply chain system. \cite{hua2024interactivespeculativeplanningenhance} and \cite{guan2025dynamicspeculativeagentplanning} applied speculative planning to speedup LLM-based task planning. 
+
+
+% Just as systems research moved from low-level instruction speculation to high-level command speculation, 
+% we proposed moving from token-level speculation to action-level speculation. 
+% We apply the same principles of prediction, containment, and rollback 
+% to the agent–environment boundary, 
+% enabling agents to speculate over real interactions while preserving correctness.
+
+% Recent work on agent action speculation by \cite{guan2025dynamicspeculativeagentplanning} and \cite{hua2024interactivespeculativeplanningenhance}
+% analyzes the tradeoffs of speculation depth and width in agentic planning, but largely in the abstract token space, ignoring environment latencies, tool interfaces, and side-effect management. 
+% For instance, Guan et al. learn an optimal speculation step $k$ to tune the latency–cost tradeoff. 
+% We instead treat the step size $k$ as the number of speculative environment steps and train a value model on measured latency and rollback costs to steer speculation under budget/latency limits.
+
+
+
+
+\section{Framework}
+\label{framework}
+\input{sections/framework}
+
+\section{Environments}
+
+We now instantiate speculative actions in three environments---chess, e-commerce dialogue, and multi-hop web search---chosen 
+to stress distinct latency bottlenecks (reasoning, tool/API round trips, and information retrieval).
+In each case we pair a fast Speculator with a slow Actor and implement Algorithm~\ref{alg:speculative-k}. We report prediction accuracy and end-to-end time saved. 
+
+% under lossless, as-if-sequential semantics, 
+% committing only when validated and discarding mismatches, and we report prediction accuracy and end-to-end time saved.
+
+\label{sec:environments}
+\input{sections/chess}
+\input{sections/ecommerce}
+\input{sections/hotpotqa}
+\input{sections/hyperparameter_tuning}
+\input{sections/conclusion}
+
+
+
+
+% \section*{Ethics Statement}
+% We confirm that all authors have read and adhered to the ICLR Code of Ethics. Our work introduces a framework for accelerating AI agents, which has several ethical dimensions. The "lossy" OS tuning agent directly modifies a live system's parameters, which carries inherent risks if not properly managed. We address this by proposing safety mechanisms such as last-write-wins for easy rollbacks and discussing the importance of safety envelopes and repair paths, as detailed in our framework (\S\ref{framework}) and the OS tuning case study (\S\ref{sec:os-speculation}). While our e-commerce and human-expert experiments were conducted using simulators and consenting expert participants, the deployment of such agents in real-world human-in-the-loop systems would require further study into user experience and safety. The underlying LLMs may also inherit biases from their training data, and care must be taken to evaluate and mitigate these before deployment in sensitive, user-facing applications.
+
+% \section*{Reproducibility Statement}
+% We are committed to ensuring the reproducibility of our work. To this end, all source code for our speculative action framework, experimental environments, and analysis scripts will be made publicly available . Our experiments are conducted on publicly available benchmarks, including TextArena for chess, $\tau$-bench for e-commerce, and HotpotQA for web search, ensuring that other researchers can build upon our results. The OS tuning experiments use the open-source sysbench tool.
+
+% Details regarding the experimental setup, including hardware specifications, software versions, and specific configurations for each environment, are provided in the main text and extensively in \S\ref{app:additional_details}. This includes the specific LLMs used (e.g., GPT and Gemini model families), reasoning budgets, and the exact prompts. The core logic of our framework is detailed in Algorithm~\ref{alg:speculative-k}. We believe these resources provide a clear path for reproducing our findings.
+
+
+%\input{sections/discussion}
+% \subsubsection*{Author Contributions}
+% If you'd like to, you may include  a section for author contributions as is done
+% in many journals. This is optional and at the discretion of the authors.
+
+% \subsubsection*{Acknowledgments}
+% Use unnumbered third level headings for the acknowledgments. All
+% acknowledgments, including those to funding agencies, go at the end of the paper.
+
+
+\bibliography{iclr2026_conference}
+\bibliographystyle{iclr2026_conference}
+
+\appendix
+\input{sections/appendix}
+
+
+\end{document}

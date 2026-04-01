@@ -1,0 +1,55 @@
+\section{Evaluation}
+
+The benchmark is conducted with 8 Nvidia A100 (80GB) GPUs. It should be noted that only 4 pairs of adjacent GPUs are connected via NVLink, others are connected via PCI-e. 
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{|c|c|c|c|}
+        \hline
+        experiment ID & \#GPUS & Hidden size & \#params(billion)\\
+        \hline
+        $\alpha$ & 1 & 2048 & 0.409\\
+        \hline
+        $\beta$ & 2 & 4096 & 1.221\\
+        \hline
+        $\gamma$ &4 & 8192 & 4.053\\
+        \hline
+        $\delta$ & 8 & 16384 & 14.550\\
+        \hline
+    \end{tabular}
+    \caption{\textbf{GPT2 Model congiuration for experiments. We fix the number of layers as 4, and the sequence length as 1024. The reason we choose a relatively small layer number is that pipeline parallelism will split the model into partitions in which the number of transformer blocks is as small as our setting.}}
+    \label{tab:experiment setting}
+    \vspace{-1.9em}
+\end{table}
+
+For weak scaling, the problem size scales up as the number of devices increases. We compare our solution with Megatron-LM~\cite{shoeybi2019megatron} (1D tensor parallelism), Optimus~\cite{https://doi.org/10.48550/arxiv.2104.05343} (2D tensor parallelism) and ~\cite{https://doi.org/10.48550/arxiv.2105.14450} (3D tensor parallelism). The specific setting is shown in Tabel~\ref{tab:experiment setting}. The performance data is shown in Table~\ref{tab: experiment performance}. DDP is not included here because it encounters an out-of-memory issue when the problem size increases.
+
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{|c|c|c|c|c|}
+        \hline
+        experiment ID & Megatron & Optimus & 3D TP & ours\\
+        \hline
+        $\alpha$ & 0.161 & 0.161 & 0.161 & 0.161\\
+        \hline
+        $\beta$ & 0.324 & - & - & 0.332\\
+        \hline
+        $\gamma$ & 0.528 & 0.368 & - & 0.604\\
+        \hline
+        $\delta$ & 0.728 & - & 0.715 & 0.824\\
+        \hline
+    \end{tabular}
+    \caption{\textbf{Weak scaling performance. The model settings refer to Table~\ref{tab:experiment setting}. We measure the total PFLOPS for each training method.}}
+    \label{tab: experiment performance}
+    \vspace{-2em}
+\end{table}
+
+
+% \noindent\textbf{1D TP.} The performance of 1D tensor parallel\cite{shoeybi2019megatron} solution drop quickly. The reason is that the communication required in 1D TP occurs in all devices, but the bottleneck of communication bandwidth decreases as more devices are involved. For the 2 GPUs case, they are connected via NVLink with over 200GB/s bandwidth. For the 4 GPUs case, the bottleneck becomes to PCI-e in a NUMA node which has 20GB/s communication bandwidth. For the 8 GPUs cases, the bottleneck is the connection traversing PCI-e between NUMA nodes which have about 10GB/s communication bandwidth. \par
+
+% \noindent\textbf{Optimus and 3D TP.} Optimus~\cite{https://doi.org/10.48550/arxiv.2104.05343} and 3D tensor parallelism method~\cite{https://doi.org/10.48550/arxiv.2105.14450} cannot apply to arbitrary cases. Since both of them have requirements for the number of devices participating in training, 2D requires the number of devices to be a square number, and 3D requires the number of devices to be a cubic number. Additionally, these methods encounter the same issue as 1D TP due to communication bandwidth bottleneck.\par
+
+% \noindent\textbf{Ours.} 
+
+It can be observed that our system has the best performance in all cases, the reason is that our solver leverages the cluster information and the execution plan is adaptive to hardware configuration. For example, our execution plan for the experiment applies a data-parallelism-like strategy in devices across NUMA nodes and applies a tensor-parallelism-like strategy in 4 devices in a NUMA node. Our solution avoids the communication operations for tensor parallel via the cross NUMA PCI-e connection, and the communication operations via the lowest bandwidth connection could overlap with the backward computation.

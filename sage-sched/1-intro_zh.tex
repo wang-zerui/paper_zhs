@@ -1,0 +1,40 @@
+%!TEX root = main_zh.tex
+\section{引言}
+\label{sec:intro}
+
+大语言模型（LLM）已经深刻改变了多个应用领域，从对话助手~\cite{openai_chatgpt,deepseek}到智能体与具身系统~\cite{chen2023typefly,wang2024llm}。
+随着 LLM 被广泛采用，海量推理请求通常会在 GPU 服务端并发处理~\cite{sun2024llumnix}。
+在此背景下，调度目标越来越强调最小化整体服务延迟，即\emph{最后一个 Token 时间}（TTLT），以优化端到端用户体验~\cite{shahout2024don,qiu2024efficient}。
+
+然而，与传统负载不同，LLM 推理在资源需求上存在两个关键特性：\emph{不确定性}与\emph{混合性}。
+
+一方面，由于自回归生成机制，LLM 推理的输出长度在执行前\emph{不可确定}，不确定性很强~\cite{yu2022orca}；相比之下，操作系统~\cite{lozi2016linux}或大数据~\cite{ousterhout2015making}负载通常具有可重复且稳定的资源模式。
+另一方面，LLM 推理同时包含大量矩阵计算并强依赖 KVCache~\cite{qin2024mooncake}，因此既是\emph{计算密集型}也是\emph{显存密集型}；相比之下，OS 进程调度通常主要关注计算开销~\cite{abrossimov1989generic}。
+
+面对这两类特性，现有 LLM 调度器难以达到高效率。
+主流框架如 vLLM~\cite{kwon2023efficient} 和 SGLang~\cite{zheng2024sglang}采用传统\emph{先来先服务}（FCFS），容易引发\emph{队首阻塞}并抬高整体 TTLT。
+尽管近期工作~\cite{shahout2024don,qiu2024efficient,fu2024efficient}尝试利用预测输出长度近似\emph{最短作业优先}（SJF），仍存在明显不足。
+\textbf{第一}，这类方法往往依赖微调模型直接预测输出长度，既\emph{重}（训练与推理成本高）又\emph{不准}（难以逼近原始生成过程）。
+同时，现有方法常以输出长度作为排队依据，忽略了需求混合性，无法刻画真实服务代价。
+此外，它们通常只用单一均值作为排序指标，未能利用请求固有的不确定性分布信息。
+
+为此，本文提出 \oursched：一种通过显式处理需求不确定性与混合性来提升效率的 LLM 调度器。
+\oursched 包含三项关键技术。
+\emph{第一}，在需求预测上，我们利用“提示词相似性与输出长度相似性相关”的观察，提出\emph{语义感知的历史检索预测器}，融合\emph{提示词内容}与\emph{历史推理结果}来预测输出长度分布。
+该方法避免了为每个 LLM 维护重型预测模型，也绕开了直接模拟生成过程的复杂性。
+\emph{第二}，在代价建模上，我们同时考虑\emph{计算}与\emph{显存}两个维度的资源竞争。
+通过分别分析计算瓶颈与显存瓶颈场景，我们建立\emph{统一代价模型}，始终能更准确地刻画请求真实服务代价。
+\emph{第三}，鉴于请求服务代价更适合以分布形式表达，我们采用\emph{不确定性感知调度策略}。
+具体而言，在排队时根据代价分布计算\emph{Gittins 指数}，该指数已被证明对“时长未知但分布已知”的作业可实现最优整体性能~\cite{gittins1979bandit}；同时我们周期性刷新在途请求的 Gittins 指数以保证调度时效性。
+
+我们在 vLLM~\cite{vllm_v0_8_2} 上实现了 \oursched，并在多种真实 LLM 轨迹上评估性能。
+实验表明，在平均 TTLT 指标上，\oursched 相比最先进基线可提升超过 28.7\%。
+深入分析进一步验证了 \oursched 三类技术（预测、建模、调度）各自的有效性。
+此外，大规模仿真显示 \oursched 能以较低调度开销良好扩展到大集群。
+
+总的来说，本文贡献如下：
+\begin{itemize}
+    \item 通过测试床实测，我们识别出现有调度器在应对 LLM 负载不确定性与混合性时的关键局限。
+    \item 我们设计了 \oursched，集成三项核心技术：语义感知历史预测、资源瓶颈驱动代价建模与不确定性感知请求排队，从而实现更优 TTLT。
+    \item 我们通过测试床实验与仿真系统评估 \oursched，结果显示其效率提升显著，TTLT 改进超过 28.7\%。
+\end{itemize}

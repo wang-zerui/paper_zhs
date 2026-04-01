@@ -1,0 +1,54 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\appendix
+\onecolumn
+
+\section{相关工作完整版}
+我们的工作聚焦于在不确定且混合（计算--显存）需求下进行\emph{请求级调度}；以下研究方向大多与 \oursched 正交，可组合使用。
+
+\phm{LLM 推理加速。}
+大量工作旨在降低 LLM 推理的\emph{单 token}计算与显存代价。
+在算子/内核层面，FlashAttention 与 FlashAttention-2 通过重组注意力计算改善内存局部性并减少冗余读写，实现更快且更省显存的精确注意力~\cite{dao2022flashattention,dao2023flashattention}。
+模型压缩与低比特量化也可在维持精度前提下降低内存占用，例如 INT8 矩阵乘与 Transformer 权重后训练量化~\cite{dettmers2022gpt3,frantar2022gptq}。
+近期解码加速方法广泛利用\emph{投机执行}：投机解码先由快速草稿模型提出多个 token，再由目标模型验证~\cite{leviathan2023speculative}；后续系统通过 token-tree 验证与在线机制进一步提升效率~\cite{miao2023specinfer,liu2023online}。
+
+除 token 级优化外，系统层设计也在改进端到端流水线。
+Prefill--Decode 解耦将吞吐导向的 prefill 与时延敏感的 decode 分离，并重构多设备间 KVCache 放置~\cite{zhong2024distserve,qin2024mooncake,hu2024memserve,hu2024inference}；
+chunked-prefill 则通过长上下文 prefill 与 decode 重叠并提升缓存复用，更好平衡吞吐与时延~\cite{agrawal2024taming,hu2024inference}。
+
+这些技术提升的是“每个请求如何更快执行”；\oursched 与之互补，关注在资源受限且请求长度变化时“下一步该服务哪个请求”。
+
+\phm{LLM 服务架构与多路复用。}
+许多系统通过重构批处理、准入控制和多租户资源共享来提升后端利用率。
+基础服务框架（如 Orca 风格连续批处理，以及 vLLM、SGLang 等现代引擎）强调设备高利用与高效 KVCache 管理~\cite{yu2022orca,kwon2023efficient,zheng2024sglang}。
+在多模型、多租户场景中，近期工作探索更细粒度的复用与资源池化：MuxServe 支持时空复用以在共享 GPU 上协同多类 LLM 负载~\cite{duan2024muxserve}；Aegaeon 面向并发 LLM 服务提出有效的 GPU 池化机制~\cite{xiang2025aegaeon}。
+
+这些系统主要解决模型/租户间资源共享与放置问题；\oursched 则聚焦后端内部在服务时长不确定条件下的请求排序，可作为每 GPU（或每资源池）的调度模块接入。
+
+\phm{LLM 请求调度与公平性。}
+越来越多工作研究请求调度以缓解队首阻塞并优化尾时延。
+生产引擎通常从 FCFS 起步，虽然简单，但在请求长度异构场景下会明显恶化 TTLT~\cite{kwon2023efficient,zheng2024sglang}。
+FastServe 用 MLFQ 近似 SRPT，通过周期性降级优先级换取时延收益，但伴随额外抢占开销~\cite{wu2023fast}。
+更新的调度器采用\emph{预测后排序}范式：$S^3$ 通过微调小模型估计生成长度~\cite{jin2023s}，PO 让 LLM 预估自身输出长度~\cite{po}，SSJF 用代理模型预测输出长度并近似 SJF~\cite{qiu2024efficient}，学习排序方法预测相对长度顺序而非绝对值~\cite{fu2024efficient}。
+基于嵌入的调度器还会利用 LLM 中间层特征改进优先级估计~\cite{shahout2024don}。
+同时，公平性研究从效率与服务区分度之间张力出发提出公平调度机制~\cite{sheng2024fairness}；Llumnix 则引入运行时条件实现动态重排~\cite{sun2024llumnix}。
+
+与上述工作相比，\oursched 的差异主要有三点：
+(i) 采用\emph{分布级}（而非点估计）输出长度感知，避免单值预测脆弱性；
+(ii) 建模由 KVCache 增长带来的\emph{计算--显存混合代价}，而非仅用输出长度；
+(iii) 在抢占决策中显式考虑 I/O 影响，以避免过度交换同时保持优先级修正能力。
+
+\phm{KVCache 管理与长上下文服务。}
+由于解码阶段每步都要关注全部历史 token，KVCache 往往是主要显存瓶颈。
+PagedAttention（vLLM 中实现）通过分页式 KV 分配降低碎片并提高显存效率~\cite{kwon2023efficient}。
+除分配方式外，也有大量工作通过压缩或选择性保留降低 KVCache \emph{体积}：attention sink 通过稳定注意力模式支持高效流式推理~\cite{xiao2023efficient}；heavy-hitter 方法在显存受限时保留最关键 token 近似全注意力~\cite{zhang2023h2o}。
+近期还有跨时间动态管理方案：InfiniGen 提出高效生成推理的动态 KVCache 管理~\cite{lee2024infinigen}；KIVI 通过无需调参的非对称 2-bit KV 量化降低显存与带宽压力~\cite{liu2024kivi}。
+
+这些进展提升了可并发度和单步效率；\oursched 与其正交，并可通过基于代价分布的优先级进一步降低 TTLT，从而更充分利用 KVCache 增长与资源竞争信息。
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

@@ -1,0 +1,86 @@
+\section{实验评估}
+\label{sec:eval}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=\linewidth]{figs/benchmark.pdf}
+    \vspace{\captionvspace}
+    \caption{在 A100、H100 和 B200 上，比较 \sys 与现有系统在五个模型上的性能。所有结果均以 \sys 归一化（越高越好）。每个 \sys 柱子上方的数字表示它相对于当前最优基线的加速比。Qwen3-30B-A3B 在 A100 上的结果被省略，因为该模型无法放入单张 A100。}
+    \vspace{\captionvspace}
+    \label{fig:end_to_end}
+\end{figure*}
+
+本节围绕三个问题评估 \sys。首先，\Cref{subsec:end_to_end} 将 \sys 的 mega-kernel 执行模型与最先进的按算子逐核执行系统进行对比。其次，\Cref{subsec:multi_gpu} 分析 \sys 在大规模 DNN 多 GPU 执行中的可扩展性与效率。最后，\Cref{subsec:abalation} 研究 \sys 中各项优化对整体性能提升的贡献。
+
+我们将评估重点放在 LLM serving 上，原因有二。其一，这一场景已经存在 SGLang 与 vLLM~\cite{zheng2024sglang, kwon2023vllm} 等经过充分优化的按算子逐核执行基线，因此非常适合检验 \sys 的优势。其二，LLM serving 天然具有动态性：不同迭代中的 batch size、sequence length 以及 prefill/decode 的比例都可能发生显著变化，这种异构工作负载同时考验编译器与运行时。需要说明的是，\sys 的编译器与运行时本身并不依赖具体模型，也可以支持任意 DNN 架构。
+
+\input{impl_zh}
+
+\begin{table}
+    \centering
+    \caption{\sys 在实验中的配置。}
+    \label{tab:benchmarks}
+    \begin{tabular}{l|lll}
+    \toprule
+    {\bf GPU} & {\bf SM 数量} & {\bf Worker 数量} & {\bf Scheduler 数量}\\
+    \midrule
+    A100 & 108 & 104 & 16 \\
+    H100 & 132 & 128 & 16 \\
+    B200 & 148 & 144 & 16 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{实验设置}
+我们在五个广泛部署的 LLM 上评估 \sys，这些模型覆盖了不同参数规模与架构家族，同时测试三代 NVIDIA GPU：A100、H100 与 B200。 \Cref{tab:benchmarks} 总结了每种 GPU 上的 \sys 配置。所有实验中，我们固定保留 4 个 SM 给 scheduler，因此共有 16 个 scheduler warp；其余 SM 则分配给 worker。所有 GPU 的 shared-memory page size 都固定为 32KB，对应在 A100、H100 与 B200 上分别拥有 5、7 和 7 个页面。
+
+为了排除请求到达模式的干扰，所有实验均采用 {\em 离线} 的批量推理设置，并测试不同的最大 batch size。每个请求都使用固定长度为 64 的 prompt，并生成 1024 个 token。这样可以避免因请求并发不足导致的服务端阻塞，从而更干净地比较由 \sys 带来的系统级性能收益。
+
+\subsection{端到端结果}
+\label{subsec:end_to_end}
+
+我们首先把 \sys 与 SGLang 和 vLLM 这两个最先进的 LLM serving 系统进行端到端比较。后两者都采用按算子逐核执行的方法，并依赖大量专用 kernel 库，包括 FlashInfer~\cite{ye2025flashinfer} 与 FlashAttention~\cite{triton-flashattention} 实现高性能 attention，cuBLAS 与 cuTLASS~\cite{cutlass} 实现矩阵乘法，以及 CUDA 或 Triton~\cite{tillet2019triton} 实现其他算子。所有系统都通过 HuggingFace Transformers~\cite{huggingfacemodels} 加载模型，使用 bfloat16，并启用 paged attention~\cite{kwon2023vllm} 与 continuous batching~\cite{yu2022orca}。
+
+\sys 与这些系统的核心差异在于：\sys 将 page allocation 和 request scheduling 也直接融合进 mega-kernel 内部，而 SGLang 与 vLLM 仍在 CPU 侧执行这些工作，因此会引入额外的 host-device 同步与分发开销。实验表明，在 B200、H100 与 A100 上，面对从 batch size 1 到 16 的不同设置，\sys 都能在多个模型上稳定超过现有系统。整体来看，\sys 相对最优现有方案取得了 1.0--1.7$\times$ 的加速，并把 LLM serving 性能进一步逼近硬件极限。
+
+对于 MoE 模型，\sys 还针对 token 路由带来的额外预处理做了专门优化。以 SGLang 为例，路由到同一 expert 的 token 需要先被打包成连续布局；在 Qwen3-30B-A3B、batch size 为 1 的情况下，这一步最多可占到总 MoE 执行时间的 11\%。而在 \sys 中，如果额外引入独立预处理任务，反而会抬高调度开销。因此，\sys 将 token 级 gather 直接融合进 GEMM 任务的数据加载阶段，用异步拷贝替代独立 gather kernel，从而在不增加调度点的前提下完成高效数据搬运，并持续优于 SGLang 的实现。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/benchmark_multi_mpk.pdf}
+    \vspace{\captionvspace}
+    \caption{在 tensor parallelism 下，比较 \sys 与现有系统在多张 H100 上执行 Qwen3-1.7B 推理的性能。所有系统的结果均以 \sys 归一化（越高越好）。}
+    \vspace{\captionvspace}
+    \label{fig:end_to_end_multigpu}
+\end{figure}
+
+\subsection{多 GPU 结果}
+\label{subsec:multi_gpu}
+
+我们进一步在 NVIDIA H100 DGX 上评估 \sys 跨多 GPU 的扩展性。与对比基线一样，这里采用 Megatron-LM~\cite{Megatron} 中提出的 {\em tensor model parallelism}。用户只需在 attention 和 gated MLP 模块后插入 {\tt AllReduce} 层，\sys 就会自动把这些 collective operator 编译为两类任务：(1) 基于 NVSHMEM {\tt nvshmem\_signal\_wait\_until} 的跨 GPU 数据传输任务；(2) 本地归约任务。这样一来，同步的 collective 通信就被转换成完全异步的任务，可自然融入 \sys 的任务化、事件驱动运行时。
+
+\Cref{fig:end_to_end_multigpu} 展示了结果。与直接使用手工优化 kernel、CUDA Graphs 和 {\tt torch.compile} 的 PyTorch 相比，\sys 的 mega-kernel 执行可将吞吐提升最高 10$\times$。即便相对于 SGLang 与 vLLM 这类已经高度优化的服务系统，\sys 在扩展到 8 张 H100 时仍可取得 1.1--1.4$\times$ 的加速。这些收益主要来自三个基线系统缺失的优化：其一，\sys 在 mega-kernel 内完成 page allocation 与 request scheduling，消除了 CPU 侧分发开销；其二，\sys 的异步执行模型能够重叠计算任务与 collective 通信；其三，\sys 消除了 kernel barrier，并支持跨任务软件流水。后两项优化的影响会在下文消融实验中进一步分析。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/pipe_ablation_mpk.pdf}
+    \caption{跨任务流水的消融实验。我们在 NVIDIA B200 上测量 Qwen3-8B 最后一个线性层的运行时间，纵轴为实际耗时（微秒，越低越好），数字表示 \sys{}-Pipe 相对于 \sys{}-No-Pipe 的加速比。}
+    \label{fig:pipe_ablation}
+\end{figure}
+
+\subsection{消融实验}
+\label{subsec:abalation}
+本节评估 \sys 支持的两项关键优化：跨任务流水与计算-通信重叠。
+
+\paragraph{跨任务流水。}
+如 \Cref{subsec:runtime_optimizations} 所述，\sys 能在执行当前任务计算的同时，为下一个任务预加载输入张量块。 \Cref{fig:pipe_ablation} 展示了在 Qwen3-8B 最后线性层上的消融结果。启用跨任务流水后，单任务运行时间降低了 1.2--1.3$\times$，甚至超过了 cuBLAS 编译 kernel 的性能。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/benchmark_ab_multi.pdf}
+    \caption{计算-通信重叠的消融实验。我们在 4 张 H100 上、采用 tensor parallelism 运行 Qwen3-1.7B，比较有无计算-通信重叠时的单次迭代耗时（越低越好）。}
+    \label{fig:ablation_multigpu}
+\end{figure}
+
+\paragraph{计算-通信重叠。}
+\sys 通过细粒度任务依赖建模（见 \Cref{fig:compiler_workflow}），使运行时能够机会式重叠计算任务与通信任务。为了评估其作用，我们可以退化回粗粒度依赖表示，即只用单个事件表示 collective operator（如 {\tt AllReduce}）与之前任务之间的依赖关系，等价于 \Cref{fig:compiler_workflow}(c) 中的做法。 \Cref{fig:ablation_multigpu} 显示，启用计算-通信重叠后，单次迭代延迟还能再下降约 1.1$\times$。

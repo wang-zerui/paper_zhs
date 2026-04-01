@@ -1,0 +1,60 @@
+% =============================================================================
+\section{跨维交互：来自我们工作的经验}
+\label{sec:cross}
+% =============================================================================
+
+如果每个维度都被单独研究，跨维交互就很容易被忽略，但现实世界中的性能往往正是由它们主导的。下面我们形式化地总结我们的论文已经识别出的主要交互关系。
+
+\subsection{Workload $\times$ Router}
+\label{sec:cross:wr}
+
+\begin{observation}[工作负载决定路由器的自适应机制]
+\label{obs:wr-adapt}
+聊天工作负载会产生逐轮用户反馈；我们的 Feedback Detector~\cite{feedbackdet2026}能实时判断满意度，从而使路由器在不建立显式奖励模型的情况下，基于不满意信号进行重路由。智能体工作负载则没有这种逐轮信号，任务成功只有在多步会话末尾才可观测，因此基于 RL 的路由~\cite{routerr1_2025}更合适，因为它能够对顺序决策进行推理。自适应机制必须与工作负载的反馈粒度相匹配。
+\end{observation}
+
+\begin{observation}[模态决定路由信号]
+\label{obs:wr-modal}
+纯文本聊天使用嵌入相似度和关键词信号~\cite{vllmsr2026}。VLM 工作负载则需要多模态分类器，例如 AVR~\cite{avr2026}中的 SigLIP+MiniLM，因为纯文本信号无法评估截图复杂度。路由器的信号集合必须与工作负载的模态相匹配。
+\end{observation}
+
+\begin{observation}[工作负载决定路由中的安全与隐私需求]
+\label{obs:wr-safety}
+不同类型的工作负载，会对路由器施加不同的安全与隐私要求。聊天路由错误会带来质量下降；而多轮聊天还存在一个更隐蔽的威胁，即对抗性用户可以把越狱内容分散到多轮中，从而绕过单轮分类器。\vsr{}~\cite{vllmsr2026}通过对比嵌入分类来处理这一点，它评估的是轮次序列而不是单独的消息。CUA 路由错误则会造成真正的\emph{安全漏洞}：Visual Confused Deputy~\cite{vcd2026}表明，把某个 CUA 动作错误地路由给能力较弱的模型，会导致 grounding 错误，并可能被利用以完成权限提升。对于所有工作负载类型，我们的分层 MLCommons 安全流水线，即先二元门控~\cite{safetyl1_2026}、再九类危害分类~\cite{safetyl2_2026}，在路由层提供了统一的内容过滤，而且精度细到类别级，这使运营者可以执行工作负载特定的策略，例如阻断面向客户聊天中的隐私泄露提示，或在知识检索智能体中标记错误信息。安全与隐私应该被纳入路由目标之中，其中聊天需要多轮感知，智能体则需要动作级防护。
+\end{observation}
+
+\begin{observation}[事实型工作负载需要响应时验证]
+\label{obs:wr-halu}
+仅靠请求时路由并不能保证正确性：某个模型也许适合该查询所属的领域，却仍可能在某个具体事实点上产生幻觉。Factcheck Classifier~\cite{factcheck2026}在请求阶段识别事实查询提示（约 $\sim$12\,ms），HaluGate~\cite{halugate2025}则在响应阶段以 token 级粒度进行验证（额外开销为 76--162\,ms）。两者共同闭合了一个仅靠请求时路由无法闭合的回路：HaluGate 观察到的每模型幻觉率会反馈回路由策略，逐步把事实流量导向更可靠的模型。
+\end{observation}
+
+\subsection{Router $\times$ Pool}
+\label{sec:cross:rp}
+
+\begin{observation}[路由策略共同决定资源池规模]
+\label{obs:rp-codesign}
+FleetOpt~\cite{fleetopt2026}表明，将压缩参数 $\gamma$ 与资源池规模 $(n_s, n_l)$ 联合设计，比在既有资源池上事后加压缩，成本还可再降 3.1--6.4\%。路由器不是覆盖在资源池之上的一个附属层，而是联合设计变量本身。
+\end{observation}
+
+\begin{observation}[路由延迟约束资源池拓扑]
+\label{obs:rp-latency}
+FastRouter~\cite{fastrouter2026}表明，路由延迟是一个关键约束：在 4,918\,ms 的基线下，路由开销本身就超过了短上下文请求的 TTFT SLO。只有在把延迟降到 50\,ms、即完成 98$\times$ 加速之后，资源池路由才真正适用于整个请求流。mmBERT-Embed~\cite{mmberted2025}进一步强化了这一点：它的二维 Matryoshka 设计使运营者可以用质量换延迟（第 6 层 2.56\,ms，而第 22 层 11\,ms），从而即便资源池拓扑变得更复杂，相似度信号仍能留在路由延迟预算内。
+\end{observation}
+
+\begin{observation}[会话中途切换模型会产生 KV-cache 沉没成本]
+\label{obs:rp-sunkcost}
+在多轮会话中，如果 Feedback Detector~\cite{feedbackdet2026}或上下文记忆信号表明存在更好的模型，路由器就会面临一个两难局面。若在会话中途切换模型，就必须丢弃当前模型已经积累的 KV-cache，这是一种与会话长度和上下文规模成正比的\emph{沉没成本}。若不切换，则保住了缓存投资，但放弃了质量提升，而这种\emph{机会成本}会随着后续继续使用次优模型的轮次增加而上升。最优策略取决于剩余会话长度、模型之间的质量差距以及重建 KV-cache 的成本，因此会形成一条沉没成本与机会成本之间的 Pareto 前沿。当前还没有系统显式优化这一权衡。
+\end{observation}
+
+\subsection{Workload $\times$ Pool}
+\label{sec:cross:wp}
+
+\begin{observation}[工作负载原型决定最优拓扑]
+\label{obs:wp-topo}
+我们的集群工具~\cite{fleetopt2026, fleetsim2026}表明：Archetype~1（concentrated-below）最适合双池路由；Archetype~3（concentrated-above）则可能受益于解耦的 prefill/decode，因为大多数请求都很长；Archetype~2（dispersed）可能需要多层资源池。
+\end{observation}
+
+\begin{observation}[智能体普及会推动能效前沿变化]
+\label{obs:wp-energy}
+1/W 定律~\cite{onewlaw2026}预测，当工作负载从聊天转向智能体时，除非资源池拓扑也同步调整，否则整个集群的能效会下降 $2$--$4\times$。双池路由可以收回大部分损失，但前提是资源池边界能跟随工作负载演化。
+\end{observation}

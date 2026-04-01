@@ -1,0 +1,347 @@
+% =============================================================================
+\section{Dimension 1: Workload Characterization}
+\label{sec:workload}
+% =============================================================================
+
+Our fleet optimization work~\cite{poolrouting2026, fleetopt2026,
+fleetsim2026} showed that workload characterization drives the remaining
+design decisions.  We organize workloads
+along four axes.
+
+% -----------------------------------------------------------------------------
+\subsection{Chat vs.\ Agent Workloads}
+\label{sec:workload:chat-agent}
+% -----------------------------------------------------------------------------
+
+Chat workloads (LMSYS-Chat-1M~\cite{zheng2024lmsys},
+the Azure LLM Inference Trace published alongside
+Splitwise~\cite{patel2024splitwise}) are dominated by short prompts:
+80--95\% of requests fall below 8K tokens, with a heavy tail to 64K+.
+Agent workloads (SWE-bench~\cite{jimenez2024swebench},
+BFCL~\cite{patil2025bfcl}) exhibit prompt lengths that grow
+deterministically with turn number as tool outputs accumulate.
+ServeGen~\cite{servegen2025} reports that agents make 3--10$\times$
+more LLM calls per user request than chatbots.
+
+Both types are \emph{multi-turn}, but with different session
+structures.  Chat sessions are conversational: each turn
+carries implicit context from prior exchanges, and the user may
+shift topics, provide corrections, or gradually escalate adversarial
+probes across turns.  Agent sessions are task-driven: context grows
+monotonically as tool outputs accumulate, and the session terminates
+on task completion or failure.  Multi-turn APIs (such as OpenAI's
+Responses API) encode these patterns explicitly, offering
+conversation-state management and turn-level optimizations that
+single-request routing cannot exploit.  A multi-turn-aware router must maintain session context for two
+reasons: KV-cache affinity and routing signal quality.  Prior turns
+reveal user intent, topic drift, difficulty escalation, and safety
+violations that a single-turn classifier would miss.
+
+Our pool routing paper~\cite{poolrouting2026} first exposed how
+the chat/agent distinction creates routing opportunities: the
+80--95\% of short chat requests are over-provisioned in a
+homogeneous 64K fleet, wasting $7/8$ of KV-cache slots.  The
+deterministic turn-by-turn growth of agent sessions suggests that
+session-aware prediction could outperform per-category EMA for
+routing.
+
+\paragraph{Memory management as a hidden cost multiplier.}
+Beyond raw context growth, multi-turn sessions face a compounding
+cost problem rooted in memory management failures.  When an LLM
+hallucinates or selects the wrong tool, the erroneous output enters
+the conversation history and is re-sent on every subsequent
+turn---the organization pays input-token cost for content that
+\emph{reduced} accuracy.  The agent must either tolerate the
+polluted context (risking further errors through
+self-conditioning~\cite{driftbench2026}) or spend additional LLM
+calls to summarize, compress, or remove the bad turns before
+continuing.  AgentHallu~\cite{agenthallu2026} benchmarks this
+challenge: even frontier models achieve only 41.1\% accuracy at
+localizing which step caused a hallucination, dropping to 11.6\%
+for tool-use hallucinations---making targeted cleanup unreliable and
+often requiring full-context re-summarization.
+
+A comprehensive memory
+survey~\cite{memorysurv2026} identifies five mechanism families for
+agent memory (context-resident compression, retrieval-augmented
+stores, reflective self-improvement, hierarchical virtual context,
+and policy-learned management), each with distinct cost profiles.
+A direct cost-performance comparison~\cite{memcost2026} shows that
+at 100K-token context lengths, per-turn inference charges grow
+proportionally with context even under prompt caching, and
+fact-based memory systems become cheaper after approximately ten
+interaction turns---precisely the regime where agent sessions
+operate.  Context compression can mitigate the
+problem: ACON~\cite{acon2025} achieves 26--54\% peak-token reduction
+while preserving 95+\% task accuracy via failure-driven guideline
+optimization, and Focus~\cite{focus2026} demonstrates 22.7\% token
+savings through autonomous agent-driven context pruning on SWE-bench
+tasks.  However, both operate on the agent side, optimizing a
+single session in isolation.  This is a fundamental limitation:
+SAMULE~\cite{samule2025} shows that \emph{single-trajectory}
+reflection (the only level available to an individual agent)
+produces narrow error corrections, while \emph{inter-task} learning
+that aggregates failure patterns across diverse sessions yields
+transferable insights that significantly outperform per-session
+baselines.  CORRECT~\cite{correct2025} reinforces this: multi-agent
+errors recur with similar structural patterns across requests, and
+an online cache of distilled error schemata---built from prior
+sessions---improves step-level error localization by up to 19.8\%.
+Mistake Notebook Learning~\cite{mnl2025} demonstrates the same
+principle: batch-clustered failure analysis produces generalizable
+guidance that prevents known pitfalls without parameter updates.
+
+The router has a structural advantage that directly exploits this
+cross-session transferability: it observes outcomes from thousands
+of sessions per domain across all tenants, aggregating failure
+patterns into the per-\emph{(model, domain, failure-class)} table
+(\Cref{opp:failure-routing}).  An individual agent, by contrast, sees
+only its own session---too few examples to build reliable failure
+statistics or discover domain-specific compression policies (e.g.,
+``coding sessions tolerate aggressive early-turn pruning of failed
+tool traces; medical sessions must retain full context for compliance
+audits'').  The router provides this cross-session intelligence as a
+fleet-wide service that every agent benefits from immediately,
+including new agents that would otherwise face a cold-start problem.
+
+\paragraph{Gateway-native assistants and fleet observability.}
+OpenClaw~\cite{openclaw2026} is a concrete open-source example of the
+pattern \emph{personal assistant + local-first Gateway}: users talk
+to the agent over many messaging channels while a WebSocket Gateway
+coordinates sessions, tool execution (browser, automation, device
+nodes), and model calls.  Such deployments generate long, messy
+multi-turn traces---tool outcomes, retries, channel switches, and
+compaction events---that fixed academic benchmarks rarely capture.
+The inference router sits on the hot path for model traffic from
+those gateways and can log which model, tool surface, and safety path
+correlated with short vs.\ runaway sessions.  Aggregating traces
+across tenants supplies offline RL and fleet-prior datasets that a
+single local assistant cannot
+amass~(\Cref{opp:session-cascade}, \Cref{opp:tool-pruning}).
+Conversely, routing policies tuned for token- and round-minimization
+feed back into operators' choices of model defaults and tool budgets
+at the Gateway.
+
+\paragraph{Proxy-level instruction, tool, and memory surfaces.}
+ITR~\cite{itr2026} retrieves minimal system-instruction fragments
+and a narrowed tool subset per agent step; on the authors' controlled
+agent benchmark it reports $\sim$95\% lower per-step context tokens
+and large gains in correct tool routing because monolithic catalogs
+can consume $\sim$90\% of the context window.  The same mechanism can be implemented at an
+inference \emph{gateway}---rewriting \texttt{tools} payloads and
+system blocks before the request reaches the model---so frameworks
+that always send full catalogs still benefit from fleet-wide
+calibration.  ToolScope~\cite{toolscope2025} merges and filters tools
+on the agent side; SMART~\cite{smart2026} shows that curbing tool
+overuse improves both cost and downstream accuracy.  A router that
+coordinates narrowing, merging hints, and budget signals
+(BATS~\cite{bats2025}) avoids duplicating incompatible policies in
+every SDK.  Finally, memory is not only ``what the agent
+remembers'' but \emph{what the next prefill pays for}: MemCost-style
+analyses~\cite{memcost2026} show when fact stores beat raw context,
+and session-aware schedulers (AgServe~\cite{agserve2025},
+Continuum~\cite{continuum2025}) treat KV-cache lifetime and
+multi-turn structure as first-class resources.  The router is the
+natural place to choose among full history, injected summaries, and
+retrieval-first prefill for the next turn---reducing tokens
+\emph{and} the error compounding that lengthens
+rounds~(\Cref{opp:gateway-agent-loops}).
+
+% -----------------------------------------------------------------------------
+\subsection{Warm vs.\ Cold Requests}
+\label{sec:workload:warm-cold}
+% -----------------------------------------------------------------------------
+
+\emph{Warm} requests hit a KV-cache prefix from a prior turn or
+shared system prompt; \emph{cold} requests start from scratch.
+Cached tokens cost up to $10\times$ less~\cite{llmd2026kvcache},
+and prefix-cache-aware scheduling achieves $57\times$ faster
+response times in distributed deployments~\cite{llmd2026kvcache}.
+
+For agentic workloads, 40--60\% of session time involves paused tool
+calls, causing LRU eviction to collapse cache hit
+rates~\cite{vllm2026rfc37003}.  Session-affinity routing---keeping a
+session on the same pool instance---could preserve KV-cache locality.
+Category-aware semantic caching~\cite{wang2025cache} complements this
+at a higher level: domain-aware similarity thresholds and TTLs
+eliminate redundant inference requests entirely---returning cached
+responses for semantically equivalent queries without invoking the
+LLM, reducing both cost and load on the serving pool.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Prefill-Heavy vs.\ Decode-Heavy Workloads}
+\label{sec:workload:prefill-decode}
+% -----------------------------------------------------------------------------
+
+Vision-language models encode images into hundreds of visual tokens,
+making VLM workloads \emph{prefill-heavy}.  Our AVR
+system~\cite{avr2026} confronted this directly: CUA screenshots are
+$\sim$5\,MB, and routing 4K screenshots requires multimodal signal
+extraction.  FastRouter~\cite{fastrouter2026} showed that classical
+NLP compression can cap router input to $\sim$512 tokens regardless
+of original prompt length, making prefill-heavy workloads tractable
+for the routing layer itself.
+
+Coding agents are \emph{decode-heavy}: code generation produces long
+structured outputs.  The decode ratio directly affects whether
+disaggregated prefill/decode architectures
+(Splitwise~\cite{patel2024splitwise},
+DistServe~\cite{zhong2024distserve}) provide benefit, and our
+inference-fleet-sim~\cite{fleetsim2026} tool models this trade-off
+explicitly.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Workload Identity Signals}
+\label{sec:workload:identity}
+% -----------------------------------------------------------------------------
+
+Our prior work treats incoming requests as opaque text and infers
+workload type through content analysis---embedding similarity,
+keyword matching, and domain classifiers.  In practice, the request
+structure itself carries rich identity signals that the router can
+exploit without content inspection, opening the door to
+zero-latency workload classification.
+
+\paragraph{Explicit API-level signals.}
+Modern inference APIs already expose structural metadata that
+distinguishes agent from chat workloads:
+\begin{itemize}[nosep]
+  \item \textbf{Tool definitions.}  A request carrying a \texttt{tools}
+        array with function schemas is almost certainly an agent
+        workload; the number and types of tools (code execution,
+        web search, MCP connectors) further classify the agent's
+        operational mode.  The tool catalog itself is a cost lever:
+        ITR~\cite{itr2026} shows that dynamically exposing only the
+        minimal tool subset per step reduces per-step context tokens
+        by 95\% and improves correct tool routing by 32\%, because
+        monolithic tool catalogs consume up to 90\% of available
+        context.
+  \item \textbf{Session chaining.}  Fields such as
+        \texttt{previous\_response\_id} (OpenAI Responses API) or
+        conversation-state objects signal multi-turn continuations.
+        Their presence tells the router the request is mid-session
+        (enabling KV-cache retention, \Cref{opp:kv-retention}) and
+        provides the turn number without parsing conversation history.
+  \item \textbf{System-prompt fingerprints.}  System prompts are
+        typically static per deployment and can be hashed at the
+        gateway.  A lookup table of known hashes maps each deployment
+        to its domain, expected tool set, and historical session-length
+        distribution---giving the router a per-request prior at
+        zero classification cost.
+  \item \textbf{Gateway metadata headers.}  Production gateways
+        (Cloudflare AI Gateway's \texttt{cf-aig-metadata},
+        LiteLLM's \texttt{x-litellm-tags}, and custom
+        \texttt{X-Client-Request-Id} headers) already let operators
+        annotate requests with environment, team, and workload-type
+        tags.  SIRP~\cite{sirp2025} standardizes this with
+        classification-axis header fields.
+\end{itemize}
+
+\paragraph{Caller identity and authorization scope.}
+The four signal classes above describe \emph{what} the request is.
+None describes \emph{who} is making it or \emph{what they are
+authorized to do}.  The bearer token carried in every LLM API call
+fills this gap: in production gateways, it encodes caller identity
+\emph{and} authorization scope---which models a key can access, which
+tools it may invoke, and what budget it may consume.
+\begin{itemize}[nosep]
+  \item \textbf{Per-key tool permissions.}
+        LiteLLM's Tool Permission Guardrail~\cite{litellm2026toolguard}
+        enforces per-key tool allow/deny rules with regex matching on
+        tool names and arguments.  Two modes---\emph{block} (reject the
+        request) and \emph{rewrite} (strip forbidden tools before the
+        model sees them)---demonstrate that caller-scoped tool governance
+        is already production-ready at the gateway layer.
+  \item \textbf{Structured agent authorization.}
+        The Agent Authorization Profile
+        (AAP)~\cite{aap2026}---an emerging OAuth~2.0 extension---adds
+        five JWT claims: agent identity, capabilities with enforceable
+        server-side constraints (domain restrictions, rate limits, time
+        windows per tool), task binding (prevents scope drift), delegation
+        tracking, and audit trails.  Its core principle is that
+        ``authorization must be evaluated at execution time, not just
+        during connection.''
+  \item \textbf{Infrastructure analogue.}
+        Kubernetes RBAC with admission webhooks enforces per-identity
+        permissions at the API-server boundary regardless of what the
+        application inside the pod believes it should do---the same
+        zero-trust principle~\cite{nist800207} applied to LLM
+        requests.
+\end{itemize}
+The bearer token enables a new class of routing decisions absent
+from the current WRP roadmap: role-based tool-call enforcement
+(\Cref{opp:rbac-enforcement}), per-caller fleet-wide reputation
+scoring (\Cref{opp:caller-reputation}), and router-enforced
+behavioral commitments (\Cref{opp:behavioral-commitments}).  It
+also extends existing opportunities: per-caller cumulative risk
+accumulation (\Cref{opp:cumulative-risk}), cross-session token
+budgets (\Cref{opp:token-budget}), RBAC predicates in the
+governance DSL (\Cref{opp:governance}), role-aware tool catalog
+shaping (\Cref{opp:tool-pruning}), and caller-aware memory
+isolation (\Cref{opp:gateway-agent-loops}).
+
+\paragraph{Inferred structural signals.}
+Beyond explicit metadata, the router can derive workload identity
+from request structure at dispatch time:
+\begin{itemize}[nosep]
+  \item \textbf{Conversation depth.}  The number of message objects
+        in the \texttt{messages} array reveals session maturity:
+        a 2-message exchange is likely a cold-start chat; a
+        20-message array with alternating \texttt{assistant}/\texttt{tool}
+        roles is a deep agent session with different model, pool,
+        and compression requirements.
+  \item \textbf{Tool-call history pattern.}  If prior assistant
+        messages contain \texttt{tool\_calls} with high failure rates
+        (parseable from subsequent \texttt{tool} role messages
+        reporting errors), the router can preemptively route to a
+        stronger model or apply compression before the next turn.
+  \item \textbf{Reasoning metadata.}  NofT~\cite{noft2026} shows
+        that the number of chain-of-thought reasoning steps predicts
+        task difficulty pre-inference, enabling difficulty-aware model
+        selection with 95\% adversarial detection accuracy.
+\end{itemize}
+
+\paragraph{From static to per-stage routing.}
+These signals enable a shift from per-request routing (one decision
+per API call) to \emph{per-stage} routing within agentic workflows.
+Aragog~\cite{aragog2025} demonstrates this: by decoupling a one-time
+accuracy-preserving configuration step from a per-stage scheduler
+that uses current system observations, it achieves 50--217\%
+throughput improvement and 32--79\% latency reduction at peak load.
+The WRP framework is well-positioned for this evolution: the
+router already maintains session state for multi-turn awareness
+(VCD~\cite{vcd2026}, Feedback Detector~\cite{feedbackdet2026}),
+and the per-stage identity signals listed above provide the input
+features for a stage-aware routing policy that adapts model selection,
+compression, and pool assignment as the session evolves.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Workload CDF Archetypes}
+\label{sec:workload:archetypes}
+% -----------------------------------------------------------------------------
+
+FleetOpt~\cite{fleetopt2026} identified three prompt-length CDF
+archetypes that determine optimal pool and routing configuration:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Concentrated-below} (\eg Azure): 80--95\% short
+        requests.  Aggressive compression minimizes long-pool cost.
+  \item \textbf{Dispersed} (\eg LMSYS): requests span the length
+        spectrum.  Balanced two-pool split with moderate compression.
+  \item \textbf{Concentrated-above} (\eg SWE-bench): most requests
+        are long.  Raise $\boundary_{\text{short}}$ rather than
+        compress.
+\end{enumerate}
+
+These archetypes are not static: as organizations shift from chat to
+agents, the CDF migrates from Archetype~1 toward Archetype~3.
+FleetOpt~\cite{fleetopt2026} showed that the minimum-cost fleet is
+qualitatively different for each archetype, and
+inference-fleet-sim~\cite{fleetsim2026} confirmed that monolithic
+topology can outperform disaggregated for Archetype~1 when
+$\boundary_{\text{short}} < 4$K.
+
+

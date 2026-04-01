@@ -1,0 +1,13 @@
+\section{SM 级图表示}
+\label{sec:task_graph}
+
+本节介绍 {\em \graph}，这是一种以单个流式多处理器（SM）为粒度来表示张量程序计算的图结构。这样的细粒度表示能暴露出更多并行性，并支持跨算子软件流水与细粒度 kernel 重叠等优化，而这些能力在传统按算子逐核执行的模型中无法获得。
+
+\Cref{fig:task_graph} 给出了一个 \graph 示例。图中的每个节点要么是 {\em task}，要么是 {\em event}。蓝色（或橙色）矩形表示 task，对应在单个 SM 上执行的一个计算或通信单元；绿色圆点表示 event，用来完成任务之间的同步。任务和事件在图中交替出现：每个任务只会向外连接到它的 {\em triggering event}，并从若干 {\em dependent event} 接收入边。当一个任务依赖的事件全部 {\em activated} 后，该任务即可执行；任务执行完毕后，又会通知自己的触发事件。一个事件在收到与之关联的全部任务通知后才会被激活。
+
+这种结构以比传统计算图更细的粒度描述依赖关系。以多 GPU LLM serving 为例，经常会出现 {\tt MatMul} 之后接 {\tt AllReduce} 的模式（\Cref{fig:task_graph}a）。在现有系统中，由于 kernel barrier 只能在整个 kernel 粒度上同步，这两个算子通常只能顺序执行。相比之下，SM 级任务图能够表达更精确的任务级依赖：因为 {\tt AllReduce} 是按元素通信的，每个 {\tt AllReduce} 任务实际上只依赖一个对应的 {\tt MatMul} 任务。通过在这些任务对之间插入细粒度事件，\sys 可以在保持正确性的同时，让计算密集的 {\tt MatMul} 任务与通信密集的 {\tt AllReduce} 任务重叠执行，从而最大化 GPU 利用率。
+
+对于同一个计算图，往往存在多个不同的 \graph 表示。 \Cref{fig:task_graph}c 展示了一个可行但次优的版本：其中的事件只表达算子级依赖，效果与传统 kernel barrier 相似。 \Cref{sec:compiler} 将进一步说明 \sys 如何通过推断 {\em 精确} 的数据依赖，生成高性能任务图，从而最大化并发度并最小化同步开销。
+
+\paragraph{与 CUDA Graphs 的比较。}
+\graphs 可以看作是 CUDA Graphs 的一个更底层扩展。两者都以静态方式实例化，并显式编码操作之间的依赖关系。但 CUDA Graphs 只在 kernel 粒度上描述依赖，而 \graphs 则下探到单个 SM 任务与 sub-kernel 事件的粒度。CUDA Graphs 的主要作用是描述 kernel 的发射顺序，并依赖 stream 语义完成同步，因此它的融合与重叠能力都受限于 kernel 边界。与之不同，\graphs 会显式建模算子内部和算子之间的依赖，从而支持跨 SM 的细粒度同步，并在单个 kernel 内实现计算与通信的重叠。这使得 \sys 能挖掘出 CUDA Graphs 以及传统 kernel 级执行模型无法利用的并行性。

@@ -1,0 +1,48 @@
+%!TEX root=../main.tex
+
+\section{\SystemName{} in Production}
+\label{sec:large-scale-analysis}
+
+
+
+Over the past six months, thousands of agentic RL jobs have used \SystemName{} for post-training. 
+To further demonstrate its scalability and robustness, we share our
+experience on a large production cluster with more than 3,000 GPUs. 
+
+
+
+
+\PHM{Workload Characterization}
+We trained an MoE LLM (hundreds of billions of parameters) using \SystemName{} over in-house datasets for agentic tasks like mathematics and software engineering. 
+The maximum prompt length and response length are 12k and 46k respectively. 
+The average number of turns per task varies from one to 48 (\autoref{fig:action}), confirming the coexistence of joint prefill-heavy and decode-heavy tasks in agentic RL training. 
+\emph{The large number of turns requires a highly stable environment and fast prefill computation.}
+
+
+
+This job adopts asynchronous training with a 1:5 ratio of training to generation GPUs. 
+To balance gradient stability and rollout efficiency, an asynchronous bound of one is used, leading to maximum iteration time of 1.5 hours (see \autoref{fig:trace_dist} for iteration time distributions). 
+The primary bottleneck is the blocking \texttt{get\_batch} call, after the training stage finishes computing log probabilities and gradients.
+It waits for enough trajectories in \texttt{SampleBuffer} to reach the batch size. 
+This consumes up to 62\% of the iteration time with GPU idleness, and eliminating it could ideally reduce end-to-end training time by 22\% (\autoref{fig:trace_dist}). \emph{The training stage may stall due to insufficient trajectories from the rollout stage, making it necessary to balance the throughput of both stages.}
+
+
+
+\PHM{Characterization-driven Optimization.} 
+Informed by the workload characterization, we adjust the resource allocation ratio and optimize the prefix caching for the MoE architecture. \autoref{fig:opt_step_time} shows that the characterization-drive optimization achieves 1.66$\times$ end-to-end speedup over the first 25 steps. Beyond this, we also provide dedicated optimizations for environments and system resilience. 
+
+
+
+\PHM{Optimizing Environment Stability.} 
+Operating thousands of concurrent, Docker-based agentic environments on Kubernetes necessitates critical optimizations to ensure stability and performance. 
+To combat network instability and pull overhead in \texttt{env.reset}, we employ a multi-tiered caching architecture. The first tier consists of an internal image registry that acts as a local mirror, eliminating external network calls. A second-tier, distributed load-balanced cache is situated between the compute nodes and this registry to efficiently manage high-volume requests.
+During an \texttt{env.reset} operation, clients prioritize fetching the required Docker image from this cache. This approach dramatically enhances the robustness of environment setup, producing above 99.99\% success rate for \texttt{env.reset}.
+
+
+
+\noindent\textbf{System Resilience.} 
+We enhance system resilience at both the network and system levels. To reduce timeouts when connecting to environments, we use a persistent session-based protocol instead of a request-based one and adopt a exponential backoff retries to handle temporary network issues. Our disaggregated architecture isolates failures so that a problem in one environment, reward, or inference worker does not affect the others. Kubernetes manages environment workers, and the serverless platform manages reward workers. When an inference worker fails, it is first restarted on the same GPU. If it fails again, it is removed, and its trajectories, stored in the storage engine, are resumed on healthy workers. If a training worker fails, we restart from the latest checkpoint. This design has proven highly robust, with only a single failure observed during a week-long training run.
+
+
+
+

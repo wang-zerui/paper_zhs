@@ -1,0 +1,139 @@
+%!TEX root = main_zh.tex
+\section{SageSched 设计}
+\label{sec:design}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/overview_new.pdf}
+    \caption{\oursched 工作流程总览。}
+    \label{fig:overview}
+\end{figure}
+
+本文提出 \oursched：一种通过正确处理需求不确定性与混合性来实现高效 TTLT 的新型 LLM 调度器。
+整体流程如图~\ref{fig:overview} 所示。
+对每个到达请求，\oursched 先使用轻量且准确的预测器估计其输出长度分布（第~\ref{subsec:predictor} 节）；
+随后基于该分布并联合显存与计算资源，对请求总体服务代价进行建模（第~\ref{subsec:cost} 节）；
+最后采用不确定性感知调度算法确定运行时排队顺序，以获得最优效率（第~\ref{subsec:gittins} 节）。
+
+\subsection{语义感知的历史检索预测器}
+\label{subsec:predictor}
+
+如第~\ref{subsec:limitations} 节所述，鉴于 LLM 解码过程的内生不确定性，真正准确的预测应输出\emph{分布}而非\emph{单点数值}。
+一个直接思路是改造现有预测模型（如 DistillBert~\cite{distilbert_docs}）的输出层，使其预测分布；本质上，该方法试图根据语义提示词直接\emph{逼近}最终生成效果。
+但这类模型依然\emph{成本高}（训练代价大）且\emph{准确性有限}（生成过程难以直接近似）。
+
+实际上，我们发现：给定提示词后，输出长度更适合通过\emph{参考近期历史中的相似请求}来预测，而非用微调模型直接模拟生成内部机制。
+相比“直接模拟生成过程”，评估“提示词相似性”更容易。
+同时，已有研究~\cite{gong2025past}表明，相邻滑动窗口内请求输出长度总体分布具有相对稳定性，这说明近期历史有很高参考价值。
+因此，通过选取提示词相似的历史请求，我们有望得到\emph{更容易且更准确}的需求预测。
+
+\begin{figure}[t]
+    \centering
+    \subfigure[从 \emph{Alpaca} 数据集中采样的 Prompt-1]{
+        \includegraphics[width=0.9\linewidth]{figures/all_distributions_sample_39.pdf}
+        \label{fig:correlation-1}
+    }
+    \hfill
+    \subfigure[从 \emph{Write} 数据集中采样的 Prompt-2]{
+        \includegraphics[width=0.9\linewidth]{figures/all_distributions_sample_57.pdf}
+        \label{fig:correlation-2}
+    }
+    \caption{请求输出长度分布可由提示词相似度更高的历史请求更好地逼近。}
+    \label{fig:prompt-correlation}
+\end{figure}
+
+为验证该点，我们实证分析提示词相似度与输出长度分布相似度之间的相关性。
+我们分别从 Alpaca 与 Write 数据集采样一个提示词。
+对于每个提示词，先重复推理 100 次，得到其输出长度分布作为待预测真值；
+再按与该提示词的相似度将历史请求分为三组，其中相似度通过两请求提示词嵌入的\emph{余弦相似度}计算。
+图~\ref{fig:prompt-correlation} 显示，两组实验都存在明确相关性：\emph{相似度更高}的历史组，其分布曲线形状与目标分布\emph{更接近}。
+
+基于以上观察，我们提出\emph{语义感知的历史检索预测器}，融合\emph{提示词内容}与\emph{历史执行结果}，直接预测输出长度分布。
+具体实现上，我们维护近期请求的推理记录（提示词与输出长度）。
+对每个新请求，检索\footnote{历史窗口大小设为 10,000，按 FIFO 持续更新。若高相似样本不足（如冷启动阶段），我们使用公开数据集请求补充候选集。向量检索采用 \emph{FAISS IndexFlat}~\cite{faiss_meta}，通常耗时低于 1 ms。}
+与其提示词足够相似的历史请求（默认阈值 0.8），并将这些样本的输出长度分布作为预测结果。
+该方法无需微调模型，对不同 LLM 均具通用性，也无需直接模拟复杂生成过程。
+因此可以同时实现轻量与准确的分布预测。
+
+\subsection{基于资源瓶颈的代价建模}
+\label{subsec:cost}
+
+有了上述预测方法后，我们可得到每个请求的输出长度分布。
+但如第~\ref{subsec:limitations} 节所述，受需求混合性影响，直接用输出长度作为服务代价并不充分。
+本节目标是建立一个同时考虑计算与显存的综合代价模型。
+
+对于多资源代价建模，关键先判断真实瓶颈资源，因为它决定后续分析路径。
+在实际中，LLM 服务后端可能处于\emph{计算瓶颈}或\emph{显存瓶颈}，这取决于运行时负载特征。
+具体地，图~\ref{fig:diverse_bounds} 展示了在 H100 上，随 batch 增大时解码步的计算与显存关系。\footnote{图~\ref{fig:bounds_and_observations} 中 GPU 利用率通过“实际 TFLOPs/峰值 TFLOPs”估算，CUDA 时间使用 \texttt{torch.profiler} 测量。}
+我们将序列长度（输入长度 + 当前已生成长度）分别固定为 50 与 1000。
+长序列更偏显存密集：短序列下，达到显存上限前 GPU 利用率已较高；长序列下，显存先满而 GPU 利用率尚未充分上升。
+注意，某类资源代价仅在该资源成为瓶颈时才决定性能。
+因此我们分别讨论两种状态下的代价刻画。
+
+\begin{figure}[t]
+    \centering
+    \subfigure[batch 增大时 GPU 利用率与 KVCache 占用关系。]{
+        \includegraphics[width=0.45\linewidth]{figures/two_workloads_varying_batch.pdf}
+        \label{fig:diverse_bounds}
+    }
+    \hfill
+    \subfigure[解码过程中每步注意力计算时间的变化。]{
+        \includegraphics[width=0.45\linewidth]{figures/simple_module_analysis_attention.pdf}
+        \label{fig:compute_cost}
+    }
+    \caption{瞬时资源瓶颈测量，以及解码阶段计算代价特征。实验均在 H800 + Qwen3-32B 上完成。}
+    \label{fig:bounds_and_observations}
+\end{figure}
+
+先看\emph{显存瓶颈}场景。
+此时，请求 KVCache 占用是建模关键因素——KVCache 越省，可并发服务的请求越多（且在 GPU 利用率不高时，提高并发不会显著增加迭代时长）。
+因此在显存瓶颈下，应主要考虑请求生命周期内的累计 KVCache 占用。
+设推理输入（提示词）长度和输出长度分别为 $I$、$O$，其总服务代价可表示为
+$\mathcal{C}_M=\sum_{l=I}^{I+O}l*U_{MT}=(\frac{O^2}{2}+IO)U_{MT}$，
+其中 $U_{MT}$ 表示单位\emph{显存-时间}乘积（即单 token 在单步中的 KVCache 占用量）。
+
+再看\emph{计算瓶颈}场景。
+该情况下，KVCache 占用不再是主要约束，我们只需量化请求全生命周期的总计算量。
+图~\ref{fig:compute_cost} 测得：不同解码步下，注意力模块（Transformer 的关键计算部分）每步计算时间近似与累计序列长度线性相关。\footnote{本文聚焦\emph{解码}阶段资源消耗；随着\emph{推理型 LLM}~\cite{cai2025r}普及，解码阶段通常主导 TTLT。除线性增长的注意力时间外，还存在与序列长度无关的近似常量 FFN 时间（以及 CUDA 启动等小开销），但在长解码或大 batch 下可被显著摊薄，因此此处略去。}
+由此可得总计算代价
+$\mathcal{C}_C=\sum_{l=I}^{I+O}l*U_{CT}=(\frac{O^2}{2}+IO)U_{CT}$，
+其中 $U_{CT}$ 为单位\emph{计算-时间}乘积（单 token 在单步平均计算量）。
+
+综合上述分析，计算代价与显存代价共享同一函数形式（仅单位不同，不影响请求间相对排序）。
+因此实践中可采用统一代价模型（无需显式切换瓶颈模式）：
+$\mathcal{C}=\frac{O^2}{2}+IO$。
+尽管跨资源形式一致，我们的方法与既有建模显著不同——例如~\cite{qiu2024efficient,fu2024efficient,shahout2024don}仅用 $O$，或~\cite{sheng2024fairness}采用 $I$ 与 $O$ 的简单加权和。
+我们在第~\ref{sec:cost modeling} 节实验中将验证该建模方式的优越性。
+
+\subsection{不确定性感知请求调度}
+\label{subsec:gittins}
+
+借助上述预测与建模，我们可在请求到达时得到其代价分布（可缓解但无法完全消除不确定性）。
+接下来需要一个不确定性感知调度算法，以达到理论最优 TTLT。
+
+\begin{figure}[t]
+    \centering
+        \includegraphics[width=0.45\linewidth]{figures/motivation_gittins_example_A.pdf}
+        \includegraphics[width=0.45\linewidth]{figures/motivation_gittins_example_B.pdf}
+    \caption{均值优先排序的缺陷示例。尽管请求 B 的均值更大，但由于其分布形状不规则，先服务 B 在平均 TTLT 上反而可能更优。}
+    \label{fig:gittins}
+\end{figure}
+
+排队时，需要从每个请求的代价分布中计算合适调度指标；如图~\ref{fig:gittins} 所示，均值并非最优。
+我们注意到，选择“当前优先服务哪个请求”可类比为\emph{多臂老虎机}问题中的“选择哪个臂”~\cite{mahajan2008multi}：
+请求代价分布本质上描述了“继续分配资源后完成请求的收益分布”。
+对于“收益随机但分布已知”的老虎机问题，文献已证明\emph{Gittins 策略}~\cite{gittins1979bandit}可达理论最优。
+
+具体地，给定请求代价分布 $\mathcal{D}$，其 Gittins 指数定义为
+$G(\mathcal{D})=\operatorname*{inf}_{\Delta>0,X\sim\mathcal{D}}{\frac{\operatorname{E}[\operatorname*{min}\{X,\Delta\}]}{\operatorname*{P}(X\leq\Delta)}}$；
+调度时优先选择 Gittins 指数更小的请求。
+其中，$\operatorname{E}[\operatorname*{min}\{X,\Delta\}]$ 表示给定服务预算 $\Delta$ 时的期望服务消耗，$\operatorname*{P}(X\leq\Delta)$ 表示在该预算内完成请求的概率；因此 $G$ 刻画了该请求可达到的最小摊销代价。
+已有理论证明，基于 Gittins 指数（而非分布均值）调度可最小化平均延迟（TTLT）~\cite{gittins1989multiprocessor}。
+图~\ref{fig:gittins} 也展示了其直观效果：该策略会优先处理“近期更可能完成”的请求。
+
+此外，请求开始执行后，其 Gittins 指数应在运行时动态更新。
+TRAIL~\cite{shahout2024don}与 FastServe~\cite{wu2023fast}都表明，启用抢占对优化平均 TTLT 很重要（在交换计算重叠、KVCache 预取等技术支持下，开销可忽略）。
+理想做法是每一步都依据\emph{剩余}代价分布刷新指数。
+但逐步刷新在实践中成本过高，且易引发抖动（指数接近的请求可能频繁互换优先级）。
+因此我们将每个请求代价范围划分为多个桶（默认 10 个），仅在桶边界刷新其 Gittins 指数。
+这样可在调度时效与系统稳定性之间取得平衡。

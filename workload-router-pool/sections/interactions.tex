@@ -1,0 +1,140 @@
+% =============================================================================
+\section{Cross-Dimensional Interactions: Lessons from Our Work}
+\label{sec:cross}
+% =============================================================================
+
+Cross-dimensional interactions are easy to miss when each dimension
+is studied separately, but they dominate real-world performance.
+Below we formalize the main interactions our publications have
+identified.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Workload $\times$ Router}
+\label{sec:cross:wr}
+% -----------------------------------------------------------------------------
+
+\begin{observation}[Workload determines router adaptation mechanism]
+\label{obs:wr-adapt}
+Chat workloads produce per-turn user feedback; our Feedback
+Detector~\cite{feedbackdet2026} classifies satisfaction in real
+time, allowing the router to re-route on dissatisfaction without
+explicit reward modeling.  Agent workloads lack such per-turn
+signals---task success is observed only at the end of a multi-step
+session---so RL-based routing~\cite{routerr1_2025} that reasons
+over sequential decisions is a better fit.  The adaptation
+mechanism must match the workload's feedback granularity.
+\end{observation}
+
+\begin{observation}[Modality determines routing signals]
+\label{obs:wr-modal}
+Text-only chat uses embedding similarity and keyword
+signals~\cite{vllmsr2026}.  VLM workloads require multimodal
+classifiers---SigLIP+MiniLM in AVR~\cite{avr2026}---because
+text-only signals cannot assess screenshot complexity.  The router signal set must match the workload modality.
+\end{observation}
+
+\begin{observation}[Workload determines routing safety and privacy requirements]
+\label{obs:wr-safety}
+Different workload types impose different safety and privacy
+requirements on the router.  Chat routing errors produce quality
+degradation; multi-turn chat adds a subtler threat---adversarial
+users can spread jailbreak content across turns, evading
+single-turn classifiers.  The \vsr{}~\cite{vllmsr2026} addresses
+this with contrastive embedding classification that evaluates turn
+sequences, not individual messages.  CUA routing errors produce
+outright \emph{security vulnerabilities}: the Visual Confused
+Deputy~\cite{vcd2026} shows that misrouting a CUA action to a
+less-capable model can cause grounding errors exploitable for
+privilege escalation.  Across all workload types, our hierarchical
+MLCommons safety pipeline---binary gate~\cite{safetyl1_2026} then
+nine-class hazard categorization~\cite{safetyl2_2026}---provides
+uniform content filtering at the routing layer, with category-level
+granularity that lets operators enforce workload-specific policies
+(e.g., blocking privacy-exfiltrating prompts in customer-facing chat,
+flagging misinformation in knowledge-retrieval agents).  Safety and privacy should be integrated as routing objectives,
+with multi-turn awareness for chat and action-level guardrails for
+agents.
+\end{observation}
+
+\begin{observation}[Factual workloads require response-time validation]
+\label{obs:wr-halu}
+Request-time routing alone cannot guarantee correctness: a model may
+be well-suited for the query's domain yet still hallucinate on a
+specific fact.  The Factcheck Classifier~\cite{factcheck2026}
+identifies fact-seeking prompts at request time ($\sim$12\,ms), and
+HaluGate~\cite{halugate2025} validates responses at token level
+(76--162\,ms overhead).  Together they close a loop that
+request-time routing cannot: per-model hallucination rates observed
+by HaluGate feed back into the routing policy, gradually steering
+factual traffic toward more reliable models.
+\end{observation}
+
+
+% -----------------------------------------------------------------------------
+\subsection{Router $\times$ Pool}
+\label{sec:cross:rp}
+% -----------------------------------------------------------------------------
+
+\begin{observation}[Router policy co-determines pool sizing]
+\label{obs:rp-codesign}
+FleetOpt~\cite{fleetopt2026} shows that co-designing the compression
+parameter $\gamma$ with pool sizes $(n_s, n_l)$ yields 3.1--6.4\%
+lower cost than retrofitting compression onto a pre-existing fleet.
+The router is a co-design variable, not a layer atop the pool.
+\end{observation}
+
+\begin{observation}[Router latency constrains pool topology]
+\label{obs:rp-latency}
+FastRouter~\cite{fastrouter2026} showed that routing latency is
+a critical constraint: at 4,918\,ms baseline, routing overhead
+exceeds the TTFT SLO for short-context requests.  Only after the
+98$\times$ reduction to 50\,ms does pool routing become practical
+for the full request stream.
+mmBERT-Embed~\cite{mmberted2025} reinforces this: its 2D Matryoshka
+design lets operators trade embedding quality for latency
+(2.56\,ms at layer-6 vs.\ 11\,ms at layer-22), keeping the
+similarity signal within the router's latency budget even as pool
+topology grows more complex.
+\end{observation}
+
+\begin{observation}[Mid-session model switching incurs a KV-cache sunk cost]
+\label{obs:rp-sunkcost}
+In multi-turn sessions, if the Feedback
+Detector~\cite{feedbackdet2026} or context memory signals indicate
+that a better model is available, the router faces a dilemma.
+Switching models mid-session discards the KV-cache accumulated for
+the current model---a \emph{sunk cost} proportional to session
+length and context size.  Not switching preserves the cache
+investment but forgoes the quality improvement---an \emph{opportunity
+cost} that grows with every subsequent turn served by the
+suboptimal model.  The optimal policy depends on the remaining
+session length, the quality gap between models, and the KV-cache
+rebuild cost, creating a Pareto frontier between sunk cost and opportunity cost.
+No current system explicitly optimizes this trade-off.
+\end{observation}
+
+
+% -----------------------------------------------------------------------------
+\subsection{Workload $\times$ Pool}
+\label{sec:cross:wp}
+% -----------------------------------------------------------------------------
+
+\begin{observation}[Workload archetype determines optimal topology]
+\label{obs:wp-topo}
+Our fleet tools~\cite{fleetopt2026, fleetsim2026} show:
+Archetype~1 (concentrated-below) benefits most from two-pool routing.
+Archetype~3 (concentrated-above) may benefit from disaggregated
+prefill/decode because most requests are long.  Archetype~2
+(dispersed) may require multi-tier pooling.
+\end{observation}
+
+\begin{observation}[Agent adoption shifts the energy frontier]
+\label{obs:wp-energy}
+The 1/W law~\cite{onewlaw2026} predicts that shifting from chat
+to agents drops fleet-wide energy efficiency by $2$--$4\times$
+unless pool topology adapts.  Two-pool routing recovers most of
+this loss, but only if pool boundaries track workload evolution.
+\end{observation}
+
+

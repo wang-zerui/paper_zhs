@@ -1,0 +1,80 @@
+\section{Design}
+
+\subsection{Design Challenges}
+
+While the \DAP{} principle is conceptually simple, realizing it in LLM serving is challenging in practice. \sys{} must make priority assignments \emph{in the dark}, steering flows without precise laxity through a \emph{discrete multi level queue} (e.g., finite switch queues). Specifically, we identify the following two challenges.
+
+\parab{C-1: Scheduling flows with explicit deadlines without excessive prioritization.}
+Even when flows carry explicit deadlines (e.g., P2D transfers), determining when to switch from defer to promote is non-trivial under discrete priority levels. Promoting too early wastes scarce bottleneck bandwidth, while promoting too late risks deadline misses. The challenge lies in striking the right balance for just-in-time completion given finite priority classes.
+
+\parab{C-2: Scheduling implicit-deadline flows without precise laxity.}
+The absence of precise laxity traps the scheduler in an error-prone dilemma. On one hand, underestimating laxity incurs unintended execution stalls, as mistakenly deferring Stage~2 flows immediately idles the GPU and inflates request latency. On the other hand, overestimating laxity results in priority inversion, squandering scarce bandwidth on deferrable work and starving truly urgent requests.
+
+\input{sections/fig_code/design/designoverview}
+
+\subsection{Overview} Figure~\ref{fig:design:designoverview} illustrates \sys{}'s core abstraction: the \emph{Reverse Multi-Level Queue (RMLQ)}. To realize the \DAP{} principle, RMLQ inverts the classic MLFQ paradigm (which demotes flows over time); instead, it initializes flows in low-priority queues to enforce deferral, promoting them strictly when diminishing laxity necessitates immediate execution.
+
+At a high level, \sys{} schedules all multi-stage communication through a shared RMLQ substrate, while applying separate rules (initial priority and promotion pace) for different stages. For last stage flows with explicit deadlines, \sys employs Minimal Link Utilization (MLU), promoting a flow only when the remaining bandwidth is just insufficient to meet its deadline, thereby avoiding premature over-prioritization. For early stage flows with implicit deadline, \sys speculate relative urgency via Relative Layer Index (RLI). Flows begin at lower tiers climb up when it threaten to stall computation. Finally, to resolve potential cross-stage contention, \sys{} reserves the highest priority level for deadline-explicit flows to avoid violations, and prioritizes deadline-implicit flows in the remaining levels to opportunistically exploit available bandwidth.
+
+The rest of this section is organized as follows. \S\ref{design:explicit} introduces scheduling flows with explicit deadlines. \S\ref{design:implicit} describes the strategy for implicit deadlines. Finally, \S\ref{sec:design:PET} combines these components to present the complete RMLQ arbitration logic.
+
+\subsection{Scheduling with Explicit Deadline}\label{design:explicit}
+
+To address C-1, we need to ensure the last-stage communication task is judiciously deferred—neither excessively prioritized nor starved—while strictly guaranteeing the request deadline. The challenge lies in mapping continuous urgency levels derived from these deadlines onto $K$ discrete priority queues. Consequently, the scheduler needs a mechanism to approximate continuous deadline-derived urgency using coarse-grained priority levels, which requires determining how to quantify urgency, when to trigger promotion, and at what granularity to apply scheduling decisions (e.g., per-packet or per-layer).
+
+Specifically, consider an $L$-layer model serving a batch of request. At each layer $\ell$, the P2D stage emits a set of flows. Flows within the same request $r$ inherit its TTFT deadline $D_r$, while flows from different requests are scheduled independently. We assume there are K priority queues $P_i(1\leq i \leq K)$ where $P_1$ has the highest priority. We denote the threshold for promoting the priority from $P_{j}$ to $P_{j-1}$ as $\tau_{j}$ ($2 \le j \le K$). we define $\tau_K = +\infty$ ensuring that even the extreme loose flows are captured in the lowest-priority queue.
+
+\parab{Urgency metric.} We define \emph{Minimal Link Utilization (MLU)}: $\mathrm{MLU}_i(t)=\frac{\textit{Size}_{rem}(t)}{\textit{Time}_{rem}(t)\cdot B \cdot (1-\rho)}$, where $B(1-\rho)$ represents the effective bandwidth after accounting traffic load $\rho$. This metric represents the minimal share of the residual link capacity required to satisfy the deadline. Crucially, $\mathrm{MLU}_i(t) > 1$ signifies an infeasible overload state; values approaching $1$ signal critical urgency requiring exclusive service, while lower values imply sufficient slack for deferral. By contrast, purely deadline-based metrics (e.g., EDF) are ill-suited since they suffer from the domino effect under overload \cite{buttazzo1995value} and further degrade when constrained to discrete priority levels \cite{buttazzo2005rate}.
+
+\parab{Optimizing promotion threshold.} Deriving the globally optimal thresholds that minimize deadline miss rates is computationally intractable (NP-hard). Therefore, we seek a robust, practical approximation by minimizing the relative quantization error introduced when mapping continuous urgency to discrete levels. When a flow with urgency $v \in [U_{min},U_{max}]$ is mapped to a discrete priority level $\tau_k$, it incurs a relative error of $\epsilon \approx \frac{|v - \tau_k|}{v}$. Our intuition here is to minimize the worst-case relative error across all threshold. $\prod_{k=1}^{K} r_k = \frac{u_2}{u_1} \cdot \frac{u_3}{u_2} \cdot \dots \cdot \frac{u_K}{u_{K-1}} = \frac{u_K}{u_1} = \frac{U_{\max}}{U_{\min}}$. Mathematically, this minimum is achieved if and only if all ratios are equal ($r_k \equiv r$). This necessitates a geometric progression for threshold generation (where $r =(U_{\max}/U_{\min})^{\frac{1}{K-1}}$). Since the precise bounds $U_{\max}$ and $U_{\min}$ are often unknown or dynamic in practice, we approximate this geometric spacing by configuring the promotion threshold as $Q_i = E^{-i}\cdot U$ ($1\le i\le K-1$), where parameters $E$ and $U$ are set empirically (e.g., $E=4, U=0.5$) to yield robust performance.
+
+\parab{Promotion behavior.}
+Fine-grained promotion decision may adversely introduce practical concerns in network scheduling. In particular, if promotion is applied at a fine granularity (e.g., per packet), a single message may be fragmented across multiple priority queues. This can lead to packet reordering, where later packets overtake earlier ones, triggering costly transport-layer recovery and reducing effective throughput. To avoid this issue, we restrict promotion to layer boundaries, ensuring priority atomicity at the message level. Crucially, this coarser granularity does not compromise scheduling expressiveness, as the substantial depth of modern LLMs ($L>K$, e.g, L=64 and K=8/16) provides ample room for priority adjustments. Additionally, we enforce a monotonic promotion policy (i.e., only allowing promotion). This prevents priority oscillation and reinforces the \DAP{} principle, ensuring that flows are conservatively maintained in lower tiers until urgency strictly necessitates promotion.
+
+\subsection{Scheduling with Implicit Deadlines} \label{design:implicit}
+
+To address the lack of precise laxity under implicit deadlines (Challenge C-2), \sys exploits structural determinism to infer relative urgency within requests, and resolves residual contention across requests using robust arbitration mechanisms.
+
+\subsubsection{Intra-request Scheduling with Structural Determinism}\label{design:intrareq}
+
+While precise laxity is elusive due to dynamic scheduling shifts, the relative laxity within request is deterministic: flows blocking immediate execution strictly more urgent than lookahead transfers that enable future progress.
+
+We quantify this using the \emph{Relative Layer Index}, defined as $\text{RLI} = L_{\text{target}} - L_{\text{curr}}$, where $L_{\text{curr}}$ is the index of the currently executing layer and $L_{\text{target}}$ is the target layer index where the data is consumed. A smaller RLI indicates a tighter safe deferral window. \sys{} resolves contention by strictly prioritizing flows with the smallest RLI. We apply it to resolve two representative contention cases detailed below.
+
+\parab{Case I: Collective vs. KV Reuse.} When $\text{collective}^{i}$ competes with $\text{reuse}^{j}$ ($j > i$), the collective targets the current layer ($L_{\text{target}} = i$), yielding $\text{RLI}(\text{coll}) = 0$. In contrast, the reuse targets layer $j$ with $\text{RLI}(\text{reuse}) > 0$. We therefore enforce $\text{collective}^{i} \succ \text{reuse}^{j}$ to avoid execution stalls.
+
+\parab{Case II: Inter-KV Reuse Contention.} Under multi-layer lookahead, flows $\text{reuse}^{j}$ and $\text{reuse}^{k}$ ($L_{\text{curr}} < j < k$) often contend. Comparing their urgency, layer $j$ represents a nearer deadline, implying $\text{RLI}(j) < \text{RLI}(k)$. Prioritizing the smaller RLI effectively delays the onset of the earliest execution stall. Thus, we enforce $\text{reuse}^{j} \succ \text{reuse}^{k}$.
+
+In summary, \sys{} unifies these decisions by strictly prioritizing flows with the smallest RLI. Theorem 1 formalizes the optimality of this structural ordering.
+
+\parab{Theorem 1.}  \emph{Assuming an ideal computation model without preemption overhead, the prefill makespan is minimized by a schedule that strictly prioritizes flows with the smallest RLI.}
+
+\emph{Proof sketch.} Intuitively, prioritizing a high-RLI flow during a stall wastes the opportunity to overlap it with subsequent computation. We prove this via an exchange argument: shifting any flow with a larger RLI out of a stall interval into a later overlapped region strictly reduces the current blocking duration without violating future dependencies. We provide the detailed proof in Appendix.
+
+\subsubsection{Robust Inter-request Scheduling}\label{design:interreq}
+
+With intra-request contention resolved by RLI (\S\ref{design:intrareq}), the remaining challenge is breaking ties \emph{across requests} when competing flows have similar RLI and simultaneously threaten execution. The scheduler must protect requests with high SLO violation risks under imprecise laxity. However, synchronous batch execution exacerbates the impact of scheduling pitfalls, allowing errors to propagate to all batched peers. Our intuition is not to recover exact laxity, but to make scheduling decisions \emph{robust to estimation errors}, prioritizing requests/batches where delays would most severely hurt SLO attainment.
+
+\parab{Scheduling pitfalls under imprecise laxity.}
+We identify two representative failure cases arising from misjudging laxity:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{The Piggyback effect.} In batches with mixed deadlines, a small number of extremely tight requests can dominate the inferred batch-level urgency. Consequently, loose requests in the same batch inherit elevated priority, preempting other batches that are globally more urgent.
+    \item \textbf{The Black Hole effect.} Proximity to a deadline does not guarantee feasibility. Under overload, a batch may appear urgent while carrying a workload that exceeds available bandwidth. Prioritizing such batches wastes resources on inevitable failures, blocking other viable batches.
+\end{itemize}
+
+We define the \emph{Robust Effective Deadline} ($RED$) to quantify urgency while counteracting the Piggyback effect. We partition a batch into tight and loose sub-batches at the maximal deadline gap. With $D^T_{\text{min}}$ and $D^{Lo}_{\text{min}}$ representing the minimum deadline of each sub-batch, we define $RED = f \cdot D^T_{\text{min}} + (1-f) \cdot D^{Lo}_{\text{min}}$, where $f$ is the proportion of tight requests. When tight requests are rare (small $f$), $RED$ naturally shifts towards the loose deadline ($D^{Lo}_{\min}$), preventing outliers from hijacking the batch priority.
+
+Complementing RED-based ordering, we employ overload control to mitigate the Black Hole effect. The intuition is to prevent doomed or excessively heavy requests from blocking viable ones. We perform a worst-case feasibility check by accumulating estimated computation and communication delays. We iteratively prune the requests contributing the most to the cumulative delay to restore feasibility for the remainder of the batch.
+
+The full algorithm, detailed in the Appendix, synthesizes these strategies. Triggered upon batch arrival and departure, it outputs two key results: (1) an ordered sequence $\sigma$ derived from RED, and (2) a set of pruned requests $\mathcal{H}$ identified as infeasible. We deliberately avoid fine-grained per-layer updates to prevent the scheduler from over-reacting to transient load estimation jitter.
+
+\subsection{Putting Everything Together}\label{sec:design:PET}
+
+\sys schedules all traffic through a unified RMLQ substrate. We classify flows according to stage feature and apply distinct rules for initial priority assignment and subsequent promotion.
+
+\begin{itemize}[leftmargin=*]
+    \item For last stage flows with explicit deadline, we calculate the MLU defined in\S\ref{design:explicit} to determine the initial priority level. For promotion, \sys{} updates priority at layer boundaries while the request is computing, and switches to periodic updates at fixed intervals after computation finishes.
+    \item For early stage flows with implicit deadline, priority assignment relies on the RLI defined in\S\ref{design:intrareq}. Stage~1 flows are initialized based on RLI and promoted incrementally at layer boundaries to align with computation progress. Stage~2 flows directly enter the high priority queue.
+\end{itemize}
+
+\parab{Arbitration.} \sys strictly reserves the highest priority for the most urgent last-stage flows. Within the remaining priority levels, \sys adopts a hierarchical policy: it grants precedence to early-stage flows over last-stage flows to opportunistically exploit available bandwidth; to break ties among early-stage flows sharing the same RLI, \sys adheres to the rank determined by the inter-request scheduling (\S\ref{design:interreq}).

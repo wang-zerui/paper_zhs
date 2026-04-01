@@ -1,0 +1,185 @@
+% =============================================================================
+\section{Introduction}
+\label{sec:intro}
+% =============================================================================
+
+Three variables shape production LLM inference: the workload, the
+routing strategy, and the GPU pool architecture.  These are studied by
+largely separate communities---workload characterization, model
+routing, and systems/fleet optimization---that seldom interact.  But in
+practice, a routing decision tuned for one workload on one pool
+topology can be suboptimal for a different combination.
+
+\paragraph{Our research program.}
+The vLLM Semantic Router (\vsr{}) project~\cite{vllmsr2026} has been
+building the \emph{inference routing stack}.  Across a growing body
+of work (summarized in \Cref{tab:ownwork} and
+\Cref{sec:foundation}), we have addressed four pillars:
+\begin{itemize}[nosep]
+  \item \textbf{Routing architecture}: signal-driven semantic routing
+        with composable signals~\cite{vllmsr2026}, conflict-free
+        policy languages for probabilistic ML
+        predicates~\cite{probpol2026}, 98$\times$ router latency
+        reduction via Flash Attention and prompt
+        compression~\cite{fastrouter2026}, 2D Matryoshka embeddings
+        for configurable latency--quality
+        trade-offs~\cite{mmberted2025}, reasoning-selective
+        routing~\cite{wang2025reason}, category-aware semantic
+        caching~\cite{wang2025cache}, feedback-driven online
+        routing adaptation~\cite{feedbackdet2026},
+        hallucination-aware response validation with conditional
+        factcheck classification and token-level
+        detection~\cite{halugate2025, factcheck2026}, and
+        hierarchical content-safety classification following the
+        MLCommons AI Safety Taxonomy with a binary safe/unsafe
+        gate~\cite{safetyl1_2026} and a 9-class hazard
+        categorizer~\cite{safetyl2_2026} enabling per-category policy
+        enforcement and privacy-preserving routing;
+  \item \textbf{Pool routing and fleet optimization}: token-budget pool
+        routing~\cite{poolrouting2026}, FleetOpt analytical fleet
+        provisioning with gateway-layer
+        compression~\cite{fleetopt2026}, inference-fleet-sim for
+        queueing-grounded capacity
+        planning~\cite{fleetsim2026}, and the 1/W law for energy
+        efficiency~\cite{onewlaw2026};
+  \item \textbf{Multimodal and agent routing}: adaptive VLM routing for
+        computer use agents~\cite{avr2026}, outcome-aware tool
+        selection~\cite{oats2026}, the Visual Confused Deputy
+        security guardrail~\cite{vcd2026}, and the
+        gateway-centric personal-assistant stack
+        OpenClaw~\cite{openclaw2026} (open-source; multi-channel
+        sessions and tools behind a single Gateway control plane);
+  \item \textbf{Governance and standards}: the Semantic Inference
+        Routing Protocol (SIRP) at IETF~\cite{sirp2025} and
+        multi-provider extensions for agentic AI inference
+        APIs~\cite{mpext2025}.
+\end{itemize}
+
+Each paper solved a specific problem, but the problems are coupled.  
+For example, pool routing~\cite{poolrouting2026} creates a cost
+cliff whose resolution via gateway-layer compression depends on the
+workload's prompt-length CDF archetype~\cite{fleetopt2026}.  The 1/W
+law~\cite{onewlaw2026} shows that routing topology is a stronger
+energy lever than GPU generation, but only when the pool supports
+context-length partitioning.
+
+\begin{figure}[t]
+      \centering
+      \begin{tikzpicture}[
+          >=Stealth,
+          box/.style={draw, rounded corners=3pt, minimum width=3.2cm,
+                      minimum height=1cm, font=\small\sffamily, align=center,
+                      line width=0.8pt},
+          dimbox/.style={box, line width=1.2pt, minimum width=4cm,
+                         minimum height=1.3cm, font=\sffamily\bfseries},
+          arr/.style={->, line width=0.8pt},
+          darr/.style={<->, line width=0.8pt, dashed},
+      ]
+      % Dimension boxes
+      \node[dimbox, fill=workloadblue!15, draw=workloadblue]
+          (W) at (0, 0) {Workload\\Characterization};
+      \node[dimbox, fill=routergreen!15, draw=routergreen]
+          (R) at (5.5, 0) {Router\\Layer};
+      \node[dimbox, fill=poolorange!15, draw=poolorange]
+          (P) at (11, 0) {Pool\\Architecture};
+      
+      % Sub-items for Workload
+      \node[box, fill=workloadblue!5, draw=workloadblue!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (w1) at (0, -2) {Chat vs.\ Agent};
+      \node[box, fill=workloadblue!5, draw=workloadblue!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (w2) at (0, -3.2) {Warm vs.\ Cold};
+      \node[box, fill=workloadblue!5, draw=workloadblue!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (w3) at (0, -4.4) {Prefill-heavy vs.\ Decode-heavy};
+      
+      % Sub-items for Router
+      \node[box, fill=routergreen!5, draw=routergreen!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (r1) at (5.5, -2) {Static semantic rules};
+      \node[box, fill=routergreen!5, draw=routergreen!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (r2) at (5.5, -3.2) {Online bandit / feedback};
+      \node[box, fill=routergreen!5, draw=routergreen!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (r3) at (5.5, -4.4) {RL / cascading selection};
+      
+      % Sub-items for Pool
+      \node[box, fill=poolorange!5, draw=poolorange!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (p1) at (11, -2) {Homo vs.\ Hetero GPU};
+      \node[box, fill=poolorange!5, draw=poolorange!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (p2) at (11, -3.2) {Disaggregated P/D};
+      \node[box, fill=poolorange!5, draw=poolorange!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (p3) at (11, -4.4) {KV-cache topology};
+      
+      % Arrows from dimension to sub-items
+      \foreach \s in {w1,w2,w3} \draw[arr, workloadblue!70] (W) -- (\s);
+      \foreach \s in {r1,r2,r3} \draw[arr, routergreen!70] (R) -- (\s);
+      \foreach \s in {p1,p2,p3} \draw[arr, poolorange!70] (P) -- (\s);
+      
+      % Cross-dimensional interactions
+      \draw[darr, objectivepurple] (W) -- (R)
+          node[midway, above=1pt, font=\scriptsize\itshape, text=objectivepurple]
+          {workload shapes routing};
+      \draw[darr, objectivepurple] (R) -- (P)
+          node[midway, above=1pt, font=\scriptsize\itshape, text=objectivepurple]
+          {routing shapes pool need};
+      \draw[darr, objectivepurple] (W) to[bend left=25] node[midway, above=2pt,
+          font=\footnotesize\itshape, text=objectivepurple] {workload determines pool sizing} (P);
+      
+      % Safety & Privacy cross-cutting bar
+      \definecolor{safetyred}{RGB}{180,40,60}
+      \node[draw=safetyred, fill=safetyred!8, rounded corners,
+            minimum width=12cm, minimum height=0.8cm,
+            font=\small\sffamily\bfseries, text=safetyred]
+          (safety) at (5.5, -5.8) {Safety \& Privacy: Content Gate
+          \textbullet\ Jailbreak Detection
+          \textbullet\ Hazard Classification
+          \textbullet\ Privacy Routing};
+      
+      \draw[arr, safetyred!50] (safety) -- (0, -5.1);
+      \draw[arr, safetyred!50] (safety) -- (5.5, -5.1);
+      \draw[arr, safetyred!50] (safety) -- (11, -5.1);
+      
+      % Objective bar
+      \node[draw=objectivepurple, fill=objectivepurple!8, rounded corners,
+            minimum width=12cm, minimum height=0.8cm,
+            font=\small\sffamily\bfseries, text=objectivepurple]
+          (obj) at (5.5, -7.2) {Optimization Objectives: Cost
+          \textbullet\ Accuracy \textbullet\ Latency \textbullet\ Energy};
+      
+      \draw[arr, objectivepurple!50] (obj) -- (0, -6.3);
+      \draw[arr, objectivepurple!50] (obj) -- (5.5, -6.3);
+      \draw[arr, objectivepurple!50] (obj) -- (11, -6.3);
+      \end{tikzpicture}
+      \caption{The Workload--Router--Pool (WRP) architecture.  Three
+      dimensions interact through dashed bidirectional arrows.  Safety \&
+      Privacy is a cross-cutting layer: content gating and hazard
+      classification shape all three dimensions.  All are further
+      constrained by the optimization objectives at the bottom.  Our
+      prior work addresses one or more cells in this framework.}
+      \label{fig:wrp}
+      \end{figure}
+
+      
+\paragraph{Our contributions.}
+We present the \textbf{Workload--Router--Pool (WRP) architecture}
+(\Cref{fig:wrp}), a three-dimensional framework that organizes both
+our prior work and the broader research landscape.  The
+contributions are:
+\begin{enumerate}[nosep]
+  \item A \textbf{structural decomposition} into three interacting
+        dimensions---Workload, Router, Pool---grounded in evidence from
+        our previous work.
+  \item A \textbf{mapping} of our prior work onto the
+        $3 \times 3$ WRP interaction matrix, showing which cells we
+        have addressed and which remain open.
+  \item A \textbf{research roadmap} of twenty-one concrete opportunities at
+        the intersections, each grounded in our prior measurements.
+\end{enumerate}
+
+

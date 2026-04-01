@@ -1,0 +1,77 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Full Offline Trajectories to Partial Trajecotories}
+% A dataset of experiences, $\mathcal{D} = \{ \tau_i \}_{i=1}^N, \text{ where } \tau = (s_0, a_0, s_1, a_1, \dots, s_T, a_T)$, is defined as a collection of trajectories where $s_0$ is the initial prompt and each $a_i$ is an assistant completion step, and each $s_i$ is the resulting state after taking action $a_{i-1}$, which may include environment feedback. Standard long-horizon RL methods for LLMs, such as GRPO compresses the entire trajectory as one assistant action backpropagates only on the assistant $a_i$ tokens \citep{shao2024deepseekmathpushinglimitsmathematical} \todo{CITE for something like this}.
+
+A typical dataset of trajectories is defined as $\mathcal{D}_{\tau} = \{ \tau_i \}_{i=1}^N, \text { where } \tau = (r, s, a)$, where $N$ is the number of trajectories, $r$ is the reward, $s$ is the initial prompt, and $a$ is the trajectory completion, which may include multiple model completions, environment feedback such as tool responses, and formatting tokens. In typical SFT and GRPO settings, loss is only applied to the model completions in order to avoid hallucinations \todo{cite relevant papers}.
+
+In an episodic MDP setting, we explicitly split each trajectory into sequential states and actions by using each model completion as the boundary. This yields $\mathcal{D}_{\tau_\text{episode}} = \{ \tau_i \}_{i=1}^N, \text{ where } \tau = (r, s_0, a_0, s_1, a_1, \dots, s_{|\tau|}, a_{|\tau|})$, and $|\tau|$ is the number of model completions for the trajectory $\tau$. In this setting, $s_0$ is the initial prompt, $a_i$ is the full model completion given $s_i$, and $s_{i+1}$ is the resulting state including the environmental feedback resulting from the action $a_i$ given $s_i$.
+
+In many LLMs, each $s_{i<j}$ may not be a strict prefix string of each $s_j$, especially with reasoning truncation in reasoning models \citep{qwen3technicalreport,deepseekai2025deepseekv32pushingfrontieropen,kimiteam2025kimik2openagentic}, yielding a dilemma in on-policy RL from rollouts generated from the initial prompt $s_0$ using standard RL methods \todo{cite more papers talking about this}.
+
+We mitigate this issue in PivotRL by flattening each $(s_i, a_i)$ pair as its own experience, such that $\mathcal{D}_{\text{episode}} = \{ (s_i, a_i, r_i) \}_{i=1}^M$ where $M = \sum_{i=1}^N |\tau_i|$, and $r_i$ is the reward associated with each model completion $a_i$ given state $s_i$. We refer to each triplet $(s_i, a_i, r_i)$ as a pivot. Given $\mathcal{D}_{\text{episode}}$, we can now train a policy $\pi$ by using a standard training approach without needing to mask parts of $a_i$.
+
+\subsection{Reward Labeling for Pivots}
+The PivotRL dataset $\mathcal{D}_{\text{episode}} = \{ (s_i, a_i, r_i) \}_{i=1}^M$ depends on having dense labels $r_i$ for each state-action pair which is often non-trivial to obtain. Especially with experiences gained from the verified rewards setting \citep{shao2024deepseekmath,lambert2025tulu3pushingfrontiers,pyatkin2025generalizingverifiableinstructionfollowing}, where the only reward signal is from the final outcome, there is no trivial way to label each action with a process reward. Existing approaches that do not involve human labeling include using a explicit Process Reward Model \citep{lightman2023letsverifystepstep}, Monte Carlo Tree Search \citep{xin2024deepseekproverv15harnessingproofassistant,luo2024improvemathematicalreasoninglanguage}, heuristics-based search \citep{dong2025agenticreinforcedpolicyoptimization} or intermdiate state densification \citep{luo2025agentlightningtrainai} \todo{add more citations}.
+
+We build upon the core insight that the goal for SFT data is to curate high quality trajectories \citep{zhou2023limaalignment}. Under the assumption that each trajectory $\tau_i$ is the optimal completion given the initial prompt $s_0$, we can assume every $a_i$ to be the optimal completion given each $s_i$. We label this optimal action as $a_i^*$. Then, for any alternate response $\hat{a_i}$, we have:
+\begin{equation}
+    r_i = \begin{cases} 
+        1 & \text{if } f(\hat{a}_i, a_i^*) = 1 \\
+        0 & \text{otherwise}
+    \end{cases}
+\end{equation}
+where $f(\hat{a}_i, a_i^*)$ is a comparison function between two actions.
+
+The choice for $f(\hat{a}_i, a_i^*)$ can be arbitrary. For simplicity, we consider the following variants:
+\begin{itemize}
+    \item String Comparison: We compare the string contents of $\hat{a}_i$ and $a_i^*$ directly, under some constraints. For example, under the OpenAI tool call schema \citep{OpenAI_Function_Calling} \todo{DO I NEED TO CITE THIS ?}, each tool call has a name and arguments defined in a python dictionary structure. For fields that are one-word in $a_i^*$ we employ strict comparisons, which is in practice tool names, or fields such as filenames for SWE tasks. For fields that are multiple words in $a_i^*$, we employ an IOU-based comparison with a loose threshold, which in practice matches for fields such as search queries or code bodies.
+    \item LLM-as-a-Judge\todo{cite}: We compare $\hat{a}_i$ and $a_i^*$ for some samples where string comparison is less meaningful by employing LLM-as-a-Judge for correctness. In practice, we may not need the $a_i^*$ in this case depending on the judge criterion.
+\end{itemize}
+
+Finally, given the labeled data $\mathcal{D}_{\text{episode}}$, we can train our policy using the standard GRPO \citep{shao2024deepseekmath} loss:
+
+\begin{align}
+L_{GRPO}(\theta) = \mathbb{E} \Bigg[ \frac{1}{G} \sum_{i=1}^G \bigg( \min \Big( \text{IS}_i(\theta) A_i, \, \text{clip}(\text{IS}_i(\theta), 1-\epsilon, 1+\epsilon) A_i \Big) - \beta D_{KL}(\pi_\theta || \pi_{ref}) \bigg) \Bigg]
+\end{align}
+where $\text{IS}_i(\theta) = \frac{\pi_\theta(o_i | q)}{\pi_{old}(o_i | q)}$ is the importance sampling ratio and $A_i = \frac{r_i - \frac{1}{G} \sum_{j=1}^G r_j}{\text{std}(r_1, \dots, r_G)}$ is the advantage of each action.
+
+
+\subsection{Pivot Selection Strategies}
+We propose 3 variants of training on $\mathcal{D}_{\text{episode}}$:
+\begin{enumerate}
+    \item Random Pivot: This is the naive approach to using $\mathcal{D}_{\text{episode}}$. We simply run RL on all samples from the dataset.
+    \item Mixed Rewards: We profile all samples in $\mathcal{D}_{\text{episode}}$ on the untrained policy model $pi_0$, choosing only samples with variance in rewards over multiple rollouts.
+    \item Advantage Gap: From the Mixed Rewards setting, we filter for samples which are difficult with a set threshold.
+\end{enumerate}
+
+\paragraph{Reward Profiling}
+To curate the dataset, we first perform reward profiling using the initial policy $\pi_0$. For every sample $(s_i, a_i) \in \mathcal{D}_{\text{episode}}$, we execute $n$ independent rollouts using $\pi_0$. Let $R_{i,k}$ denote the cumulative reward of the $k$-th rollout for the $i$-th sample. We compute the empirical mean return $\mu_i$ and reward variance $\sigma^2_i$ as:
+\begin{equation}
+    \mu_i = \frac{1}{n} \sum_{k=1}^n R_{i,k}, \quad \sigma^2_i = \frac{1}{n-1} \sum_{k=1}^n (R_{i,k} - \mu_i)^2
+\end{equation}
+
+\subsubsection{Random Pivot}
+The Random Pivot dataset utilizes the entire episode history without filtering. It can be formalized as:
+\begin{equation}
+    \mathcal{D}_{\text{random}} = \mathcal{D}_{\text{episode}}
+\end{equation}
+
+\subsubsection{Mixed Rewards}
+The Mixed Rewards dataset filters for samples that exhibit stochasticity or uncertainty in their outcomes under $\pi_0$. We select samples where the reward variance exceeds a small threshold $\epsilon_{\text{var}}$:
+\begin{equation}
+    \mathcal{D}_{\text{mixed}} = \{ (s_i, a_i, r_i) \in \mathcal{D}_{\text{episode}} \mid \sigma^2_i > \epsilon_{\text{var}} \}
+\end{equation}
+Empirically, we choose $\epsilon_{\text{var}} = 0$, which would choose any samples with variance. Under the GRPO paradigm, this equates to filtering for any samples with non-zero advantage, maximizing training signal in the first training step.
+
+One downside of the Mixed Rewards dataset is that it relies on profiled rewards from the initial policy $pi_0$. During training, while the initial step will only contain samples with non-zero advantage, as the policy is updated, there is no longer such a guarantee. To mitigate this effect, we propose the advantage gap pivot selection method
+
+\subsubsection{Advantage Gap}
+The Advantage Gap dataset focuses on samples that are both uncertain (from $\mathcal{D}_{\text{mixed}}$) and currently difficult for $pi_0$. We apply a difficulty threshold $\lambda_{\text{diff}}$ to the mean return:
+\begin{equation}
+    \mathcal{D}_{\text{adv}} = \{ (s_i, a_i, r_i) \in \mathcal{D}_{\text{mixed}} \mid \mu_i < \lambda_{\text{diff}} \}
+\end{equation}
+Intuitively, taking harder questions under $\pi_0$ will partially mitigate all samples yielding reward $1$ under a trained policy $\pi_t$, as even though $\pi_t$ does overall better in the set of $\mathcal{D}_{\text{mixed}}$, the harder samples continue to yield mixed rewards as easier samples tend $0$ advantage.
+
+Empirically, we find that by $\lambda_{\text{diff}} = 0.6$, we see that the standard deviation of the rewards in a given batch tend to be higher across more training steps than using $\mathcal{D}_{\text{random}}$ or $\mathcal{D}_{\text{mixed}}$. Surprisingly, we also see that the peak model accuracy to be higher when trained on $\mathcal{D}_{\text{adv}}$, yielding a stronger policy than when training under other dataset variants.

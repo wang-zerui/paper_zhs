@@ -1,0 +1,81 @@
+
+
+\section{Design}
+
+With the wide array of techniques mentioned above, distributed training is made much easier. However, there is no system to integrate all of them to achieve the ultimate automation for parallel training. In the most recent work, Alpa has unified data, tensor, and pipeline parallelism, but not activation checkpoint. Therefore, our work attempts to take activation checkpointing into consideration and generates a near-optimal execution plan which includes both parallelization and activation checkpoint. \textbf{Currently, our work is limited to intra-operator parallelism and inter-operator parallelism will be implemented in the future.}
+
+Colossal-Auto is a system built upon PyTorch FX~\cite{torch-fx}. 
+The input of the system is the PyTorch model written in a non-distributed manner, and the output is a transformed PyTorch model that can be executed with efficient intra-op parallelism and automatically selected activation checkpointing for the cluster environment.
+As the output model is a PyTorch model, it is compatible with runtime optimization methods, such as ZeRO-Offload~\cite{ren2021zero} and PatrickStar~\cite{fang2022parallel, huang2022elixir}. A sample code snippet is given below.
+
+
+\begin{lstlisting}[language=Python, label=demo, caption=an example to show how to use our system with \textit{\textbf{one-line changing}} from user source code., label=code sample]
+model = resnet50(num_classes=10)
+
+# convert original model to optimized model
+model = autoparallelize(model, input_sample)
+
+criterion = torch.nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(model.parameters())
+
+# a normal training loop
+for epoch in range(NUM_EPOCHS):
+    for img, label in data_loader:
+        optimizer.zero_grad()
+        output = model(img)
+        train_loss = criterion(output, label)
+        train_loss.backward(train_loss)
+        optimizer.step()
+\end{lstlisting}
+
+
+% \begin{figure}[h!]
+%     \centering
+%     \includegraphics[width=0.47\textwidth]{img/code_sample.png}
+%     \caption{an example to show how to use our system with \textit{\textbf{one-line changing}} from user source code.}
+%     \label{fig: code sample}
+% \end{figure}
+% 怎么讲系统架构
+% - 按照workflow顺序介绍
+%   - Profiler：采集compute graph (symbolic tracer) + hardware information (Distributor Tensor Manager一部分）
+%     - 输入source code+硬件
+%     - 输出图标记，device mesh
+%     - 设计了一个distributed tensor converter.(这个部分必须要在solver前面，不然intra-op的resharding cost还有activation checkpoint的recomputing cost都没法确定)
+%   - Solver: 找最优执行方案 (叫hierarchical太alpa了）
+%     - 输入：标记图+device mesh
+%     - 输出： execution plan IR
+%     - stage1 找最佳intra-op
+%     - Stage 2给每一个intra-op找activation recomputation
+%   - Generator：生成code
+%     - 输入：最佳execution plan IR
+%     - 输出：PyTorch Code
+%     - 保证execution plan能生成
+
+    
+% It generates efficient parallel execution plans by means of two hierarchical optimizations at intra-op parallelism and activation recomputation level.
+% It collects information provided by the hardware and compute graph of the module, and search for the execution plan.
+% The workflow of Colossal-Auto is shown in figure~\ref{fig: workflow}.\par
+
+
+
+
+
+% \subsection{Analyzer}
+
+% Analyzer is a static analysis system built for PyTorch. As PyTorch is a dynamic-graph based machine learning framework, it is difficult to obtain the graph information before execution. Our analyzer is built about the PyTorch FX module~\cite{torch-fx} to obtain the static computation graph ahead of time. The analyzer nconsists of three parts: a \textit{symbolic profiler} for collecting computing and memory overhead related to static computation graph, a \textit{cluster detector} for collecting hardware characteristics and detecting cluster topology and a \textit{tensor layout manager} to find efficient tensor layout conversion path from different sharding spec and record conversion cost.\par
+
+% \textit{Symbolic profiler} obtains the static computation graph of the model through symbolic tracing. We improved upon the PyTorch FX~\cite{torch-fx} symbolic tracing to support a wider range of operations and control flow.
+% The analyzer annotates the meta information for each node during graph tracing, and collects both the computing overhead (TFLOPs) and memory overhead (Byte) for all feasible intra-op parallel strategies of each node using symbolic execution. The symbolic execution is achieved with PyTorch meta tensor and the operation only computes the meta data of the output such as shape and data type. Therefore, the overhead of the symbolic profiling process is negligible.\par
+
+% \textit{cluster detector} collects hardware communication performance metrics, such as latency and bandwidth, between each pair of devices in a cluster through a series of benchmark execution. 
+% With these performance metrics, the cluster profiler will detect a fine-grained cluster topology instead of simply distinguishing devices by inside nodes and cross nodes. We could construct a device mesh with optimal device assignment under the instruction of cluster information supplied by our profiler.\par
+
+% \textit{Tensor layout manager} could find an efficient layout conversion path through a novel heuristic search algorithm. It also estimates the conversion cost which is used in a two-stage solver.\par
+
+
+% \textbf{Solver} is designed to find the optimal execution plan for a given computation graph and cluster in two stages. 
+% \textit{Intra-op parallelism stage} is to find the plan with the minimum total execution time of all nodes with respect to the constraint of the memory budget. \textit{The activation checkpoint stage} is to search for the fastest execution plan that meets the memory budget on the computation graph after inserting the communication nodes by the intra-op parallelism stage. The reason we use two-stage optimization is that if the two tasks are formulated together, the solving time will be significantly increased, which will greatly affect the user experience of the system. On the contrary, solving in two hierarchical levels has many advantages. Firstly, compared with the computation graph with activation checkpointing, the original graph has fewer nodes, which can reduce the solving cost of intra-op parallelism solver. In addition, a more optimal solution can be found by adding the communication overhead into the activation checkpoint modeling. \par
+
+
+
+% \textbf{Generator} applies the searched execution plan to the computation graph and recompiles the computation graph to optimized PyTorch code. It has \textit{a series compile pass} to insert a communication node or do the kernel substitution as the intra-op parallelism solver required. Additionally, we implement a \textit{code generation} feature to recognize the annotation from the activation checkpoint solver and inject the activation checkpoint block following annotation instructions. \par

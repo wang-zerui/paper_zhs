@@ -1,0 +1,66 @@
+\section{GUI-MCP：面向安全 LLM-设备交互的高效协议}
+\label{sec:gui-mcp}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{figs/mcp.pdf}
+\caption{GUI-MCP 的整体架构。它由低层 MCP 与高层 MCP 两部分组成，同时兼顾执行效率与隐私保护。}
+\label{fig:gui-mcp-architecture}
+\end{figure}
+
+尽管 LLM 已经展现出很强的推理与规划能力，但 GUI 自动化在实际落地时仍然缺少一个统一、标准化的接口层。现有方案往往高度依赖具体平台和工程实现，导致不同模型、不同设备之间难以复用。为此，本文提出 \textbf{GUI-MCP}（Graphical User Interface - Model Context Protocol），它是第一个专门面向 GUI 操作任务设计的 MCP 实现。
+
+GUI-MCP 的目标是让 LLM 能通过统一协议控制 Ubuntu、macOS、Windows、Android 和 iOS 等多种设备，从而把 GUI 自动化从“为每个平台单独定制”转变为“在统一接口上调度异构设备能力”。
+
+\subsection{体系结构}
+
+GUI-MCP 采用分层设计，分为 \textbf{低层 MCP} 与 \textbf{高层 MCP}。
+
+\paragraph{低层 MCP。}
+低层 MCP 主要面向原子操作，提供细粒度设备控制接口，包括：
+\begin{itemize}
+\item 设备管理，如 \texttt{get\_device\_list()}；
+\item 状态感知，如 \texttt{get\_screenshot()}；
+\item 基本交互动作，如点击、双击、滑动、长按、拖拽、输入文本与热键等。
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{类别} & \textbf{操作} \\
+\midrule
+点击 & \texttt{click}, \texttt{double\_click}, \texttt{triple\_click} \\
+手势 & \texttt{swipe}, \texttt{long\_press} \\
+鼠标 & \texttt{move\_to}, \texttt{drag\_to} \\
+输入 & \texttt{input\_text}, \texttt{hotkey} \\
+应用 & \texttt{awake} \\
+\bottomrule
+\end{tabular}
+\caption{低层 MCP 暴露的典型原子操作。}
+\label{tab:low-level-mcp}
+\end{table}
+
+这一层给予主模型最大的控制灵活性，适合需要逐步规划、依赖上下文确认、或超出本地专家模型能力边界的场景。
+
+\paragraph{高层 MCP。}
+高层 MCP 则面向完整任务执行，例如 \texttt{execute\_task(task\_description)}。用户或主 LLM 只需要提供自然语言任务描述，系统就会调用本地 GUI 专家模型（如 Step-GUI-4B）自动完成整段 GUI 操作。这样做的好处是，主模型不再需要为每一个简单界面动作都参与推理和 API 交互。
+
+\subsection{设计优势}
+
+\paragraph{执行效率。}
+分层设计允许系统按任务复杂度灵活切换控制模式：对于简单且封闭的 GUI 操作，可以直接交给本地高层 MCP 完成；对于复杂、多轮、存在歧义或需要外部推理的任务，则使用低层 MCP，让主模型保留更强控制力。这样可以显著降低主模型的推理成本与 API 调用次数。
+
+\paragraph{隐私保护。}
+GUI 场景中的截图和界面状态通常包含个人消息、支付信息、位置、联系人等隐私内容。GUI-MCP 提供了\textbf{高隐私模式}：
+\begin{itemize}
+\item 外部云端模型无法直接看到原始截图；
+\item 本地图像与敏感状态先由本地 GUI 模型解析；
+\item 对外仅输出完成任务所需的语义摘要，而不是原始像素内容。
+\end{itemize}
+
+这一设计使得系统既能利用云端大模型的高层推理能力，又能尽量把敏感视觉数据留在设备本地处理，从而在可用性与隐私之间取得较好平衡。
+
+\paragraph{可扩展性。}
+由于 GUI-MCP 把设备能力抽象成统一协议，未来无论是新增应用、平台，还是接入不同能力级别的本地 GUI 专家模型，都可以在同一协议层上扩展，而不需要重写整套 LLM 交互逻辑。

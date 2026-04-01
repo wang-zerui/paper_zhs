@@ -1,0 +1,166 @@
+\section{引言}
+\label{sec:intro}
+
+\noindent
+近年来，以大语言模型（LLM）为代表的深度学习模型正在快速推动各类应用的发展~\cite{aws-rekognition,chatgpt,copilot,sora,stability-ai}。
+由于这类模型的计算需求极其庞大，
+它们通常以模型即服务（model-serving-as-a-service，{\maas}）系统的形式对外提供能力~\cite{serverless-together-ai,serverless-ray,deepinfra,DBLP:conf/asplos/YangZLZLZCL22,ali-serverless-llm,aws-serverless-llm,DBLP:journals/corr/abs-2401-14351}。
+这类系统统一管理一个由加速器（例如 GPU）组成的集群，
+并为每个已部署模型分配适量的服务\emph{实例}，
+每个实例都包含用于执行推理的 GPU 资源。
+
+{\maas} 系统有两个核心设计目标：
+一是\emph{最大化 goodput}——也就是满足服务等级目标（SLO）的请求数量；
+二是\emph{最小化分配给每个模型的实例数量}，以提升硬件利用率。
+要同时满足这两个目标并不容易，
+因为单个模型对实例数量的短期需求会发生难以预测的波动：
+请求到达率可能在秒级突增，在 2 秒内增长 5\,$\times$~\cite{alpaserve,DBLP:conf/nsdi/0025TKS23}；
+与此同时，由于 LLM 具有自回归特性，
+单个请求带来的内存占用同样难以预估~\cite{alpaserve,DBLP:conf/nsdi/0025TKS23,DBLP:journals/corr/abs-2401-14351}。
+关于这一点，可参见 {\fig{fig:problem-statement}} 与 \textsection{\ref{sec:problem-statement}}。
+
+模型自动扩缩容是一种很有前景的解决方案~\cite{DBLP:conf/asplos/YangZLZLZCL22,serverless-ray,DBLP:journals/corr/abs-2401-14351,kserve}。
+借助自动扩缩容，
+{\maas} 系统只需为每个模型长期维持其平均所需的实例数量，
+而这一平均需求通常相对稳定~\cite{wang2024burstgpt}，
+因此能够提升整体利用率。
+当突发流量出现时，
+系统再自动扩出新的实例，
+以避免由于已分配实例不足、请求排队过长而造成的 SLO 违约。
+
+自动扩缩容的速度对于减少 SLO 违约至关重要，
+因为在扩出的实例可用之前，排队请求都无法得到处理。
+以 Llama3-8B 为例，
+它在商用 GPU（A800）上的单次推理时间约为 80--900\,ms，
+而在聊天机器人等场景中，用户通常期望响应时间低于 1 秒~\cite{latency-study,DBLP:conf/osdi/ZhongLCHZL0024,aws-latency}。
+为了满足这样的严格 SLO，
+扩缩容时间通常必须低于 500\,ms。
+然而，对于参数规模达到 10--400\,GB 的 LLM 来说，实现这一点非常困难。
+根本原因在于自动扩缩容的\textbf{数据平面过慢}——也就是把模型参数加载到实例 GPU 上的过程过慢。
+现有工作虽然已经利用高带宽 SSD 来加速这一过程~\cite{DBLP:journals/corr/abs-2401-14351}，
+但 GPU 服务器上的 SSD 所能提供的速度（每 GPU 仅 2--10\,Gbps~\cite{googleinstance,awsinstance,volcanoinstance}）仍远远不够。
+例如，在 10\,Gbps SSD 上把 Llama3-8B 加载到一张 GPU 上，需要 12.8 秒。
+另一个阻碍快速扩缩容的因素是，现有方法大多是\textbf{stop-the-world} 的：
+在所有参数完成加载之前，新扩出的实例无法处理任何请求。
+这意味着自动扩缩容的速度会被数据平面直接卡住。
+
+为缓解上述问题，ServerlessLLM 等最先进系统进一步采用了多级缓存，
+把模型参数缓存在主机（CPU）内存中，以加速数据平面~\cite{DBLP:conf/osdi/GujaratiKAHKVM20,DBLP:conf/eurosys/JeongBA23}。
+在缓存命中的情况下，
+系统可以借助高速 CPU-GPU 链路（例如 256\,Gbps 的 PCIe）来加载参数。
+然而，想要获得很高的命中率并不现实：
+ServerlessLLM 报告的缓存命中率只有 40--75\,\%，
+我们的实验也验证了这一点（见 \textsection{\ref{sec:bg-motiv}}）。
+根本原因在于，{\maas} 系统一般会同时托管大量模型，
+而若想在每台主机的 DRAM 中都缓存这些模型、从而达到 100\,\% 命中率，显然并不现实。
+云厂商之所以需要托管如此多模型，
+是因为当下存在数百个面向不同用途的热门开源模型家族~\cite{huggingface}；
+同时，每个模型家族内部通常还有多个规模版本，
+用于在精度与服务成本之间进行权衡~\cite{qwens}。
+此外，开发者还可以基于开源模型上传自己微调后的定制版本~\cite{aws-serverless-llm}。
+
+为了在不依赖缓存命中的前提下实现快速模型扩缩容，
+我们做出了以下两点关键贡献：
+
+\stitle{1. 借助计算网络多播，在 $O(1)$ 或零缓存下实现快速数据平面。\,}
+首先，{\maas} 系统通常依赖高速 GPU-GPU/CPU 计算互连~\cite{nvidia-compute-network}，
+其带宽可达 100--400\,Gbps 的 RDMA，甚至 16\,Tbps 的 NVLink~\cite{googleinstance,awsinstance,volcanoinstance}，
+明显快于 SSD，也与 CPU-GPU PCIe 相当，甚至更快。
+这些计算网络本来就会在推理过程中承担数据传输，
+但我们发现它们普遍处于低利用状态：
+即使在采用 Prefill/Decode 解耦的网络密集型 LLM 服务负载中，
+其总带宽利用率也只有 7.4\,\% 左右~\cite{DBLP:conf/isca/PatelCZSGMB24, DBLP:conf/osdi/ZhongLCHZL0024,DBLP:journals/corr/abs-2401-11181,DBLP:conf/ppopp/CaiLMMMNS21,DBLP:journals/corr/abs-2404-09526}（见 \textsection{\ref{sec:bg-motiv}}）。
+因此，我们可以把这些高速链路借来加速自动扩缩容的数据平面。
+
+其次，基于网络的数据平面只需要极少甚至不需要缓存就能实现快速扩缩容。
+具体来说，
+如果某个模型已经部署在若干实例上，
+我们就可以直接通过网络把这些已部署实例中的参数多播出去，
+从而完全不依赖缓存。
+这种多播之所以高效，
+是因为串行转发式多播~\cite{DBLP:conf/icpp/VerstoepLB96}
+在传输大块数据（例如模型参数）时，
+其开销基本与接收端数量无关。
+即使某个模型当前还没有任何已部署实例，
+我们也只需要在某台主机上缓存一份参数，
+然后由该主机进行广播，即可在 $O(1)$ 主机缓存下完成多播。
+这种“每个模型只需 $O(1)$ 缓存副本”的方式，
+使我们能够避免缓存未命中，
+因为整个集群的主机总内存足以缓存 {\maas} 所服务的全部模型。
+
+尽管高速网络能够在极少缓存的前提下显著加快数据平面，
+但只要扩缩容仍是 stop-the-world，
+在网络速度仍不足够快的情况下，它依然会成为瓶颈。
+例如，对于 Qwen2.5-72B 在 BurstGPT 工作负载上的服务，
+若希望将 SLO 违约率压到 40\,\% 以下，
+系统需要把停顿时间控制在 500\,ms 以内。
+这意味着每张 GPU 至少需要 576\,Gbps 的参数传输带宽\footnote{\footnotesize{72\,B 模型的单个服务实例至少需要 4 张 GPU。}}，
+这不仅超过了典型计算网络配置（例如每 GPU 200\,Gbps）所能提供的带宽，
+甚至也超过了主机缓存场景下的 256\,Gbps PCIe。
+因此，我们认为理想的参数加载过程必须是\emph{在线}的：
+在数据尚未全部加载完成之前，新扩出的实例就应该能够参与服务。
+
+\stitle{2. 借助细粒度扩缩抽象与协同执行，实现在线数据平面。\,}
+在传统服务器无状态计算中常见的按需数据加载技术~\cite{mitosis,DBLP:conf/eurosys/WangHW19,DBLP:conf/sosp/HuangZMLLCJLSZL24}，
+以及 PipeSwitch~\cite{pipeswitch} 中的推理与加载重叠方法（见 \textsection{\ref{sec:overview}}），
+都无法让模型扩缩容真正做到在线。
+原因在于，实例只有在所有参数都加载完成之后才能输出最终结果。
+这种“必须全部加载完再服务”的停顿，根源在于现有系统采用了粗粒度的实例级扩缩抽象：
+它们只能在实例级别完成扩缩和服务。
+为了实现在线扩缩容，
+我们的核心洞察是：\emph{模型可以按照逐层的细粒度方式进行服务}。
+在这种逐层扩缩抽象下，
+我们可以把部分层的计算从过载实例卸载到新扩出的实例上，
+通过协同执行的方式，
+在新实例尚未加载完全部参数之前就提升整体服务吞吐。
+
+\stitle{挑战与解决方案。\,}
+首先，在我们的场景中利用基于网络的多播并不容易。
+虽然多播机制本身很直接——也就是简单地通过网络在实例之间转发参数——
+但难点在于如何生成多播计划，
+也就是决定数据应当如何在实例之间流动。
+一方面，源和目标会动态变化，
+而服务集群中的异构网络上求解最优计划是 NP-hard 的~\cite{DBLP:journals/jpdc/BhatRP03}；
+另一方面，我们还必须避免扩缩容流量与在线服务流量相互干扰，
+否则我们观察到扩缩时间会延长 1.5\,$\times$，尾部 TBT 下降 50\,\%（见 \textsection{\ref{sec:overview}}）。
+现有方案~\cite{DBLP:conf/asplos/CowanMMSX23,DBLP:conf/ppopp/CaiLMMMNS21,DBLP:conf/sc/GhazimirsaeedZR20}
+主要面向训练等离线场景，
+可以容忍较长的计划生成时间，
+也无须考虑与服务工作负载之间的干扰。
+为此，我们提出了一个面向模型的多播规划器，
+利用计算网络的关键特性以及模型服务中静态的数据流模式，
+快速生成近似最优且无干扰的扩缩容多播计划（见 \textsection{\ref{sec:design-plan}}）。
+
+其次，如何在已部署实例与在线扩缩实例之间调度请求执行也很有挑战，
+也就是决定每个实例执行哪些层。
+困难在于，扩缩中的新实例服务能力是受限的：
+它只能执行那些对应参数已经加载完成的层，
+而且这种能力会持续变化。
+一个朴素的“尽力而为”方案是让新实例能执行多少层就执行多少层，
+但这无法平衡负载，
+因为在扩缩早期，新实例只能执行极少数层，
+大多数请求仍会积压在过载实例上。
+更好的办法是从全局角度考虑后续将到来的层，
+并据此动态平衡负载。
+我们通过 ZigZag 流水线调度来实现这一点，
+在突发负载下可将尾延迟降低 50\,\%（见 \textsection{\ref{sec:design-pp}}）。
+
+\stitle{{\sys} 的实现与验证。\,}
+我们实现了 {\sys}，
+这是一个只需 $O(1)$ 缓存、同时具备极快自动扩缩容速度的 {\maas} 系统。
+我们在系统中引入了跨机器的全局参数池，
+并集成了上述无干扰多播扩缩计划以及基于 ZigZag 调度的在线执行机制。
+为了验证 {\sys} 的有效性，
+我们在多个真实工作负载轨迹上进行了评估，
+包括 BurstGPT~\cite{wang2024burstgpt}、AzureCode 与 AzureConv~\cite{AzurePublicDataset}，
+并覆盖了多种不同规模、不同结构的近期模型，
+包括 Llama3-8B、Mistral-24B 和 Qwen2.5-72B。
+结果表明：
+第一，相比当前最先进的 ServerlessLLM~\cite{DBLP:journals/corr/abs-2401-14351}，
+{\sys} 的首 token 时间（TTFT）缩短了 47--75\,\%，
+token 间时间（TBT）最多缩短了 94\,\%；
+第二，与不支持自动扩缩容的 vLLM~\cite{vllm} 与 DistServe~\cite{DBLP:conf/osdi/ZhongLCHZL0024} 相比，
+在不发生 SLO 违约的前提下，
+{\sys} 可将服务单个模型所需的 GPU 数量减少 49\,\%，
+这一结果以“按峰值请求率进行过度预配”的配置为参照。
+{\sys} 已在 \url{https://github.com/blitz-serving/blitz-scale} 开源。

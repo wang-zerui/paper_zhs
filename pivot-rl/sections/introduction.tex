@@ -1,0 +1,69 @@
+\section{Introduction}
+
+Post-training for long-horizon agentic capabilities---tool use, code editing, terminal interaction, web search---has a tension between efficiency and quality.
+Supervised fine-tuning (SFT) is efficient but degrades out-of-domain (OOD) performance: even when training spans multiple agentic domains and hundreds of thousands of trajectories, SFT models show consistent OOD regression on general benchmarks~\citep{shenfeld2025rlsrazoronlinereinforcement, chen2025retainingdoingroleonpolicy, chu2025sftmemorizesrlgeneralizes}.
+End-to-end reinforcement learning (E2E~RL) preserves OOD performance by staying on-policy, but requires full multi-turn rollouts with online environment interaction at every training step~\citep{shenfeld2025rlsrazoronlinereinforcement, chen2025retainingdoingroleonpolicy, chu2025sftmemorizesrlgeneralizes}.
+We ask: \emph{is there a post-training paradigm that achieves the accuracy and OOD retention of E2E~RL without the full-trajectory rollout burden?}
+
+Since agentic tasks produce environment feedback at each assistant turn, a natural first attempt is to perform on-policy RL at individual turn boundaries in existing expert trajectories, avoiding full-trajectory rollouts entirely.
+However, this naive approach is ineffective.
+As Figure~\ref{fig:rl_tau_reward_stddev} illustrates, the per-batch reward standard deviation under random turn sampling decays rapidly over training, indicating that most turns quickly cease to provide any gradient signal.
+The downstream effect is correspondingly modest: on $\tau^2$-Bench, random turn-level RL reaches only 59.68 accuracy, barely above the 58.44 achieved by SFT, while selecting informative turns reaches 63.81.
+This motivates a more selective approach: identifying the subset of turns that carry informative training signal---which we call \emph{pivots}.
+
+PivotRL consumes existing expert trajectories---the same data used by SFT---and converts them into on-policy RL at the pivot level.
+At each pivot, we sample completions from the current policy and score them by agreement with the expert continuation under domain-appropriate verifiers, so the reward captures whether an action is \emph{aligned} rather than whether it is \emph{identical}.
+To identify informative pivots, we profile each turn under the initial policy and retain only those with mixed outcomes, prioritizing turns where the policy sometimes succeeds and sometimes fails.
+
+We show that PivotRL corrects two limitations of SFT\@.
+Rewriting the SFT gradient as a policy gradient reveals a token-level exact-match reward that ignores functionally equivalent actions, and an importance weight that induces distribution shift~\citep{wu2025generalization}.
+PivotRL replaces the first with a turn-level functional-matching reward over a set of acceptable actions, and eliminates the second by sampling on-policy at each pivot.
+We prove in Theorem~\ref{thm:kl-projection} that under this matching-style reward, the optimal policy is a KL projection of the reference onto an expert-matching constraint---it increases mass on acceptable actions while preserving the reference ranking elsewhere, explaining why PivotRL improves task accuracy without OOD degradation (Section~\ref{sec:method}).
+
+We validate this analysis on Qwen3-30B-A3B across four agentic domains.
+First, PivotRL achieves better in-domain accuracy and stronger OOD retention than SFT under the same data: in-domain gains average $+14.11$ versus $+9.94$ for SFT, while OOD change averages $+0.20$ versus $-9.48$ for SFT\@.
+Specifically, $\tau^2$-Bench improves $44.35 \to 63.81$, SWE-Bench Verified $19.07 \to 32.67$, Terminal-Bench $5.42 \to 20.00$, and BrowseComp $2.50 \to 11.30$.
+Second, on SWE-Bench---where E2E~RL is a common choice across recent models---PivotRL reaches competitive accuracy with lower rollout burden, and combining PivotRL with E2E~RL yields XX.XX, the best overall accuracy.\footnote{TODO: fill E2E combination number.}
+(Section~\ref{sec:experiments}).
+
+
+\newcommand{\diagcorner}{%
+  \begin{tikzpicture}[baseline=(current bounding box.center)]
+    \node[inner sep=0pt] (cell) at (0,0) {%
+      \begin{minipage}{3.4cm}
+        \vspace{0.5em}
+        \hfill {\small{Signal}}\\[-0.2em]
+        {\small{Compute}}\hfill\mbox{}
+        \vspace{0.1em}
+      \end{minipage}%
+    };
+    \draw (cell.north west) -- (cell.south east);
+  \end{tikzpicture}%
+}
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{m{3.6cm}|c|c|c}
+\toprule
+\diagcorner & \textbf{Token-level} & \textbf{Turn-level} & \textbf{Sequence-level} \\
+\midrule
+\textbf{Full E2E rollout} {\small\textit{(w/ reward)}}
+  & RL w/ Critic
+  & RL w/ PRM
+  & \cellcolor{sweetgreen}RLVF \\
+\hline
+\textbf{Tangential rollout} {\small\textit{(w/ environment)}}
+  & Distillation
+  & \cellcolor{sweetgreen}\textcolor{blue}{\textbf{PivotRL}}
+  & \textit{Meaningless} \\
+\hline
+\textbf{No-rollout} {\small\textit{(demonstration)}}
+  & \cellcolor{sweetgreen}SFT
+  & {\textit{Impossible}}
+  & {\textit{Improssible}} \\
+\bottomrule
+\end{tabular}
+\caption{Training methods organized by compute type (rollout strategy) and reward signal granularity. The \colorbox{sweetgreen}{diagonal band} represents the ``sweet region'' of practical methods.}
+\label{tab:training-methods}
+\end{table}

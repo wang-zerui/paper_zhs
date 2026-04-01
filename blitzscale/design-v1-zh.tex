@@ -1,0 +1,465 @@
+\section{详细设计与实现}
+\label{sec:design}
+
+\subsection{在线网络化扩缩计划生成}
+\label{sec:design-plan}
+
+\noindent
+当规划器收到“把参数扩到 $n$ 张新 GPU 上”的通知后，
+它会从参数池中获取 $s$ 个参数源，
+选择 $t$ 个空闲 GPU 作为目标，
+并生成一个计划，决定如何把参数从这 $s$ 个源发送到这 $t$ 个目标中的某些 GPU 上。
+在计划生成时，我们希望同时最小化三项指标：
+(1) 扩缩时间；
+(2) 计划生成时间；
+(3) 与在线服务工作负载之间的干扰。
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 11.45cm 23.1cm 0.25cm, clip]{figs/netwk-topo-v1.pdf}
+    \end{minipage} \\[2pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\emph{
+            {\sys} 如何对网络建模的示意图。
+        }}}
+        \label{fig:network-topo}
+    \end{minipage} \\[-20pt]
+\end{figure}
+
+\stitle{GPU 间网络建模。\,}
+要高效生成扩缩计划，
+首先需要对参数源与目标之间的网络进行建模。
+但在服务集群中，网络拓扑往往非常复杂，
+这项工作并不简单。
+我们的模型假设集群采用一种简化的 scale-up 与 scale-out 混合网络结构，
+而这正是现代 GPU 集群中广泛采用的方式~\cite{dellAiFabric, DBLP:conf/hoti/WangGSZH24, nvidia-compute-network}。
+{\fig{fig:network-topo}} (a) 展示了这一建模方法。
+
+首先，
+我们把通过 NVLink 这类高速 scale-up 网络相连的 GPU 建模为一个 GPU 组。
+这些 GPU 之间具有极高的互连带宽（1,600--3,600\,Gbps），
+因此在组内完成扩缩的开销可以忽略不计。
+相比之下，
+通过 RDMA 这类较慢 scale-out 网络相连的 GPU 更难建模，
+因为其拓扑通常呈现层次结构。
+为此，
+我们采用一个简单的 leaf-to-spine 模型，
+它能够覆盖包括 Clos 与 Rail-optimized 在内的多种广泛部署拓扑~\cite{DBLP:conf/hoti/WangGSZH24}，
+并支持不同的订阅比。
+在该模型中，
+每张 GPU（$i$）都以带宽 $BW_i$ 连接到一个叶子交换机（\text{LeafID}）；
+同一叶子交换机下的 GPU 之间形成全互连，
+也就是说，GPU $i$ 与 GPU $j$ 之间的带宽为 $\min(BW_i, BW_j)$。
+更高一层，叶子交换机连接到 spine 交换机，
+其叶间带宽小于或等于叶内带宽。
+为简化起见，
+我们不显式建模 spine 层，
+而是假设上层协议（例如 Virtual Link Trunking, VLT~\cite{DellVLTPatent2016} 以及 Equal-Cost Multi-Path, ECMP~\cite{RFC2992}）
+足以支持高效的叶间网络通信。
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 14cm 21cm 0.25cm, clip]{figs/scale-plan-algo.pdf} \\[1pt]
+    \end{minipage} \\[3pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\textit{
+            计划生成算法的伪代码。
+        }}}
+        \label{alg:alg-plan}
+    \end{minipage} \\[-15pt]
+\end{figure}
+
+\stitle{基于多播链的贪心计划生成。\,}
+为了能够在线快速生成计划，
+我们采用如算法~\ref{alg:alg-plan} 所示的三步贪心算法。
+第一步，
+通过剪枝参数源，避免其与在线服务工作负载发生任何干扰（第 1 行）。
+第二步，
+把通过 NVLink 等 scale-up 网络连接的目标节点聚合成组（第 2 行），
+从而可以利用 NVLink 广播高效完成并行的切分参数传输（见 {\fig{fig:parallel-shards}}）。
+最后，
+我们构造多条串行广播链（第 3--10 行）来形成最终扩缩计划。
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 11.6cm 23cm 0.25cm, clip]{figs/ring-2.pdf} \\[1pt]
+    \end{minipage} \\[4pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\emph{
+            为什么多条广播链更好，尤其是在在线扩缩场景中。
+        }}}
+        \label{fig:ring-2}
+    \end{minipage} \\[-15pt]
+\end{figure}
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 11.6cm 17.5cm 0.25cm, clip]{figs/ring.pdf}
+    \end{minipage} \\[7pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\emph{
+            (a) 为什么广播链适合高带宽需求的大规模传输；
+            (b) 为什么我们选择特定的链顺序。
+            $|M|$ 表示模型大小，$B$ 表示一条链中最慢链路的带宽。
+        }}}
+        \label{fig:ring}
+    \end{minipage} \\[-10pt]
+\end{figure}
+
+具体来说，
+一条串行广播链由若干源节点与目标节点组成，
+形式为 $S \rightarrow T_1 \rightarrow T_2 \rightarrow ... \rightarrow T_n$。
+需要注意的是，一条链中的每个节点都可能包含多张 GPU。
+这种链式结构有一个非常好的性质：
+对于模型扩缩这种带宽密集型传输场景，
+其整体传输时间几乎与接收实例数量无关，因此是最优的。
+如 {\fig{fig:ring}} (a) 所示，
+当 $T_1$ 收到第一层参数后，
+它会立刻把该层转发给 $T_2$；
+与此同时，源节点 $S$ 则继续把第二层发送给 $T_1$，
+于是第一层与第二层的发送时间能够彼此重叠。
+
+对于带宽均匀的网络，
+单条串行链通常已足够高效。
+但在叶脊网络中，叶间带宽往往存在差异，
+而且在我们的在线扩缩场景里，
+多条链是必要的。
+原因有两点：
+(1) 当每个叶子交换机下同时存在源和目标时，多条链可以避免较慢的叶间通信（第 6--7 行）；
+(2) 在 PD 解耦场景中，多条链还能够创造更多无干扰的在线扩缩机会。
+{\fig{fig:ring-2}} 展示了后一种情况：
+假设我们想在线扩出两个 prefill 实例，
+那么在 prefill 完成后，KVCache 需要被传到 decode 实例。
+如果只使用一条链，
+那么只有 $T_2$ 可以在不产生网络干扰的情况下参与在线扩缩，
+因为在 $T_1$ 处，KVCache 传输（\ding{192}）会与参数转发流量（\ding{193}）发生冲突。
+若改用两条链，并由两个参数源分别支撑（图 (b)），
+那么 $T_1$ 与 $T_2$ 都可以在无干扰的条件下参与在线扩缩。
+
+需要注意的是，
+链中节点的顺序同样非常重要。
+我们按照节点之间聚合链路带宽的降序来排列节点（第 2 行、第 5 行）。
+这样做的原因是，
+优先向高带宽节点发送参数，
+能够更快地提升整体服务吞吐。
+如 {\fig{fig:ring}} (b) 所示，
+假设源节点 $S$ 向 $T_2$ 发送参数的速度是向 $T_1$ 的两倍，
+那么链顺序 $S \rightarrow T_2 \rightarrow T_1$ 就优于 $S \rightarrow T_1 \rightarrow T_2$，
+因为前者中 $T_2$ 的停机时间只有后者的一半。
+此外，在我们的设置中，
+源节点本身也可以是一个 GPU 组，
+因为 GPU 往往配有独立网卡。
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 14.2cm 22.5cm 0.25cm, clip]{figs/parallel-shards.pdf} \\[1pt]
+    \end{minipage} \\[4pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\emph{
+            利用 scale-up 网络进行切分参数并行传输的示意图。
+        }}}
+        \label{fig:parallel-shards}
+    \end{minipage} \\[-15pt]
+\end{figure}
+
+\stitle{优化：来自多源的并行切分参数传输。\,}
+\label{sec:design-shard}
+对于一条广播链，
+如果其源节点与目标节点内部都包含拥有重复参数的多张 GPU，
+那么我们还可以进一步利用 scale-up 网络对链路传输进行并行化。
+{\fig{fig:parallel-shards}} 给出了一个具体例子。
+假设源节点与目标节点各有 4 张 GPU。
+在这种情况下，
+每张源 GPU 只需要向对应的目标 GPU 转发 1/4 的切分参数；
+随后目标侧 GPU 再通过基于 NVLink 的 AllGather 获得完整参数。
+由于 NVLink AllGather 的时间可以忽略，
+这种方式能够把扩缩时间缩短到原来的 1/4。
+
+\subsection{利用 ZigZag 调度实现高效在线扩缩容}
+\label{sec:design-pp}
+
+\nospacestitle{为在线扩缩选择实例。\,}
+在通过算法~\ref{alg:alg-plan} 得到若干广播链之后，
+我们会根据以下两个条件选择哪些实例参与在线扩缩：
+(1) 在线扩缩是否有必要，也就是 stop-the-world 扩缩是否会导致 SLO 违约；
+(2) 是否存在能够与之协同执行的过载实例。
+这两个条件都很容易获得：
+第一，我们可以利用 {\fig{fig:motiv-scale-speed}} 中“加载速度—SLO 违约率”之间的对应关系进行判断；
+第二，自动扩缩一般只会在系统过载时触发。
+因此，对每个过载实例，
+我们都会在广播链中识别一个满足条件 (1) 的新实例，
+通常是链尾实例，因为它们所处链路最慢，更有可能需要在线扩缩。
+
+\stitle{成对实例上的在线扩缩协议。\,}
+假设我们已经选定一个新实例（inst.1），
+用于从一个过载实例（inst.0）上卸载部分计算。
+为了启动在线扩缩，
+我们采用一个三阶段的状态转换协议：
+(1) 一旦 inst.1 开始加载参数，
+我们就把 inst.0 上所有排队请求以及新到请求全部重定向到 inst.1。
+由于请求负载远小于模型参数，
+这一步的重定向开销可以忽略不计。
+(2) 当第一层参数加载到 inst.1 后，
+它便开始执行所有请求的第一层。
+需要注意的是，在第一层加载期间，
+inst.0 仍继续处理自己当前的待执行请求。
+最后，
+当 inst.1 完成全部模型参数加载后（阶段 (3)），
+请求就会重新在两个实例之间平均分配。
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 7.1cm 14.2cm 0.25cm, clip]{figs/zigzag.pdf} \\[1pt]
+    \end{minipage} \\[3pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\textit{
+            ZigZag 调度必要性的示意图。
+            注意，执行从第 1 层被加载到实例 1（inst.1）后开始。
+            这里假设加载 1 层所需时间可以完成 6 层计算。
+        }}}
+        \label{fig:zigzag}
+    \end{minipage} \\[-15pt]
+\end{figure}
+
+\stitle{调度问题。\,}
+在上述协议的第 (3) 阶段中，一个关键问题是：
+如何最大化利用 inst.1，以在在线扩缩期间获得最高 goodput。
+更具体地说，
+我们需要为每个请求批次决定一个流水线配置，
+即分别在 inst.1 与 inst.0 上执行多少层。
+一个自然的朴素策略是“尽力而为”：
+对每个批次，
+在 inst.1 上尽可能多执行层（但不超过一半），
+其余层在 inst.0 上执行。
+尽管这种策略能够随着模型加载进度动态调整配置，
+但我们发现它并不最优，
+因为在初始加载阶段，inst.1 的服务能力非常有限，
+大多数请求仍会在 inst.0 上排队，从而导致 SLO 违约。
+{\fig{fig:zigzag}} (a) 给出了一个 7 层模型在这种 best-effort 调度下的例子。
+在这个设置中，
+加载 1 层所需的时间足以完成 6 层计算，
+这在实践中很常见（例如在 200\,Gbps RDMA 网络下，
+Llama2-7B 以中等 batch size 处理 2000 个 prefill token 的场景）。
+因此，在第二层尚未加载到 inst.1 之前，
+当前批次请求（req 1--6）都只能采用 $(1,6)$ 的流水线配置。
+然而，request 6 会因为需要等待 request 1--5 在 inst.0 上依次完成，
+而发生 SLO 违约；
+虽然它们的执行时间略有下降，
+但这种负载分配依然过于失衡。
+
+\stitle{ZigZag 调度。\,}
+针对上述问题，
+我们的观察是：
+如果适当延迟某些请求在 inst.0 上的执行，
+那么 inst.1 在这段时间里就能加载更多层，
+从而创造出更好的负载平衡机会。
+{\fig{fig:zigzag}} (b) 展示了这一点：
+当 requests 2--5 在 inst.1 上执行过第一层后，
+我们暂时延迟它们在 inst.0 上的执行，
+等待第二层加载完成。
+这样一来，
+它们就可以采用更激进的 $(2,5)$ 流水线配置。
+需要注意的是，这种延迟不会浪费 GPU，
+因为 inst.0 仍可以先去处理其他排队请求（例如 request 6）。
+一旦第二层加载完成，
+inst.1 就能以一种“之”字形（即 ZigZag）的方式回过头来，
+为 requests 2--5 执行第二层。
+因此，请求 3--6 的第二层执行时间，
+能够与 request 2 在 inst.0 上执行第 3--6 层的时间重叠。
+借助这种重叠，
+request 7 的整体推理时间就能从 32 降到 22，
+从而满足 SLO。
+
+我们可以把上述 ZigZag 调度形式化如下。
+假设系统采用 first-come-first-serve（FCFS）调度，
+这是当前模型服务中的事实标准~\cite{vllm,DBLP:journals/corr/abs-2404-09526,DBLP:conf/osdi/YuJKKC22}。
+为便于说明，
+我们先讨论非 LLM 场景，
+再在 \textsection{\ref{sec:design-llm}} 中扩展到 LLM。
+整个调度问题包含两部分。
+
+\emph{\textbf{(1) 流水线配置。}}
+给定 $N$ 个执行时间相同的请求批次，
+我们首先为它们确定流水线配置 $(\text{T}_i, \text{S}_i)$，
+其中 $\text{T}_i$ 与 $\text{S}_i$ 分别表示请求 $i$ 在目标实例与源实例上执行的层数。
+我们的目标是最小化平均时延，
+可表示为如下整数线性规划（ILP）：\\[-5pt]
+\[
+ \text{Latency}_\text{avg} = (\sum_{req=1}^{N} \sum_{i=1}^{req} \text{S}_{i}) / N
+\] \\[-3pt]
+\noindent
+这个公式之所以成立，可以参考 {\fig{fig:zigzag}} (b) 中的例子。
+每个请求的时延等于源实例完成自己那部分计算的时间，
+它既包含自身执行时间，
+也包含所有在它之前请求的执行时间（也就是排队时间）。
+由于请求按 FIFO 顺序执行，
+因此我们只需要考虑它前面的请求即可。
+在该例中，request 3 的时延为 17：
+其中 12 来自 requests 1 与 2 的执行时间，
+5 则来自它自身。
+对于非 LLM，
+只要 batch size 相同，每层执行时间就可以视为相同。
+这里我们忽略 activation 传输时延，因为它非常小。
+
+该问题需要满足如下约束：
+\begin{mini}
+    {}{\text{Latency}_\text{avg}}{}{} \\[-20pt]
+    \addConstraint{\text{S}_{i} +  \text{T}_{i} = L, \quad \forall i \quad \text{流水线约束 \bf{(C1)}}}{}  \vspace{-10pt}
+    \addConstraint{\sum_{j=1}^{i} \text{T}_j  \le \sum_{j=1}^{i-1} \text{S}_j,\forall i > 1 \quad \text{流水线依赖 \bf{(C2)}}}{} \vspace{-10pt}
+    \addConstraint{\text{Time}_{l} \ast \text{T}_i \leq \sum_{j=1}^{i-1} \text{T}_j + (N-i+1) \times (\text{T}_i - 1)} \vspace{-15pt}
+    \addConstraint{\forall i > 1 \quad \text{加载约束 \bf{(C3)}}}{}
+    \label{eq:pp-config}
+  \end{mini}
+\noindent
+\textbf{C1} 保证整个流水线会被完整执行。
+\textbf{C2} 表示流水线依赖关系：
+当源实例开始执行请求 $i$ 的 $S_i$ 层时，
+目标实例必须已经完成该请求对应的 $T_i$ 层。
+请求 $i$ 在源实例上的开始执行时间为 $\sum_{j}^{i-1} \text{S}_j$；
+目标实例完成请求 $i$ 上那部分计算的时间为 $\sum_{j}^{i-1} \text{T}_j + \text{T}_i$，
+也就是 $\sum_{j}^{i} \text{T}_j$。
+最后，\textbf{C3} 保证当目标实例准备执行请求 $i$ 的 $T_i$ 层时，
+这些层的参数都已经完成加载。
+其中，$\text{Time}_l$ 表示加载 1 层所需时间，并用“流水线中执行 1 层所需时间”进行归一化。
+项 $(N-i+1) \times (\text{T}_i - 1)$ 的含义是：
+加载过程可以与请求 $i$ 之后那些请求的执行过程重叠。
+
+虽然求解这个 ILP 在理论上是 NP-hard，
+但在实践中它仍然可控：
+例如对 Llama3-8B 来说，求解时间不到 40\,ms。
+原因在于模型通常只有几十层，
+而且我们只需要为参数加载期间会执行到的那十几个请求批次生成配置。
+不过，为了彻底消除大层数模型（例如有 80 层的 Qwen-72B）上的求解开销，
+我们还进一步推导出了一种无需 ILP 的调度方法，
+下面将对其进行介绍。
+
+\begin{figure}[!t]
+    \begin{minipage}{1\linewidth}
+        \hspace{-1mm}
+        \centering
+        \includegraphics[width=1\textwidth, trim=0.25cm 6.99cm 21.3cm 0.25cm, clip]{figs/zigzag-algo.pdf} \\[1pt]
+    \end{minipage} \\[3pt]
+    \begin{minipage}{1\linewidth}
+        \caption{\small{\textit{
+            无需 ILP 的 ZigZag 调度伪代码。
+        }}}
+        \label{fig:zigzag-algo}
+    \end{minipage} \\[-15pt]
+\end{figure}
+
+\emph{\textbf{(2) 以无 ILP 的 ZigZag 方式调度请求。}}
+我们发现，
+如果在源实例上适当延迟发送请求，
+并让目标实例在其空闲时优先执行这些请求，
+那么无需显式求解 ILP，也能达到 ZigZag 调度的效果。
+{\fig{fig:zigzag-algo}} 给出了在两个实例上调度请求的伪代码。
+新实例维护一个请求优先队列（源实例可以通过 RPC 拉取），
+优先级由两部分决定：
+(1) 请求在 FCFS 中的先后顺序；
+(2) 下一层所需参数已经加载完成的请求优先。
+一旦新实例执行完某个请求的一层（第 3 行），
+该请求仍然会保留在队列中，
+以便在后续更多层被加载后再次被调度回来执行。
+而源实例只有在自己不再过载、也就是没有待处理请求时，
+才会执行该请求（第 5 行）。
+因此，只要源实例仍然繁忙，
+请求就会继续留在目标实例侧执行。
+
+\subsection{全局参数池与扩缩策略}
+\label{sec:design-others}
+
+\nospacestitle{全局参数池与本地内存缓存。 }
+我们的全局参数池负责追踪模型参数在已部署 GPU 与主机 CPU 本地内存中的位置。
+为了保证在整个集群范围内，
+每个模型的参数至少在某张 GPU 或某台主机内存中保留一份副本，
+在系统初始化时，
+我们会把每个模型的一份参数均匀分散到各个 CPU 主机上，
+并由一个中心化管理器记录这些副本的位置。
+当模型被部署到某个 GPU 上，或从 GPU 上回收时，
+我们会同步更新该管理器中的位置信息，
+并相应回收或重新加载主机缓存中的副本。
+
+\stitle{扩缩策略。\,}
+本文聚焦于自动扩缩容机制本身，
+它与扩缩策略是正交的；
+后者包括如何收集工作负载指标，
+以及基于这些指标决定要扩出多少新实例。
+我们当前的实现遵循已有工作~\cite{DBLP:conf/osdi/SunHZXZL024,K8S-HPA}，
+在全局范围内记录服务负载（以 tokens per second 和 KVCache 占用为指标）。
+
+对于扩容，
+当平均监控负载超过预先设定的上界时，
+我们就分配足够多的实例去满足该需求。
+这个上界可以通过离线 profiling 单实例平均服务能力得到。
+更详细的策略说明我们放在另一篇论文中。
+对于缩容，
+我们沿用已有工作的基于超时策略~\cite{DBLP:conf/usenix/Romero0YK21,DBLP:journals/corr/abs-2401-14351}：
+当一段时间窗口内平均负载低于下界时，
+我们便关闭部分实例并收回其占用的 GPU。
+由于 {\sys} 的自动扩缩速度非常快，
+我们可以把这一超时时间设置得非常短，达到亚秒级。
+
+\subsection{面向 LLM 的特化与优化}
+\label{sec:design-llm}
+
+\noindent
+尽管前述大部分技术对所有遵循逐层架构的模型都适用，
+但 LLM，尤其是采用 PD 解耦服务的 LLM，
+仍然具有一些需要专门适配的特性。
+
+\stitle{修正后的在线流水线调度公式。\,}
+\textsection{\ref{sec:design-pp}} 中给出的公式与约束不能直接套用到 LLM，
+因为在 LLM 中，一层的 prefill 时间与 decode 时间通常近似线性地依赖于 batch 中 token 的总数~\cite{DBLP:conf/isca/PatelCZSGMB24,DBLP:journals/corr/abs-2404-09526}。
+对于只涉及 prefill 的在线调度场景——例如在 PD 解耦中对 prefill 实例进行扩缩——
+我们通过为每个请求批次引入一个正则化参数来修正该公式，
+该参数通过 profiling 请求批次在不同 token 数下的执行时间得到，
+这一点与已有工作~\cite{DBLP:journals/corr/abs-2404-09526} 类似。
+更棘手的是涉及 decode 的场景，
+例如扩一个同时承担 prefill 与 decode 的实例，
+或者在 PD 解耦中扩一个 decode 实例。
+这是因为 decode 的 batch size 会由于自回归生成过程而不断变化。
+幸运的是，
+我们提出的无 ILP 调度方法同样适用于 decode 场景。
+
+\stitle{支持 PD 共置（PD colocation）。\,}
+我们可以无缝支持 PD 共置，
+因为一个 PD 共置实例本质上就是一个普通模型实例。
+与此同时，
+我们的无 ILP ZigZag 调度同样适用于 PD 共置下的流水线执行~\cite{298679}。
+
+\stitle{在 PD 解耦中在线扩缩 decode 实例。 }
+在 PD 解耦场景下，
+如果直接对 decode 实例做在线扩缩，
+参数加载与 KVCache 传输都会形成入向流量，
+从而在带宽上发生冲突，因此无法做到无干扰。
+对此，我们利用一个事实：
+prefill 实例与 decode 实例共享同一份模型参数。
+因此，我们可以先把部分 prefill 实例转换成 decode 实例，
+从而实现 decode 侧的在线扩缩；
+与此同时，再对 prefill 实例执行在线扩缩，
+以补偿 prefill 吞吐的损失。
+
+\stitle{面向 PD 解耦的优化扩缩策略。\,}
+提前扩实例（pre-scaling）能够隐藏扩缩开销，
+但如果扩得过早，又会浪费 GPU 资源。
+在 PD 解耦场景下，
+我们发现可以以几乎零额外成本提前扩 decode 实例，
+因为 decode 实例即将扩容的需求，
+通常可以从 prefill 实例的扩容需求中推断出来。
+具体来说，一旦我们检测到 prefill 实例存在明显扩容需求，
+就会同步扩出对应的 decode 实例。
+这种做法能够有效隐藏 decode 实例的扩缩开销，
+而且对 ServerlessLLM~\cite{DBLP:journals/corr/abs-2401-14351} 这类其他系统同样有效，
+详见 \textsection{\ref{sec:eval-app}}。

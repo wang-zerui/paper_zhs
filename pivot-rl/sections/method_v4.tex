@@ -1,0 +1,304 @@
+
+\input{sections/prelim}
+
+% \section{Preliminaries and Motivating Observations}
+% \label{sec:prelim}
+
+% We start from the most direct local-RL construction available from expert trajectories and use it to expose the two bottlenecks that motivate PivotRL. Let $\mathcal{D}_{\mathrm{sft}}=\{\tau_i\}_{i=1}^N$ be the expert trajectory dataset used for SFT. Decomposing each trajectory at assistant decision boundaries gives $\tau=(s_0,a_0^*,\ldots,s_T,a_T^*)$, where $s_t$ is the full interaction history from the beginning of the trajectory up to, but not including, the $t$-th assistant action, and $a_t^*$ is the demonstrated assistant completion at that state. The resulting turn-level dataset is
+% \begin{equation}
+% \mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}_{t=0}^T.
+% \label{eq:cand}
+% \end{equation}
+% Throughout the paper, an \emph{action} is the full assistant completion at a model-call boundary, not an individual token. A local RL example conditions on $s_t$, samples a new action $a\sim\pi_\theta(\cdot\mid s_t)$, and executes only the short rollout needed to score that action. After offline filtering, the retained subset of these turns will be called \emph{pivots}.
+
+% A natural baseline keeps all turns in $\mathcal{D}_{\mathrm{cand}}$, samples them uniformly, and rewards the sampled action only when it exactly matches the demonstrated continuation:
+% \begin{equation}
+% r_{\mathrm{strict}}(s,a)=\mathbf{1}[a=a^*(s)].
+% \label{eq:strict_reward}
+% \end{equation}
+% This is the most literal way to convert SFT trajectories into local RL: the prefix is fixed by the expert trace, the next action is sampled on policy, and credit is given only for reproducing the demonstrated completion exactly.
+
+% In our current $\tau^2$ setup, this naive local-RL construction is only marginally better than same-data SFT: using all extracted turns reaches 59.68, versus 58.44 for same-data SFT and 63.81 after filtering to informative turns. Thus, simply converting demonstrations into local RL examples is not enough; the main question is where to spend rollout budget and how to assign local credit.
+
+% Deeper analysis reveals two bottlenecks.
+
+% \emph{(1) Many turns are uninformative under group-normalized RL.}
+% If $\{r_i\}_{i=1}^G$ are the rewards of a rollout group at state $s$, then the normalized advantage is
+% \begin{equation}
+% \hat{A}_i
+% =
+% \frac{
+% r_i-\frac{1}{G}\sum_{j=1}^G r_j
+% }{
+% \mathrm{std}(\{r_j\}_{j=1}^G)
+% }.
+% \label{eq:group_adv}
+% \end{equation}
+% When all sampled actions succeed or all sampled actions fail, every reward in the group is identical and hence every $\hat{A}_i$ is zero. We therefore use reward variance as a measure of turn informativeness. Empirically, under uniform turn sampling this variance collapses quickly during training, indicating that many sampled turns are already uniformly solved or uniformly failed and therefore contribute little learning signal.
+
+% \emph{(2) Exact-match local credit is too strict.}
+% In generative action spaces, many tool calls, shell commands, or search steps are locally acceptable without matching the single demonstrated string exactly. To quantify how much signal exact matching throws away, we compare it to a more permissive verifier-based reward $r_{\mathrm{func}}$ introduced in Section~\ref{sec:pivotrl_method} and define
+% \begin{equation}
+% \mathrm{MissRate}
+% =
+% \Pr\!\left[
+% r_{\mathrm{strict}}(s,a)=0
+% \;\middle|\;
+% r_{\mathrm{func}}(s,a)=1
+% \right].
+% \label{eq:miss_rate}
+% \end{equation}
+% A high miss rate means that exact matching discards rollouts that are functionally correct at the local decision point.
+
+% These two bottlenecks map directly to the two ingredients of PivotRL: we first filter to turns that still produce mixed outcomes under a reference policy, and then replace exact-match local credit with a verifier that rewards locally acceptable actions.
+
+\section{PivotRL}
+\label{sec:pivotrl}
+
+PivotRL modifies the naive local-RL baseline from Section~\ref{sec:prelim} in exactly two ways: it filters extracted turns so that online rollout budget is spent on informative states, and it replaces exact-match local credit with verifier-based reward. We now introduce the full training pipeline and then give two theoretical results that help explain these choices. Section~\ref{sec:pivotrl_method} presents the method. Section~\ref{sec:pivotrl_analysis} then studies the two components separately: Proposition~\ref{prop:mixed} and Theorem~\ref{thm:pivot} explain why turns with very different responses provide stronger local learning signal under group-normalized RL, while Theorem~\ref{thm:kl} shows that the verifier-based reward shifts probability mass toward acceptable actions while remaining conservative relative to the reference policy.
+
+\subsection{Method}
+\label{sec:pivotrl_method}
+
+In turn-level training, we extract assistant turns from each trajectory $\tau=(s_0,a_0^*,\ldots,s_T,a_T^*)$ into a \emph{pivot candidate} dataset:
+\begin{equation}
+\mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}_{\tau \in \mathcal{D}_{\mathrm{SFT}}, ~t = 0,\dots,T}.
+\label{eq:cand}
+\end{equation}
+PivotRL performs three steps: (i) profile turns offline and retain only those likely to remain informative, (ii) sample local on-policy rollouts at the retained turns, and (iii) optimize a verifier-based GRPO-style objective. We summarize the full procedure in Algorithm~\ref{alg:pivotrl}. The first step addresses the uninformative-turn bottleneck from Section~\ref{sec:prelim}; the second addresses the overly strict local-credit bottleneck.
+
+\paragraph{Offline turn selection.}
+We estimate the informativeness of each extracted turn under a frozen reference policy $\pi_0$, typically the policy used to initialize PivotRL. For a turn state $s$, we sample $K$ local rollouts from $\pi_0(\cdot\mid s)$, score them with the verifier, and compute
+\begin{equation}
+\hat{\mu}(s)
+=
+\frac{1}{K}\sum_{k=1}^K r_{\mathrm{func}}(s,a^{(k)}),
+\qquad
+\hat{\sigma}^2(s)
+=
+\frac{1}{K}\sum_{k=1}^K \bigl(r_{\mathrm{func}}(s,a^{(k)})-\hat{\mu}(s)\bigr)^2.
+\label{eq:profile_stats}
+\end{equation}
+We then keep only turns with nonzero empirical reward variance and low reward mean, 
+% \todo{Highly recommend to only do D adv here other wise the D mixed comes from no where, if we really need it in ablation, we can briefly mention it in the experiment ablation setup accordingly with one sentence.}
+\begin{align}
+\mathcal{D}_{\mathrm{adv}}
+=
+\left\{
+(s,a^*)\in \mathcal{D}_{\mathrm{cand}}
+\;:\;
+\hat{\sigma}^2(s)>0, ~~
+\hat{\mu}(s)<\lambda_{\mathrm{diff}}
+\right\}.
+\label{eq:dadv}
+\end{align}
+% \begin{align}
+% \mathcal{D}_{\mathrm{mixed}}
+% &=
+% \left\{
+% (s,a^*)\in \mathcal{D}_{\mathrm{cand}}
+% \;:\;
+% \hat{\sigma}^2(s)>0
+% \right\},
+% \label{eq:dmixed}\\
+% \mathcal{D}_{\mathrm{adv}}
+% &=
+% \left\{
+% (s,a^*)\in \mathcal{D}_{\mathrm{mixed}}
+% \;:\;
+% \hat{\mu}(s)<\lambda_{\mathrm{diff}}
+% \right\}.
+% \label{eq:dadv}
+% \end{align}
+The first filter removes turns that are already uniformly solved or uniformly failed under the reference policy; the second concentrates training on mixed-outcome turns that are still difficult. This filtered subset is thus called \emph{pivot} used for PivotRL training.
+We write $\mathcal{D}_{\mathrm{pivot}}$ for the retained training set, and unless otherwise stated use $\mathcal{D}_{\mathrm{pivot}}=\mathcal{D}_{\mathrm{adv}}$.
+
+\paragraph{Verifier-based local reward.}
+For a retained state $s$ (present in $\mathcal{D}_{adv}$), let $\mathcal{M}(s)\subseteq \mathcal{A}(s)$ denote the set of locally acceptable actions under a domain-specific verifier. PivotRL assigns reward
+\begin{equation}
+r_{\mathrm{func}}(s,a)=\mathbf{1}[a\in \mathcal{M}(s)].
+\label{eq:func_reward}
+\end{equation}
+Relative to the strict local reward in Eq.~\eqref{eq:strict_reward}, this verifier credits any action that is acceptable at the current turn, not only the single demonstrated completion. Depending on the domain, the verifier may be a normalized string/schema check, a task-specific equivalence rule, or a lightweight LLM judge.
+
+Given a retained turn set $\mathcal{D}_{\mathrm{pivot}}$ and rollout group size $G$, PivotRL samples $\{a_i\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot\mid s)$ at each selected state and optimizes
+\begin{equation}
+\mathcal{J}_{\mathrm{PivotRL}}(\theta)
+=
+\mathbb{E}_{\substack{
+s\sim \mathcal{D}_{\mathrm{pivot}}\\
+\{a_i\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot\mid s)
+}}
+\left[
+\frac{1}{G}
+\sum_{i=1}^G
+\min\!\Bigl(
+w_i(\theta)\hat{A}_i,\,
+\mathrm{clip}(w_i(\theta),1-\epsilon,1+\epsilon)\hat{A}_i
+\Bigr)
+- D_{\text{KL}}
+\right],
+\label{eq:pivotrl_obj}
+\end{equation}
+where $D_{\text{KL}} = \beta \KL(\pi_\theta(\cdot \mid s) \parallel \pi_0(\cdot \mid s))$ and
+\begin{equation}
+w_i(\theta)
+=
+\frac{\pi_\theta(a_i\mid s)}{\pi_{\theta_{\mathrm{old}}}(a_i\mid s)},
+\label{eq:importance_weight}
+\end{equation}
+and $\hat{A}_i$ is the group-normalized advantage from Eq.~\eqref{eq:group_adv}, computed using the local verifier rewards $\{r_{\mathrm{func}}(s,a_i)\}_{i=1}^G$. Relative to end-to-end RL, the only online interaction during training is the short rollout needed to score each sampled turn-level action.
+
+\begin{algorithm}[t]
+\caption{PivotRL}
+\label{alg:pivotrl}
+\begin{algorithmic}[1]
+\State \textbf{Require:} expert trajectories $\mathcal{D}_{\mathrm{sft}}$, reference policy $\pi_0$, initial policy $\pi_\theta$, verifier $V$, rollout group size $G$, difficulty threshold $\lambda_{\mathrm{diff}}$
+\State Extract turns $\mathcal{D}_{\mathrm{cand}}=\{(s_t,a_t^*)\}$ from $\mathcal{D}_{\mathrm{sft}}$
+\State Profile each $s\in\mathcal{D}_{\mathrm{cand}}$ with Eq.~\eqref{eq:profile_stats}
+\State Set $\mathcal{D}_{\mathrm{pivot}}\leftarrow \mathcal{D}_{\mathrm{adv}}$
+\For{$k=1,\dots,K_{\mathrm{train}}$}
+    \State Sample minibatch $\{s_b\}_{b=1}^B \sim \mathcal{D}_{\mathrm{pivot}}$
+    \For{each $s_b$}
+        \State Sample $\{a_{b,i}\}_{i=1}^G \sim \pi_{\theta_{\mathrm{old}}}(\cdot\mid s_b)$
+        \State Execute the short rollout needed to score each $a_{b,i}$
+        \State $r_{b,i}\leftarrow r_{\mathrm{func}}(s_b,a_{b,i})$ for $i=1,\dots,G$
+        \State Compute $\hat{A}_{b,i}\leftarrow \dfrac{r_{b,i}-\frac{1}{G}\sum_{j=1}^G r_{b,j}}{\mathrm{std}(\{r_{b,j}\}_{j=1}^G) + \epsilon_{\mathrm{std}}}$
+    \EndFor
+    \State Update $\theta$ using the objective in Eq.~\eqref{eq:pivotrl_obj}
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Theoretical analysis for PivotRL}
+\label{sec:pivotrl_analysis}
+
+We next analyze the two design choices from Section~\ref{sec:pivotrl_method}. We first formalize why mixed-outcome turns are the right states for group-normalized local RL. We then show that verifier-based reward yields a conservative KL-regularized update: it increases total mass on locally acceptable actions while preserving the reference ordering within and outside that acceptable set. Throughout this subsection, we assume finite action spaces, $\mathcal{M}(s)\neq\emptyset$, and $\pi_0(a\mid s)>0$ for all $s$ and $a$.
+
+\begin{proposition}[Only mixed-outcome turns produce nonzero group-normalized updates]
+\label{prop:mixed}
+Let $s$ be a fixed state and let $\{r_i\}_{i=1}^G$ be the binary rewards of a rollout group at $s$. If all rewards are identical, then the normalized advantages in Eq.~\eqref{eq:group_adv} are zero for every $i$. Equivalently, only rollout groups with positive reward variance can contribute a nonzero group-normalized update.
+\end{proposition}
+
+Proposition~\ref{prop:mixed} is the direct reason to filter turns before RL: if a turn is uniformly easy or uniformly impossible under local sampling, then spending rollout budget on that turn does not change the policy under group-normalized training.
+
+For any distribution $\pi$ over $\mathcal{A}(s)$, let
+\[
+T_\pi
+=
+\left\{
+v:\mathcal{A}(s)\to\mathbb{R}
+\;:\;
+\mathbb{E}_{a\sim\pi}[v(a)]=0
+\right\},
+\qquad
+\langle u,v\rangle_{F,\pi}
+=
+\mathbb{E}_{a\sim\pi}[u(a)v(a)],
+\]
+and let $\nabla^{\mathrm{nat}}J_s(\pi)\in T_\pi$ denote the natural gradient of $J_s$ under this Fisher geometry.
+
+\begin{theorem}[Reward variance determines the local GRPO signal]
+\label{thm:pivot}
+Consider the statewise expected reward objective
+\[
+J_s(\pi)=\mathbb{E}_{a\sim\pi}[r(s,a)],
+\]
+and the KL path
+\[
+\pi_{s,\beta}(a)
+=
+\frac{
+\pi_0(a\mid s)e^{r(s,a)/\beta}
+}{
+\sum_{b\in \mathcal{A}(s)} \pi_0(b\mid s)e^{r(s,b)/\beta}
+}.
+\]
+Define the population GRPO score
+\begin{equation}
+\gamma_{s,\beta}
+:=
+-
+\mathbb{E}_{a\sim \pi_{s,\beta}}
+\left[
+\frac{
+r(s,a)-\mathbb{E}_{a'\sim\pi_{s,\beta}}[r(s,a')]
+}{
+\sqrt{\mathrm{Var}_{a'\sim\pi_{s,\beta}}(r(s,a'))}
+}
+\,\partial_\beta \log \pi_{s,\beta}(a)
+\right].
+\label{eq:grpo_score}
+\end{equation}
+Then
+\begin{equation}
+\gamma_{s,\beta}
+=
+\frac{1}{\beta^2}
+\left\|
+\nabla^{\mathrm{nat}}J_s(\pi_{s,\beta})
+\right\|_{F,\pi_{s,\beta}}
+=
+\frac{
+\sqrt{\mathrm{Var}_{a\sim\pi_{s,\beta}}(r(s,a))}
+}{\beta^2}.
+\label{eq:pivot_theorem}
+\end{equation}
+In particular, at fixed $\beta$, states with larger reward variance induce a larger natural-gradient norm and a larger population GRPO score.
+\end{theorem}
+
+\paragraph{Interpretation.}
+Theorem~\ref{thm:pivot} is a population, pathwise statement about the idealized KL-regularized statewise update $\pi_{s,\beta}\propto \pi_0 e^{r(s,\cdot)/\beta}$. It shows that, for group-normalized local RL, reward variance is not just a heuristic diagnostic: it is exactly the scale of the local natural-gradient signal along the KL path. For binary verifier rewards, larger variance means a more mixed success/failure turn, which is precisely why PivotRL filters toward mixed-outcome turns.
+
+\begin{theorem}[Functional reward shifts mass toward acceptable actions with minimal KL change]
+\label{thm:kl}
+Fix $\beta>0$ and consider the regularized objective
+\begin{equation}
+\mathcal{L}_{\mathrm{func},\beta}(\pi)
+=
+\mathbb{E}_{s\sim d}
+\left[
+-
+\mathbb{E}_{a\sim\pi(\cdot\mid s)}[r_{\mathrm{func}}(s,a)]
++
+\beta\,\mathrm{KL}\!\bigl(\pi(\cdot\mid s)\,\|\,\pi_0(\cdot\mid s)\bigr)
+\right],
+\label{eq:kl_obj}
+\end{equation}
+where $r_{\mathrm{func}}(s,a)=\mathbf{1}[a\in \mathcal{M}(s)]$ and $d$ is a fixed state distribution. For each state $s$, define
+\begin{equation}
+\rho(s)=\pi_0(\mathcal{M}(s)\mid s),
+\qquad
+q_\beta(s)
+=
+\frac{\rho(s)e^{1/\beta}}{(1-\rho(s))+\rho(s)e^{1/\beta}}.
+\label{eq:qbeta}
+\end{equation}
+Then $\mathcal{L}_{\mathrm{func},\beta}$ has a unique minimizer $\pi_\beta^*$ such that, for each state $s$ ($d$-almost surely),
+\begin{equation}
+\pi_\beta^*(\mathcal{M}(s)\mid s)=q_\beta(s)\ge \rho(s),
+\label{eq:mass_shift}
+\end{equation}
+with strict inequality whenever $0<\rho(s)<1$. Moreover, among all distributions satisfying Eq.~\eqref{eq:mass_shift}, $\pi_\beta^*(\cdot\mid s)$ is the unique minimizer of
+\[
+\mathrm{KL}\!\bigl(\pi(\cdot\mid s)\,\|\,\pi_0(\cdot\mid s)\bigr),
+\]
+and it preserves the reference ordering within both $\mathcal{M}(s)$ and its complement $\mathcal{M}(s)^c$:
+\begin{align}
+\label{eq:conditional-distibution}
+\frac{\pi_\beta^*(a\mid s)}{\pi_\beta^*(b\mid s)}
+=
+\frac{\pi_0(a\mid s)}{\pi_0(b\mid s)}
+\quad
+\text{for } a,b\in \mathcal{M}(s),
+\qquad
+\frac{\pi_\beta^*(a\mid s)}{\pi_\beta^*(b\mid s)}
+=
+\frac{\pi_0(a\mid s)}{\pi_0(b\mid s)}
+\quad
+\text{for } a,b\in \mathcal{M}(s)^c.
+\end{align}
+\end{theorem}
+
+\paragraph{Interpretation.}
+Theorem~\ref{thm:kl} isolates the effect of the functional reward, establishing that the minimizer policy of functional reward-based RL is the KL-projection of the reference policy onto the set of policies with a higher probability mass $q_\beta(s)$ on acceptable actions. From Eq.~\eqref{eq:conditional-distibution}, functional reward-based RL preserves the conditional distribution on both (i) the set of acceptable actions and (ii) its complement. Since the action space of assistant turns is exponentially large, any given action is generally relevant to only a single task. Under this assumption, the complement of acceptable actions corresponds to the set of task-unrelated actions, and consequently, the relative ranking among task-unrelated actions is preserved, explaining PivotRL's strong retention of OOD performance.

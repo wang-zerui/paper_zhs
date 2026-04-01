@@ -1,0 +1,89 @@
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.4]{figs/execution_graph.pdf}
+    \vspace{\captionvspace}
+    \caption{\Sys’s event-driven execution model. Circles denote events, and blue (or orange) rectangles denote compute (or communication) tasks, respectively. Edges from an event to a task correspond to task launches, while edges from a task to an event indicate that the task triggers the associated event. {\tt AT}, {\tt MM}, and {\tt AR} refer to attention, matrix multiplication, and AllReduce, respectively.}
+    \vspace{\captionvspace}
+    \label{fig:execution}
+\end{figure}
+
+\section{In-Kernel Parallel Runtime}
+\label{sec:runtime}
+
+\Sys employs an {\em in-kernel parallel runtime} that executes the \graph across all SMs within a single mega-kernel. This design eliminates kernel-launch overheads and enables fine-grained control over scheduling, synchronization, and execution order. Once launched, the mega-kernel continuously manages both computation and communication until the inference workload completes.
+
+To support this execution model, \sys partitions a GPU’s SMs into {\em workers} and {\em schedulers}. Each worker runs on one physical SM and maintains an independent {\em task queue}. Workers execute a lightweight loop that repeatedly dequeues tasks, performs the associated computation or communication, and signals task completion by notifying the task's triggering event. This design ensures that workers are fully utilized while enabling asynchronous execution across operators.
+
+Schedulers are organized at {\em warp} granularity, with each SM hosting four scheduler warps. Each scheduler maintains an event queue and repeatedly polls for newly activated events, dispatching the corresponding tasks to workers. The allocation of workers and schedulers is fixed at kernel-launch time and matches the GPU’s physical SM count, avoiding any dynamic role-switching overhead inside the kernel.
+
+The remainder of this section details the in-kernel runtime architecture. \Cref{subsec:event_driven_execution} describes \sys’s event-driven execution model. \Cref{subsec:task_launch} introduces two complementary task-launch mechanisms, analyzes their trade-offs, and explains how \sys combines them to achieve low-latency and load-balanced execution. \Cref{subsec:runtime_optimizations} describes \sys's additional system optimizations that further reduce overhead and improve throughput.
+
+\subsection{Event-Driven Execution}
+\label{subsec:event_driven_execution}
+
+\Sys executes a \graph using an {\em event-driven} model. Each \graph begins with a designated {\em start} event (e.g., $e_0$ in \Cref{fig:execution}) that has no prerequisites. This event is initially enqueued into a scheduler’s event queue. Upon dequeuing the event, the scheduler (e.g., $s_1$) launches all tasks that depend on it (e.g., $AT_1,\ldots,AT_4$). Each launched task is dispatched to a worker, which executes the task and, upon completion, notifies the triggering event associated with that task.
+
+An event becomes \emph{activated} once all of its prerequisites have completed and thus have collectively triggered the event the required number of times. When an event is activated, it is enqueued into a scheduler’s event queue, allowing the runtime to continue propagating execution through the \graph. In this way, events serve as the mechanism for driving task execution, enabling fine-grained, asynchronous execution.
+
+\begin{figure}
+    \centering
+    \subfloat[Just-in-time task launch.]{
+    \includegraphics[scale=0.38]{figs/jit_launch.pdf}
+    \label{fig:jit_launch}
+    }
+    \\
+    \subfloat[Ahead-of-time task launch.]{
+    \includegraphics[scale=0.38]{figs/aot_launch.pdf}
+    \label{fig:aot_launch}
+    }
+    \vspace{\captionvspace}
+    \caption{Comparing JIT and AOT task launches.}
+    \vspace{\captionvspace}
+    \label{fig:aot_and_jit}
+\end{figure}
+
+\subsection{Hybrid Task Launch}
+\label{subsec:task_launch}
+
+%\paragraph{Just-in-time v.s. ahead-of-time task launching.} 
+A task can be enqueued into a worker's task queue either {\em just-in-time} (JIT) or {\em ahead-of-time} (AOT). In the JIT mode, a scheduler assigns a task to a worker only after its dependent event has been fully activated; the task can therefore begin execution immediately upon assignment. In the AOT mode, the runtime pre-enqueues the task to a worker before its predecessor event is activated. The worker  cannot execute the task until the dependent event is fully activated, and thus waits locally for the dependency to be satisfied.
+
+JIT and AOT approaches involve complementary advantages. On the one hand, JIT task launch enables \sys to adapt to workload imbalance. For example, attention operators in modern LLMs have highly variable execution times due to data-dependent sequence lengths---requests with long sequence lengths take substantially longer to finish than those with short ones. This variance makes static assignment ineffective. Under JIT, \sys launches downstream tasks (e.g., {\tt MatMul} or {\tt AllReduce}) only after the attention tasks that trigger them have completed. Workers that finish their attention tasks earlier can execute more downstream tasks, improving end-to-end latency and balancing load across SMs, as illustrated in \Cref{fig:execution}.
+%JIT and AOT task launching approaches exhibit different tradeoffs. On the one hand, JIT task launching allows \sys to handle workload imbalance dynamically. For example, attention tasks in modern LLM architectures involve diverse computation time due to different context length, which cannot be predicted statically. JIT task launching allows \sys to launch subsequent tasks (e.g., MatMul and AllReduce) after their depending attention tasks are finished, which allows \sys to dynamically launch more tasks to workers whose attention tasks complete earlier, as shown in \Cref{fig:execution}.
+
+On the other hand, JIT task launch involves higher latency due to additional worker–scheduler communication. \Cref{fig:aot_and_jit} illustrates the difference for launching task $T_2$ after event $e$ triggered by task $T_1$. Under JIT (\Cref{fig:jit_launch}), the worker executing $T_1$ must notify a scheduler, which then dequeues event~$e$, launches $T_2$, and enqueues it to a worker’s task queue. The receiving worker must then dequeue $T_2$ before execution. This chain requires two synchronizations (worker$\rightarrow$scheduler and scheduler$\rightarrow$worker). By contrast, under AOT (\Cref{fig:aot_launch}), $T_2$ is already enqueued to a pre-assigned worker, which only needs to wait for the event activation. Thus, AOT requires only a single synchronization (worker$\rightarrow$worker via the event trigger), reducing per-task launch latency.
+%On the other hand, JIT task launching involves higher latency than AOT task launching. \Cref{fig:aot_and_jit} compares AOT and JIT for launching task $T_2$ that depends on event $e$ triggered by another task $T_1$. In the JIT task launching approach, the worker executing $T_1$ will enqueue its triggering event upon task completion. The event will be then dequeued by a scheduler, which will launch subsequent tasks (i.e., $T_2$) by enqueuing them to corresponding task queues. Finally, the assigned work will dequeue and execute task $T_2$. AOT task launch involves two worker-scheduler synchronization, as shown in \Cref{fig:jit_launch}, between subsequent tasks. As a comparison, AOT pre-launches tasks to workers and lets workers wait for event triggering. This allow only involve one worker-worker synchronization between subsequent tasks, as shown in \Cref{fig:aot_launch}.
+
+\Sys uses {\em hybrid task launch} to combine the advantages of both approaches. During \graph construction, the compiler classifies each operator as JIT or AOT based on whether its execution time is data-dependent and likely to induce runtime imbalance. Operators with data-dependent durations (e.g., attention) are marked as JIT, and all downstream tasks remain JIT until encountering a global barrier (i.e., an event that must be triggered by all upstream tasks). Barriers eliminate imbalance, making subsequent operators suitable for AOT. All remaining operators are labeled AOT to minimize dispatch overhead. Labels apply at operator granularity: all tasks generated by the same operator share the same mode.
+%\Sys uses a hybrid task launch mechanism to achieve the best of both worlds. First, for an input \graph, the \sys runtime labels each task with AOT or JIT based on whether the tasks' execution will cause runtime workload imbalance. Specifically, for tasks with data-dependent execution time (e.g., attention), its subsequent tasks are labeled as JIT tasks until a global barrier is encountered (i.e., all tasks trigger the same event). Global barrier resolves workload imbalance as all tasks depending on it cannot start until the event is triggered. All other tasks are labeled AOT tasks to reduce task launch overhead. Note that the label is at the granularity of operators---all tasks of an operator always have the same label.
+
+Workers maintain two queues—one for JIT and one for AOT tasks. Workers always prioritize JIT tasks, as they are ready to execute immediately. When a worker exhausts its JIT queue, it checks whether the first AOT task’s dependent event has been fully activated; if so, the worker executes that AOT task. This design ensures that workers block only when no ready work exists.
+%On the worker side,  each worker maintains two task queues: one for AOT and one for JIT tasks. A worker prioritize JIT tasks are they are immediately ready to run. When the JIT task queue is empty, a worker checks if the first AOT task's dependent event is fully activated and execute the task if so. This design guarantees that each worker only wait for dependent events when it has no tasks available to run.
+
+Schedulers handle only JIT-related events. All AOT tasks are {\em pre-enqueued} before execution begins. Because operators typically produce a number of tasks proportional to the number of workers (\Cref{sec:compiler}), \sys distributes AOT tasks in a round-robin fashion across workers to maintain balanced load. Pre-launching AOT tasks reduces scheduler load and amortizes dispatch overhead, while JIT task launch dynamically maintains workload balance across SMs.
+%On the scheduler side, all AOT tasks of each operator are pre-launched to workers' AOT task queue. Since the number of AOT tasks of an operator is generally a multiplier of the number of workers (see \Cref{sec:compiler}), the \sys runtime launches AOT tasks in a round-robin fashion across workers to guarantee workload balancing for these operators. This design also reduces the scheduler workload and they only need to handle events triggered by JIT tasks.
+
+\subsection{Runtime Optimizations}
+\label{subsec:runtime_optimizations}
+This subsection introduces a variety of runtime optimizations that minimize the \sys runtime overhead.
+
+\paragraph{Paged shared-memory abstraction.}
+In conventional GPU programming models such as CUDA and Triton, shared memory is a fast on-chip memory that is private to each thread block. Shared memory exists only for the lifetime of a kernel---once the kernel finishes, its shared memory is automatically released. In the current kernel-per-operator approach, each kernel assumes {\em exclusive} access to the entire shared memory to comply with this programming model.
+%
+%This exclusivity, however, prevents cross-task software pipelining (\Cref{sec:background}), which requires overlapping the data-loading phase of the next task with the compute phase of the current task. Since both tasks would simultaneously require shared memory, the conventional model precludes such overlap.
+%%
+However, this design prevents cross-task software pipelining (\Cref{sec:background}), which overlaps data loading for a subsequent task with the computation of the current task, since both tasks need to access shared memory.
+
+To enable such pipelining, \Sys introduces a {\em paged shared-memory} abstraction. Shared memory is partitioned into multiple fixed-size pages, and task implementations are modified to operate on these pages instead of assuming monolithic allocation. A task may {\em acquire} one or multiple pages based on its shared-memory footprint and must {\em release} the pages when they are no longer needed. Once a task releases any of its pages, it is no longer permitted to acquire more shared memory, ensuring monotonic usage patterns that simplify scheduling. When the current task signals its release, \sys can immediately preallocate available pages for the next task and begin data prefetching. This design enables fine-grained, on-demand allocation of shared memory resources within the mega-kernel execution model.
+%splits shared memory into multiple {\em pages} of the same size and modifies the shared memory interface of all tasks accordingly. In particular, each task can {\em acquire} one or multiple pages of shared memory based on the task type and shared memory usage. Each task also {\em release} shared memory pages when they are no longer needed. This design allows tasks to allocate shared memory {\em on demand} and free them immediately after use. A task cannot allocate additional shared memory after freeing any. As a result, when receiving the free signal of the current task, \sys will preallocate available shared memory pages for the next task if any and start data preloading. 
+
+
+\paragraph{Cross-task software pipelining.}
+To enable software pipelining across tasks executed on the same worker (\Cref{subsec:gpu-programming-model}), \sys decomposes each task into a {\em pre-loading} phase and a {\em compute} phase. The pre-loading phase issues data transfer instructions to fetch a chunk of the required tensor from device memory into shared memory, initializing the intra-task software pipeline but performing no computation.
+%
+
+\Sys opportunistically overlaps the compute phase of the current task $T_1$ with the pre-loading phase of the subsequent task $T_2$ when two conditions hold: (1) $T_1$ has already issued all of its own data-transfer instructions, and (2) sufficient shared-memory pages are available for $T_2$'s pre-loading phase. Note that such a pipeline does not interfere with $T_1$'s execution, as \sys inserts appropriate intra-SM synchronization barriers to ensure that $T_2$’s memory transfers do not conflict with ongoing data transfers for $T_1$. 
+
+\paragraph{Pre-fetching task descriptions.}
+%Each worker manages both JIT and AOT task queues stored in device memory. Each task is also associated with a task description that specifies the input tensors, output tensors, and task configuration. Each task description requires 352 bytes in our current implementation (see \Cref{sec:impl}). To reduce enqueue/dequeue latency and hide device-memory access overheads, \sys employs a lightweight prefetching mechanism that retrieves upcoming task descriptions into shared memory before they are needed.
+Each worker maintains both JIT and AOT task queues in device memory. Every task is associated with a task description that encodes its input tensors, output tensors, and configuration parameters; in our current implementation, each description occupies 352 bytes (\Cref{sec:impl}). To reduce enqueue/dequeue latency and hide device-memory access costs, \sys employs a lightweight prefetching mechanism that retrieves upcoming task descriptions into shared memory before they are needed.

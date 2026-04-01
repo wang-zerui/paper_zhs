@@ -1,0 +1,147 @@
+%!TEX root=../main.tex
+\section{Introduction}
+\label{sec:introduction}
+
+Reinforcement Learning (RL) has become a cornerstone for advancing Large
+Language Models (LLMs) from passive logical reasoning toward autonomous
+decision-making and long-horizon planning~\cite
+{deepseekr1,seed-thinking,openaio4}. This paradigm, known as \emph{agentic RL},
+requires LLMs to operate effectively within complex, dynamic environments,
+ranging from tool use~\cite
+{hao2025exploringsuperiorfunctioncalls,wu2025agenticreasoningstreamlinedframework}
+to web navigation~\cite
+{song2025r1searcherincentivizingsearchcapability,jin2025searchr1trainingllmsreason,jiang2025deepretrievalhackingrealsearch}
+and general computer control~\cite
+{luo2025guir1generalistr1style,lu2025uir1enhancingefficientaction,liu2025infigui}.
+Unlike traditional LLM post-training, agentic RL emphasizes learning through
+extensive practice: the agent actively interacts with external environments
+to generate \emph{long, multi-turn trajectories}, thereby solving complex reasoning
+tasks through trial and error.
+
+
+The agentic RL training pipeline operates as an iterative cycle comprising
+three stages: \emph{rollout}, \emph{reward}, and \emph{training}. During rollout, the agent LLM engages
+in a \emph{multi-turn feedback loop} with an environment, generating action tokens
+and receiving observations until a termination condition is met, which 
+constitutes a \emph{trajectory}. These trajectories
+are then evaluated in the reward stage, often by separate models or code sandboxes, to assign scalar
+reward signals. Finally, the training stage consumes these labeled
+trajectories to update the agent LLM's weights. These updated parameters are then
+synchronized back to the rollout workers for the subsequent iteration,
+creating a loop of data generation and policy update.
+
+
+
+As research institutes investigate \emph{Scaling Laws for Agentic RL}~\cite
+{kimiteam2025kimik2openagentic,deepseek_v3_2_speciale}, a fundamental
+infrastructure challenge emerges: the resource requirements across the
+pipeline are highly \emph{heterogeneous} and often \emph{conflicting}. 
+The \textbf{rollout stage}
+alone presents a complex composite workload. LLM generation alternates
+between TFLOPS-hungry prefill phases---best served by compute-optimized
+hardware (e.g., NVIDIA H800)---and bandwidth-bound decoding phases that benefit
+from high memory bandwidth (e.g., H20). The ratio of these phases is dictated
+by the task structure: long-horizon tasks like \texttt{FrozenLake}~\cite{frozen_lake} or \texttt{SWE-bench}~\cite{swe-bench} are
+prefill-heavy, whereas short-turn tasks like \texttt{GEM-math}/\texttt{GEM-game}~\cite{GEM-github} are decoding-dominant.
+Concurrently, the agent LLM must interact with thousands of parallel
+environments. These environments are often
+\emph{stateful}, \emph{CPU-bound simulations} that introduce severe resource contention if
+colocated on GPU nodes. In contrast, the \textbf{reward stage} typically consists of
+\emph{stateless, parallelizable} workers running diverse evaluations 
+from simple CPU scripts~\cite{he2025deepmath,guo2024deepseekCoder}
+to complex GPU-based model judgments~\cite{son2024llmasajudgerewardmodel,zhong2024rlhfuseefficientrlhftraining}. Finally, the \textbf{training stage} demands 
+high-end GPUs with fast interconnects to sustain the high TFLOPS required for large-scale parameter optimization.
+
+
+We contend that a single monolithic cluster cannot efficiently satisfy the
+diverse, conflicting resource requirements of multi-task agentic RL training.
+While a natural solution is to exploit \emph{disaggregated architectures} that
+route stages to \emph{best-fit} hardware, current systems fail to fully
+realize this potential. Industry-standard systems such as veRL~\cite
+{verl,sheng2025hybridflow}, slime~\cite{slime_github}, and rLLM~\cite
+{rLLM} remain bound to monolithic GPU clusters. Newer frameworks like AWorld~\cite{aworld} and
+DeepSWE~\cite{deepswe2025} introduce \emph{partial disaggregation} by
+offloading environments to Kubernetes~\cite{k8s} clusters. However, they still
+colocate the resource-heavy rollout and training stages, leaving the resource
+mismatch problem unresolved. Even recent system efforts that decouple
+training from rollout, such as StreamRL~\cite{StreamRL}, AsyncFlow~\cite
+{asyncflow}, SeamlessFlow~\cite{seamlessflow}, and Laminar~\cite
+{Laminar}, adopt a \emph{coarse-grained} approach. These systems largely
+overlook the inherent heterogeneity of agentic tasks and environments,
+limiting their ability to fully exploit specialized hardware for expedited
+rollout.
+
+
+
+
+While disaggregation enables hardware specialization, it introduces severe
+orchestration challenges due to \emph{heterogeneous communication patterns}
+and \emph{synchronization overheads}. First, the data transfer requirements
+are highly \emph{unbalanced}. Weight synchronization between training and
+rollout clusters is bandwidth-intensive, involving bulk data transfer of hundreds of 
+gigabytes and
+incurring latency on the order of tens of seconds. Conversely, trajectory
+transfers between the agent LLM and environments are smaller (kilobytes to
+gigabytes) but suffer from extreme variance: environment instability can
+introduce \emph{long-tail latencies} reaching hundreds of seconds (\autoref
+{fig:env_time_cdf}), severely blocking dependent stages. Second, in
+synchronous training, these communication delays create ``resource bubbles''
+(\autoref{fig:paradigm-all-in-one}-Left), where expensive training GPUs idle
+while waiting for straggling environments or weight updates. While one could
+attempt stitching together current
+disaggregated RL frameworks~\cite{StreamRL,seamlessflow,asyncflow} with
+Kubernetes-orchestrated agentic environments, such ad-hoc integration 
+can only serve for a single job with dedicated, high-bandwidth networks and
+does not scale to production-grade, multi-tenant clusters where cross-cluster
+links often exhibit dynamic, heterogeneous bandwidth.
+
+
+To address the aforementioned challenges, we present \SystemName{}, a distributed system
+designed to maximize throughput for multi-task agentic RL on disaggregated
+infrastructure. \SystemName{} evolves from our prior technical reports on ROLL~\cite{roll} and ROLL-Flash~\cite{rollflash}. Unlike systems that treat the cluster as a uniform
+pool, \SystemName{} orchestrates the RL pipeline according to three
+core design principles. \textbf{(1) Hardware-Affinity Workload
+Mapping:} \SystemName{} allows users to bind an entire stage to a dedicated
+hardware resource pool (e.g., constraining training to compute-optimized
+GPUs). It also supports \emph{fine-grained affinities} within a stage. This
+allows, for example, routing prefill-heavy, compute-bound tasks (e.g., \texttt
+{FrozenLake} and \texttt{SWE-bench}) to H800 GPUs while scheduling
+decoding-dominant, bandwidth-bound tasks (e.g., \texttt{GEM-math}) on H20
+GPUs. The hardware affinity can fully exploit available resources and
+maximize the system throughput. \textbf{(2) Fine-grained Asynchrony:} Within rollout, this principle advocates operating
+at the \emph{trajectory level} rather than the batch level. By interleaving
+environment interaction, LLM generation, and reward computation, the system
+effectively masks inter-cluster communication latency and prevents slower
+environment stragglers from stalling the entire pipeline. For asynchronous
+training, it requires fine-grained control of the asynchrony between rollout
+and training to balance gradient stability and system throughput. \textbf{
+(3) Statefulness-aware Computation:} To optimize resource
+efficiency, \SystemName{} explicitly categorizes components by their state
+requirements. It offloads inherently stateless components, such as reward
+models, to serverless infrastructure (e.g., Function Compute~\cite
+{alibaba_function_compute}), granting the system zero-overhead autoscaling,
+multi-tenancy, and fault tolerance without dedicated, hot-standby GPUs.
+
+We realize these principles in \SystemName{}, a distributed system that
+combines a declarative programming model with a heterogeneity-aware runtime.
+Through Python-based decorators, users explicitly define \emph
+{hardware affinities} for specific sub-tasks and register stateless
+components to external serverless interfaces. Under the hood, \SystemName
+{}'s resource manager allocates heterogeneous resources to specialized \emph
+{workers}, while the distributed runtime orchestrates an asynchronous,
+trajectory-level workflow. To maximize hardware efficiency, the runtime
+integrates optimized execution engines, using inference engines~\cite{vllm, sglang,rtp-llm} for
+high-throughput generation and training engine~\cite{shoeybi2019megatron} for
+distributed training. The runtime also exposes multiple transfer channels that exploit the underlying heterogeneous network fabric (NVLink, InfiniBand, Ethernet), optimizing both
+the stability-critical trajectory transfer and bandwidth-intensive weight synchronization. %  and the stability-critical
+% trajectory transfer. 
+
+We implemented \SystemName{} from scratch in approximately 60k lines of
+Python code. We evaluate \SystemName{} by training multiple Qwen models~\cite
+{qwen-huggingface} on disaggregated clusters, demonstrating that it achieves
+up to a 2.05$\times$ speedup over monolithic and synchronous baselines. To
+validate scalability and stability in a production setting, we deploy \SystemName{}
+to train a large Mixture-of-Experts (MoE) LLM for Qoder~\cite{qoder} product. This
+deployment, running continuously for one week on a cluster of over 3,000
+GPUs, confirms \SystemName{}'s ability to sustain high throughput and robust fault
+tolerance at scale.

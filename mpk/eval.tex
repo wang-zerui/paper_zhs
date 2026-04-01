@@ -1,0 +1,158 @@
+\section{Evaluation}
+\label{sec:eval}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=\linewidth]{figs/benchmark.pdf}
+    \vspace{\captionvspace}
+    \caption{Comparing \sys with existing systems for five models on A100, H100, and B200 GPUs. All performance numbers are normalized to \sys (higher is better). The values above each \sys bar denote its speedup over the best-performing existing system. Results for Qwen3-30B-A3B on A100 are omitted because the model exceeds the memory capacity of a single A100.}
+    \vspace{\captionvspace}
+    \label{fig:end_to_end}
+\end{figure*}
+
+This section evaluates \sys by answering three key questions. First, \Cref{subsec:end_to_end} compares \sys's mega-kernel execution model with state-of-the-art kernel-per-operator systems. Second, \Cref{subsec:multi_gpu} examines \sys's scalability and efficiency in multi-GPU execution for large-scale DNN workloads. Finally, \Cref{subsec:abalation} analyzes how the individual optimizations in \sys contribute to the overall performance improvement.
+
+We focus our evaluation on LLM serving for two reasons. First, LLM serving has several heavily optimized kernel-per-operator baselines, including SGLang and vLLM~\cite{zheng2024sglang, kwon2023vllm}; thus, comparing against them provides a stringent benchmark that highlights the benefits of \sys's mega-kernel approach. Second, LLM serving naturally exhibits dynamic execution behavior, as each serving iteration can vary significantly in batch size, sequence length, and the balance between prefill and decode phases, creating heterogeneous workloads that stress both the compiler and the runtime. This variability makes LLM serving a representative and challenging workload for evaluating \sys. We note that the \sys compiler and runtime are model-agnostic and can easily support arbitrary DNN architectures.
+
+\input{impl}
+
+%We focus on LLM serving in our evaluation for two reasons. First, LLM serving has multiple heavily optimized kernel-per-operator baselines, including SGLang and vLLM~\cite{zheng2024sglang, kwon2023vllm}, and therefore a comparison with these systems can highlight the advantages of mega-kernels. Second, LLM serving involves dynamic workloads, as different serving iterations involve dynamic batch sizes, sequence lengths, combine prefill and decode phases. Note that the \sys compiler and runtime can easily support other DNN models. 
+
+\begin{table}
+    \centering
+    \caption{\sys configuration in our evaluation.}
+    \label{tab:benchmarks}
+    \begin{tabular}{l|lll}
+    \toprule
+    {\bf GPU} & {\bf \# SMs} & {\bf \# Workers} & {\bf \# Schedulers}\\
+    \midrule
+    A100 & 108 & 104 & 16 \\
+    H100 & 132 & 128 & 16 \\
+    B200 & 148 & 144 & 16 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\if 0
+\begin{table}
+\centering
+    \caption{\sys DNN models for evaluation.}
+     \label{tab:models}
+    \begin{tabular}{l|lll}
+    \toprule
+    {\bf Model} & {\bf Architecture} \\
+    \midrule
+    Qwen/Qwen3-0.6B & Dense \\
+    meta-llama/Llama-3.2-1B-Instruct & Dense \\
+    Qwen/Qwen3-1.7B & Dense \\
+    Qwen/Qwen3-8B & Dense \\
+    Qwen/Qwen3-30B-A3B & MoE \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+\fi 
+
+\subsection{Experimental Setup}
+We evaluate \sys across five widely deployed LLMs that span a range of parameter scales and architectural families, as well as three generations of NVIDIA GPUs: A100, H100, and B200.
+\Cref{tab:benchmarks} summarizes the \sys configuration for each GPU type. For all experiments, we reserve four SMs for schedulers, allocating a total of 16 scheduler warps (each SM accommodates up to four concurrently active warps). The remaining SMs are allocated to workers. We fix the shared-memory page size to 32KB on all GPUs. This configuration yields 5, 7, and 7 shared-memory pages per SM on A100, H100, and B200, respectively.
+\Cref{fig:end_to_end} shows the LLMs used in our evaluation, which include both dense and mixture-of-experts (MoE) models and span multiple model sizes.
+
+To control for variability in request-arrival patterns, all experiments are conducted under an {\em offline}, batched-inference setup, with varying maximum batch sizes. All requests use a fixed prompt length of 64 and decode 1024 tokens. This methodology eliminates server-side stalls caused by insufficient request concurrency and enables a clean comparison of system-level performance attributable to \sys rather than artifacts arising from workload-level effects.
+
+%We conduct our evaluation on five commonly used LLMs with different sizes and architectures and three GPU types, including NVIDIA A100, H100, and B200. \Cref{tab:benchmarks} summarizes \sys configuration for the three GPU types. We reserve four SMs for schedulers, which include 16 scheduler warps as each SM can run four warps in parallel. All remaining SMs are reserved as schedulers. \Cref{tab:models} summarizes the models we use in our evaluation, covering a range of sizes and both dense and MoE architectures. 
+
+%We used {\em offline} batched serving in our evaluation to eliminate the effect of blocking on the server side due to insufficient requests. 
+
+\subsection{End-to-end Results}
+\label{subsec:end_to_end}
+
+We first compare the end-to-end serving performance of \sys with SGLang and vLLM, two state-of-the-art LLM serving systems. Both SGLang and vLLM use the kernel-per-operator approach and rely on a diverse set of specialized kernel libraries, including  FlashInfer~\cite{ye2025flashinfer} and FlashAttention~\cite{triton-flashattention} for optimized attention, cuBLAS and cuTLASS~\cite{cutlass} for matrix multiplication, and CUDA or Triton~\cite{tillet2019triton} for remaining operators. All systems load model architectures from HuggingFace Transformers~\cite{huggingfacemodels}, use the bfloat16 precision format, and enable paged attention~\cite{kwon2023vllm} and continuous batching~\cite{yu2022orca}. The key architectural distinction is that \sys integrates both page allocation and request scheduling directly inside the mega-kernel. In contrast, SGLang and vLLM perform these operations on the CPU, incurring additional host–device synchronization and dispatch overheads.
+
+For each model, we evaluate all three systems on B200, H100, and A100 GPUs across maximum batch sizes ranging from 1 to 16, and we report the resulting serving throughput. We omit Qwen3-30B-A3B on A100, as the model exceeds the memory capacity of a single A100 GPU.
+
+%We first compare the end-to-end serving performance of \sys with SGLang and vLLM, two state-of-the-art LLM serving systems. Both SGLang and vLLM use the kernel-per-operator approach and rely on a diverse set of specialized kernel libraries—such as FlashInfer~\cite{ye2025flashinfer} and FlashAttention~\cite{triton-flashattention} for optimized attention, cuBLAS and cuTLASS~\cite{cutlass} for high-performance matrix multiplication, and CUDA and Triton~\cite{tillet2019triton} for remaining operators.  All systems adopt paged attention~\cite{kwon2023vllm} and continuous batching~\cite{yu2022orca}. The key distinction is that \sys integrates page allocation and request scheduling directly into its GPU-resident mega-kernel, whereas SGLang and vLLM perform these operations on the CPU, introducing additional synchronization and dispatch overheads.
+
+\Cref{fig:end_to_end} shows the end-to-end throughput results. For single-batch inference, \sys improves serving performance by 1.0–1.7$\times$ across models and hardware. The improvements are most significant for smaller models and newer GPU generations. This trend arises from three factors:
+(1) kernel-per-operator approaches involve higher kernel-launch overheads, even when using CUDA Graphs;
+(2) these systems suffer from pipeline bubbles because the kernel abstraction prevents cross-task pipelining (\Cref{fig:pipelining}); and
+(3) SGLang and vLLM perform page allocation and request scheduling on the CPU, adding CPU–GPU synchronization delays.
+These overheads become increasingly significant relative to computation as model sizes shrink and hardware improves. \Cref{subsec:abalation} conducts an ablation study to evaluate the impact of these optimizations.
+
+The results show that \sys is well-suited for latency-optimized scenarios such as single-batch, low-latency model serving, and can drive LLM inference latency closer to hardware limits. For example, on Qwen3-8B running on an A100 GPU, \sys reduces per-token decoding latency from 14.5 ms---already achieved by highly optimized systems such as vLLM and SGLang---to 12.5 ms, approaching the theoretical lower bound of roughly 10 ms (estimated from loading 16 GB of model parameters over a 1.6 TB/s memory bandwidth).
+
+In addition to performance improvement, another key advantage of \sys over vLLM and SGLang is ease of use. Both vLLM and SGLang require substantial engineering effort to hand-optimize new models and integrate specialized kernels, while \sys takes a compiler approach that automatically mega-kernelizes a PyTorch model with only a few lines of code changes. This design enables \sys to achieve both high performance and high programmability, achieving more than 10$\times$ speedup over native PyTorch while preserving the familiar PyTorch development workflow.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/moe_ablation_mpk.pdf}
+    \vspace{\captionvspace}
+    \caption{Comparing \sys with existing systems for Qwen3-30B-A3B on B200. Each value represents the actual MoE runtime in microseconds of each approach (lower is better), and the numbers above the bars indicate the speedup achieved by \sys-Hybrid-MoE over SGLang-MoE.}
+    \vspace{\captionvspace}
+    \label{fig:moe_ablation}
+\end{figure}
+
+\subsection{Case Study: Mixture-of-Experts}
+\label{subsec:case_study_moe}
+To efficiently serve dynamic workloads such as mixture-of-experts (MoE) models, \sys includes two MoE-specific optimizations: (1) a {\em hybrid workload balancer} and (2) a {\em fused gather–GEMM} implementation.
+
+%\paragraph{Hybrid Workload Balancer.} As the number of tokens each expert will receive is only known at runtime, workload partitioning ahead of time is challenging. A naive partitioning approach is to statically map a group of SMs to a set of pre-assigned experts. However, when some of the groups activate significantly more experts than others, this approach can suffer from the SM workload imbalance issue. On the other hand, a fully dynamic approach with persistent Grouped-GeMM can achieve a balanced workload but suffer from fine-grained synchronization overheads. To this end, \sys{} proposes a hybrid approach, where the tasks are statically partitioned at compile time. At runtime, each task receives a meta tensor that is populated by the Topk-Softmax kernel, which includes MoE-related global information, such as the number of activated experts or the number of tokens received by each expert. Then, based on this global information, each task can split the workloads uniformly while minimizing the fine-grained scheduling and synchronization overhead. Our results in \Cref{fig:moe_ablation} show that for all the batch sizes we tested on, \sys{} with a hybrid workload balancer can consistently outperform the static workload partition approach.
+
+\paragraph{Hybrid workload balancer.}
+Because the number of tokens routed to each expert is known only at runtime, predetermining an effective workload partition is challenging. A naive static approach assigns a fixed group of SMs to a pre-designated subset of experts. However, when token routing is highly skewed, this strategy leads to severe load imbalance: some SM groups become oversubscribed while others remain underutilized. At the opposite extreme, a fully dynamic approach based on persistent Grouped-GEMM~\cite{moegroupedgemm} can balance work across SMs, but introduces significant fine-grained synchronization overheads.
+
+\sys introduces a {\em hybrid} strategy that combines the strengths of both approaches. At compile time, the compiler statically partitions the work into expert-specific tasks. At runtime, each task receives a meta-tensor produced by the {\tt topk–softmax} kernel containing global MoE information: specifically, the number of activated experts and the number of tokens assigned to each expert. Using this global metadata, tasks dynamically refine their workload allocation, splitting work uniformly while avoiding the synchronization overheads associated with fully dynamic scheduling.
+As shown in \Cref{fig:moe_ablation}, the hybrid approach consistently outperforms purely static partitioning across all batch sizes.
+
+\paragraph{Fused gather-GEMM.} 
+%In order to use the Tensor Memory Accelerator (TMA) feature on Hopper/Blackwell, conventional MoE implementations require a preprocessing step to gather the tokens that are routed to the same expert into a continuous memory layout. This step can take as much as $11\%$ of the entire MoE time when measured against a Qwen3-8B model with batch size one on SGLang. More importantly, increasing number of tasks in \sys{} also introduces more scheduling overhead. To this end, we replace the TMA copy with a token-level asynchronous copy operation so that the gather operation can be directly performed in the data loading part of the GeMM tasks. As a result, \sys{}-hybrid can achieve consistent speed-up gains against SGLang's implementation as shown in~\Cref{fig:moe_ablation}.
+To leverage tensor memory accelerators (TMAs) on Hopper and Blackwell GPUs, current MoE implementations perform a gather step to pack tokens routed to the same expert into a contiguous memory layout. In the case of Qwen3-30B-A3B with batch size 1 on SGLang, this preprocessing step can account for up to 11\% of total MoE execution time. Moreover, in \sys, introducing additional preprocessing tasks would further increase scheduling overhead.
+
+To address these issues, \sys replaces the TMA-based gather with an asynchronous token-level copy integrated directly into the data-loading phase of the GEMM tasks. This fusion eliminates the standalone gather kernel and avoids additional scheduling points while still enabling efficient memory movement. As a result, \sys with fused gather–GEMM achieves consistent speedups over SGLang’s implementation.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/benchmark_multi_mpk.pdf}
+    \vspace{\captionvspace}
+    \caption{Comparing \sys with existing systems for Qwen3-1.7B inference across multiple H100 GPUs under tensor parallelism. The performance of all systems is normalized by \sys (higher is better).}
+    \vspace{\captionvspace}
+    \label{fig:end_to_end_multigpu}
+\end{figure}
+
+
+\subsection{Multi-GPU Results}
+\label{subsec:multi_gpu}
+
+We further evaluate \sys's scalability across multiple GPUs on an NVIDIA H100 DGX instance. As with competing baselines, we adopt {\em tensor model parallelism} as introduced in Megatron-LM~\cite{Megatron}. Users can easily specify tensor-parallel execution by inserting {\tt AllReduce} layers after attention and gated MLP blocks; \sys then automatically compiles these collective operators into (1) inter-GPU data-transfer tasks (implemented using NVSHMEM's {\tt nvshmem\_signal\_wait\_until}) and (2) local reduction tasks. This decomposition transforms synchronous collective communication into fully asynchronous tasks, allowing it to integrate with \sys's task-based, event-driven runtime.
+
+\Cref{fig:end_to_end_multigpu} shows the performance results. Compared to PyTorch, which uses a combination of hand-optimized kernels, CUDA Graphs, and {\tt torch.compile}, \sys’s mega-kernel execution improves throughput by up to 10$\times$. Compared to highly optimized serving systems such as SGLang and vLLM, \sys achieves 1.1–1.4$\times$ speedups when scaling to 8 H100 GPUs. These gains arise from three key optimizations missing in kernel-per-operator baselines: (1) \sys integrates page allocation and request scheduling directly inside the mega-kernel, eliminating CPU-side dispatch overheads; (2) \sys’s asynchronous execution model overlaps compute tasks with collective communication; and (3) \sys eliminates kernel barriers and enables cross-task software pipelining. \Cref{subsec:abalation} analyzes the impact of the latter two optimizations in detail.
+
+%\Cref{fig:end_to_end_multigpu} shows the results. Compared to directly running PyTorch using a variety of kernels and CUDA Graph, \sys's mega-kernel approach improves performance by 10$\times$. Compared to highly optimized baselines such as SGLang and vLLM, \sys achieves 1.1-1.4$\times$ speedups when running on up to 8 H100 GPUs. The speedup is achieved by three key-optimizations missing in existing kernel-per-operator baselines: (1) \sys integrates page allocation and request scheduling into the mega-kernel, eliminating CPU overheads, (2) \sys's asynchronous execution enables overlapping of compute tasks with collective communications, and (3) \sys eliminates kernel barriers and enable cross-task software pipelining. \Cref{subsec:abalation} evaluates the last two optimizations in more details.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/pipe_ablation_mpk.pdf}
+    %\vspace{\captionvspace}
+    \caption{Ablation study on cross-task pipelining. We measure the performance of the final linear layer in Qwen3-8B on an NVIDIA B200 GPU and report the actual runtime in microseconds (lower is better), and the number shows the relative speed-up of \sys{}-Pipe over \sys{}-No-Pipe.}
+    %\vspace{\captionvspace}
+    \label{fig:pipe_ablation}
+\end{figure}
+
+\subsection{Ablation Study}
+\label{subsec:abalation}
+This section evaluates the impact of two key optimizations enabled by \sys: cross-task pipelining and compute–communication overlap.
+
+\paragraph{Cross-task pipelining.} As described in \Cref{subsec:runtime_optimizations}, \sys enables cross-task pipelining by preloading chunks of input tensors for the next task in parallel with the computation of the current task. \Cref{fig:pipe_ablation} shows an ablation study to evaluate the impact of cross-task pipelining on the final linear layer in Qwen3-8B. Cross-task pipelining reduces the task runtime by 1.2-1.3$\times$ and even outperforms cuBLAS compiled kernels.
+
+%\sys enables cross-task pipelining that can preload data for the next task into the shared memory while executing the current task if the data (e.g., model weights) is not dependent on the output of the current task. As a result, we can reduce the synchronization bubble between these two tasks and achieve a higher GPU resource utilization rate. More specifically, our ablation study on the Qwen3-8B LM-Head GeMM (\Cref{fig:pipe_ablation}) shows that \sys can achieve up to 1.29$\times$ speed-up when Inter-Task Pipelining is enabled.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/benchmark_ab_multi.pdf}
+    %\vspace{\captionvspace}
+    \caption{Ablation study on compute–communication overlap. We measure per-iteration run time of Qwen3-1.7B on 4 H100 GPUs under tensor parallelism (lower is better), comparing performance with and without compute-communication overlap.}
+    %\vspace{\captionvspace}
+    \label{fig:ablation_multigpu}
+\end{figure}
+
+\paragraph{Compute-communication overlap.} \sys captures fine-grained dependency between tasks (see \Cref{fig:compiler_workflow}), allowing the \sys runtime to opportunistically overlap compute and communication tasks. \Cref{fig:ablation_multigpu} shows an ablation study to evaluate the impact of such overlap. Specifically, we can disable such overlap by only capturing coarse-grained dependency between collective operators (e.g., {\tt AllReduce}) and previous tasks using a single event (as shown in \Cref{fig:compiler_workflow}c). \Cref{fig:ablation_multigpu} shows the results. Enabling compute–communication overlap reduces per-iteration latency by 1.1$\times$.
+

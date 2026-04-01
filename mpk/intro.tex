@@ -1,0 +1,58 @@
+\section{Introduction}
+\label{sec:intro}
+Enabling high-performance inference of ML models on GPUs is critical for modern AI applications, as inference latency directly affects usability and cost. Today's ML systems generally express model computation as a tensor program represented as a directed acyclic graph (DAG), whose nodes denote tensor algebra operators (e.g., matrix multiplication) and edges represent tensors, i.e., $n$-dimensional arrays consumed and produced by these operators.
+
+Most existing systems execute each operator using a dedicated GPU kernel, which may be hand-optimized by domain experts~\cite{dao2023flash, ye2025flashinfer} or generated automatically by ML compilers~\cite{tillet2019triton, tvm, wu2025mirage}. However, this {\em kernel-per-operator} execution model limits several key cross-operator GPU optimizations.
+
+First, modern GPUs implicitly insert a {\em kernel barrier} between consecutive launches on the same stream to ensure that all threads from the previous kernel complete before any thread from the next kernel begins. While this mechanism enforces data dependencies, it prevents {\em cross-operator software pipelining}, forcing dependent operators to execute strictly sequentially. NVIDIA recently introduced {\em programmatic dependent launch} (PDL)~\cite{nvidia-pdl}, which allows partial overlap between kernels on the same stream. However, adopting PDL requires significant engineering effort, as it fundamentally alters kernel structure and control flow.
+
+%Second, the kernel-per-operator model precludes opportunities to overlap computation and communication. Because kernels capture dependencies only at the coarse operator level rather than at the level of fine-grained data units. When communication and computation are launched in separate kernels (e.g., a matrix multiplication followed by an all-reduce), kernel-level dependency analysis would assume a coarse-grained dependency between them, which disables overlapping these operations. However, the actual data dependency between communication and computation are usually at much finer grain (e.g., an all-reduce followed by a matrix multiplication only needs to wait for a piece of matrix multiplication instead of the whole); enabling such overlapping requires new mechanism to capture data dependency at finer grain.
+
+Second, the kernel-per-operator approach prevents fine-grained compute-communication overlap. Because dependencies are captured only at the coarse operator granularity, the runtime must enforce full-operator completion before launching dependent communication or computation.
+For example, when a matrix multiplication is followed by an all-reduce in separate kernels, the all-reduce must wait for the entire multiplication to complete, even though each piece of all-reduce depends only on a subset of the multiplication. Exploiting such opportunities requires representing and enforcing data dependencies at a granularity finer than individual kernels.
+
+Finally, the kernel-per-operator approach requires launching hundreds to thousands of kernels for each inference iteration. To mitigate launch overhead, current systems rely heavily on {\em CUDA Graphs}, which capture a sequence of GPU operations and launch them with minimal overhead. However, CUDA Graphs are largely static: any changes to control flow, tensor shapes, or data dependencies require re-instantiation or modification of the captured graph, limiting flexibility for dynamic workloads commonly seen in model inference.
+%
+
+A promising approach to overcoming these limitations is to fuse all computation and communication into a single {\em mega-kernel} (also known as a {\em persistent kernel}).
+In this design, the system launches one GPU kernel to execute the entire model, from layer computations to inter-GPU communication, without interruption.
+%
+
+Mega-kernels address the limitations of the kernel-per-operator approach in several ways.
+First, they eliminate kernel launch overhead by avoiding repeated invocations. 
+Second, by fusing all operator computations into a single kernel, they enable cross-operator software pipelining, allowing data for the next operator to be prefetched while computations for the current operator are still in progress. Third, they support fine-grained overlap of computation and inter-GPU communication, enabling simultaneous execution that more effectively hides communication latency.
+
+Despite these benefits, automatically transforming an ML model into a high-performance mega-kernel remains challenging. Existing ML systems---such as PyTorch~\cite{pytorch}, Triton~\cite{tillet2019triton}, and TVM~\cite{tvm}---do not support end-to-end mega-kernel generation. Moreover, these systems rely on a fragmented ecosystem of specialized libraries: NCCL~\cite{nccl} or NVSHMEM~\cite{nvshmem} for communication, FlashInfer~\cite{ye2025flashinfer} or FlashAttention~\cite{dao2023flash} for attention, and CUDA or Triton for custom computation. This fragmentation makes it difficult to unify the entire inference pipeline into a single kernel.
+
+We present {\em Mirage Persistent Kernel} (\sys), the first compiler and runtime system that automatically transforms multi-GPU model inference into a high-performance mega-kernel. 
+\sys enables end-to-end kernel fusion with minimal developer effort---users can mega-kernelize a PyTorch model with only a few lines of code, achieving significant performance improvement compared to running the model in vanilla PyTorch with CUDA Graphs and {\tt torch.compile}. \sys combines the performance benefits of mega-kernels with the usability of existing ML frameworks.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figs/overview_mpk.pdf}
+    \vspace{\captionvspace}
+    \caption{An overview of \sys.}
+    \vspace{\captionvspace}
+    \label{fig:overview}
+\end{figure}
+
+A key idea in \sys is to represent computation and inter-GPU communication at the granularity of individual streaming multiprocessors (SMs) instead of an entire GPU. \sys introduces an {\em SM-level graph representation}, called \graph, whose nodes denote {\em tasks} running on individual SMs and whose edges encode fine-grained dependencies between tasks. This representation exposes additional parallelism and enables optimizations such as cross-operator software pipelining and fine-grained kernel overlap, all of which are infeasible in the existing kernel-per-operator approach.
+\Sys realizes this idea using two key components shown in \Cref{fig:overview}.
+
+%\paragraph{SM-level task graph.} 
+%The computation graph representation used by existing systems describes data dependency at a coarse granularity rather than the actual data units, as each operator in a computation graph represents computation on an entire GPU, resulting in missed optimization opportunities.
+%
+%To address this limitation, \sys introduces {\em SM-level task graphs}, whose nodes denote operators on a single streaming multiprocessor (SM) of a GPU. SM-level task graphs captures fine-grained data dependencies at the SM level, enabling advanced GPU optimizations such as inter-operator software pipelining and communication/computation overlap.
+
+%First, the \sys compiler compiles an input tensor program into am SM-level task graph. Second, the \sys in-kernel parallel runtime executes the task graph within a mega-kernel to achieve high-performance model inference.
+
+\paragraph{The \Sys compiler.} The \Sys compiler takes a tensor program and an inference configuration as input and automatically transforms the computation graph of the tensor program into a highly optimized SM-level \graph tailored to the given inference configuration and GPU architecture.
+The compiler introduces a diversity of optimizations, including event fusion, graph normalization, and graph linearization, to reduce synchronization overhead and maximize the performance of generated \graphs.
+In addition, \Sys also automatically generates high-performance CUDA implementations for each task using existing superoptimization techniques~\cite{wu2025mirage}, ensuring efficient SM-level execution.
+
+\paragraph{In-kernel parallel runtime.} \Sys executes the SM-level \graph using an in-kernel parallel runtime embedded entirely within a mega-kernel, allowing for fine-grained control over task execution and scheduling {\em without} any kernel launches during model execution. To achieve this goal, the runtime partitions a GPU's SMs into {\em workers}, which maintains a dedicated task queue and executes all assigned tasks in a first-in-first-out order, and {\em schedulers}, which maintain dependency across tasks and assign tasks when their prerequisites are satisfied. The \sys runtime uses an {\em event-driven, fully asynchronous} execution model to ensure that GPUs are maximally utilized. Finally, the \sys runtime uses a {\em hybrid task-launch strategy} that combines just-in-time and ahead-of-time dispatch to minimize runtime overhead while preserving dynamic load balance across SMs.
+
+\paragraph{Evaluation results.} We implement \sys as a PyTorch kernel backend: a PyTorch program can be compiled into a \sys mega-kernel with only a few lines of code changes. We evaluate \sys on five widely used models across three generations of NVIDIA GPUs: A100, H100, and B200.
+Even for workloads that are widely deployed and heavily optimized by existing kernel-per-operator systems, such as SGLang and vLLM for LLM serving, \sys still outperforms current systems by 1.0-1.7$\times$ on both single- and multi-GPU deployments, pushing LLM inference performance close to hardware limits. 
+
+%delivers up to 1.8$\times$ end-to-end speedup over existing kernel-per-operator baselines that rely on CUDA Graphs, operator fusion, and expert-optimized kernels, pushing LLM inference performance toward hardware limits.

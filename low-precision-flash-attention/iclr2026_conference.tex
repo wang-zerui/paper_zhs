@@ -1,0 +1,749 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference,times}
+% \usepackage[utf8]{inputenc}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{amsthm}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage[capitalise]{cleveref}
+\usepackage{wrapfig}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+% \usepackage{booktabs}
+\usepackage{tcolorbox}
+\usepackage[normalem]{ulem}
+% \newtheorem{proof}{Proof}
+
+% --- Custom Commands for Product Notation ---
+% P_prod{start_idx}{end_idx} -> P_{h_{end_idx}} ... P_{h_{start_idx}}
+\newcommand{\Pprod}[2]{P_{h_{#2}} \cdots P_{h_{#1}}}
+% W_prod{start_idx}{end_idx} -> W_{h_{start_idx}} ... W_{h_{end_idx}}
+\newcommand{\Wprod}[2]{W_{h_{#1}} \cdots W_{h_{#2}}}
+% Sum over head sequences of length #1
+\newcommand{\sumheads}[1]{\sum_{h_1,\dots,h_{#1}}}
+\renewcommand{\vec}[1]{\mathbf{#1}} % For vectors like head sequences
+\newcommand{\mat}[1]{\mathbf{#1}} % For matrices
+% \newcommand{\R}{\mathbb{R}}
+\newcommand{\cL}{\mathcal{L}} % Loss function L
+\newcommand{\cO}{\mathcal{O}} % Big O for complexity, if needed
+\newcommand{\tr}{\text{Tr}} % Trace
+
+% --- Theorem Environments ---
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+\newtheorem{claim}{Claim}
+
+\title{Why Low-Precision Transformer Training Fails: An Analysis on Flash Attention}
+
+\iclrfinalcopy
+% Authors must not appear in the submitted version. They should be hidden
+% as long as the \iclrfinalcopy macro remains commented out below.
+% Non-anonymous submissions will be rejected without review.
+
+\author{Haiquan Qiu  \quad Quanming Yao \\
+Department of Electronic Engineering, Tsinghua University\\
+\texttt{qhq22@mails.tsinghua.edu.cn, qyaoaa@tsinghua.edu.cn}
+}
+
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+
+%\iclrfinalcopy % Uncomment for camera-ready version, but NOT for submission.
+\begin{document}
+
+
+\maketitle
+
+\begin{abstract}
+The pursuit of computational efficiency has driven the adoption of low-precision formats for training transformer models. However, this progress is often hindered by notorious training instabilities. This paper provides the first mechanistic explanation for a long-standing and unresolved failure case where training with flash attention in low-precision settings leads to catastrophic loss explosion. Our in-depth analysis reveals that the failure is not a random artifact but caused by two intertwined phenomena: the emergence of similar low-rank representations within the attention mechanism and the compounding effect of biased rounding errors inherent in low-precision arithmetic. We demonstrate how these factors create a vicious cycle of error accumulation that corrupts weight updates, ultimately derailing the training dynamics. To validate our findings, we introduce a minimal modification to the flash attention that mitigates the bias in rounding errors. This simple change stabilizes the training process, confirming our analysis and offering a practical solution to this persistent problem. Code is available at \url{https://github.com/ucker/why-low-precision-training-fails}.
+\end{abstract}
+
+
+\section{Introduction}
+
+
+
+The pursuit of training ever-larger and more powerful transformer models is a relentless drive for computational efficiency~\citep{brown2020language,hoffmann2022training}. A key strategy in this endeavor is the adoption of low-precision numerical formats~\citep{micikevicius2017mixed,wang2018training,kalamkar2019study,liu2024deepseek}, which promise substantial reductions in memory footprint and significant boosts in training speed. In industrial practice, it is common to use BF16 for memory-bound operations like flash attention while pushing compute-bound operations like FFNs to even lower precisions such as FP8~\citep{liu2024deepseek,qwen3technicalreport}. This highlights the heightened sensitivity of attention mechanisms to numerical precision. Despite the development of stabilization techniques like QK normalization~\citep{henry2020query,qwen3technicalreport}, QK-clip~\citep{team2025kimi} and Gated Attention~\citep{qiu2025gated,qwen3technicalreport}, the path to further reducing precision is often blocked by a lack of understanding of the underlying failure mechanisms.
+
+
+This paper confronts this challenge by dissecting a notorious and long-standing failure issue involving flash attention. By reducing the memory complexity of the attention mechanism from quadratic to linear with respect to sequence length, flash attention has become a cornerstone algorithm for efficient transformer training, making it indispensable for handling the long contexts required by modern large-scale models~\citep{dao2022flashattention,dao2023flashattention2,shah2024flashattention}. This failure, arising in low-precision settings~\citep{flash-attention_issue337,nanogpt_issue303,nanogpt_issue524,nanogpt_issue554,lee2024fp8,golden2024flash}, presents a significant bottleneck. We focus on a specific, reproducible failure case reported by the community~\citep{nanogpt_issue303,nanogpt_issue524}, which has remained unresolved for over two years. Our in-depth analysis provides the first mechanistic explanation for this failure, revealing that it is not a random artifact but a direct consequence of two intertwined phenomena: the emergence of similar low-rank representations across different training steps and tokens, and the compounding effect of biased rounding errors inherent in low-precision arithmetic. We demonstrate how these biased rounding errors act as coefficients for the low-rank representations, causing them to accumulate as a biased gradient update to the weights. This pushes the spectral norm of weights and activations to increase abnormally, ultimately overwhelming the training dynamics. To validate our analysis, we introduce a minimal modification to flash attention that mitigates the bias in rounding errors, allowing the low-rank weight updates to cancel out during training. This experiment confirms our analysis and stabilizes the training process, offering a practical solution to this persistent problem.
+
+\paragraph{Notations} We use bold lowercase letters for vectors (e.g., $\rvdel, \rvm, \rvr_m$) and bold uppercase letters for matrices (e.g., $\rmQ, \rmK, \rmV$). $\mathrm{diag}(\mathbf{v})$ denotes a diagonal matrix with the elements of vector $\rvv$ on its diagonal. $\circ$ denotes the element-wise product. We use Python-style indexing, e.g., $\rmM[i, :]$ denotes the $i$-th row of matrix $\rmM$. Subscripts $lp$ and $hp$ distinguish between low-precision (BF16) and high-precision (FP32) computations. Binary strings are represented using a typewriter font (e.g., $\mathtt{101010}$). The symbol $\equiv$ denotes an element-wise equality comparison, analogous to Python's == operator, which returns a binary tensor. The $\mathrm{where}$ function mimics \texttt{torch.where}. Unless specified otherwise, operations follow PyTorch's broadcasting rules. Key claims are highlighted in \colorbox{cyan!5!white}{light cyan box} at the end of some sections. 
+
+
+\section{Preliminary}
+
+
+\subsection{Low-precision Training}
+
+Low-precision training is a cornerstone of modern deep learning, enabling the development of increasingly large models by reducing memory usage and accelerating computation~\citep{liu2024deepseek,tseng2025training,hao2025low}. This is achieved by representing weights, activations, and gradients using numerical formats with fewer bits than the standard 32-bit single-precision (FP32). Mixed-precision training~\citep{micikevicius2017mixed} has been widely adopted in practice, which combines 16-bit formats like FP16 or bfloat16 (BF16) for most computations with an FP32 master copy of weights to maintain accuracy. While FP16 offers higher precision, its limited dynamic range often leads to gradient underflow, requiring techniques like loss scaling. In contrast, BF16, originally developed for Google's TPUs and now widely supported, provides the same dynamic range as FP32, making it more robust against underflow and a preferred choice for training large language models~\citep{kalamkar2019study, wang2019bfloat16}. However, the reduced precision of BF16 can still introduce numerical errors that lead to training failure, the focus of this paper.
+
+The bfloat16 (BF16) format is a 16-bit floating-point representation with 1 sign, 8 exponent, and 7 significand bits. It matches the dynamic range of 32-bit single-precision (FP32) but has lower precision, making it a popular choice for balancing computation and numerical range in deep learning. Adding two BF16 numbers involves aligning their exponents, adding the significands, normalizing the sum, and rounding the result to fit the 7-bit fraction. This final rounding step, typically ``round to nearest, ties to even", is one of the primary sources of error. While this rounding method is designed to be unbiased for random data, a sequence of operations on data with a specific distribution could lead to a \emph{biased rounding error}. This accumulation of error in one direction is a critical factor to the training failure observed in low-precision settings. See \cref{app:bf16_add} for details of BF16 addition.
+
+
+\subsection{Flash Attention}
+
+Flash Attention (FA)~\citep{dao2022flashattention,dao2023flashattention2,shah2024flashattention} is an I/O-aware exact attention algorithm designed to overcome the memory bottleneck of standard attention. Standard attention, defined as $\rmO = \mathrm{softmax}(\alpha \rmQ\rmK^\top)\rmV$, requires materializing the $N \times N$ attention score matrix $\rmS = \alpha \rmQ\rmK^\top$, leading to a memory complexity of $\mathcal{O}(N^2)$ with respect to the sequence length $N$. Flash attention reduces this to $\mathcal{O}(N)$ by partitioning the input matrices $\rmQ, \rmK, \rmV \in \mathbb{R}^{N \times d}$ into blocks and processing them iteratively. These blocks are loaded from high-bandwidth memory (HBM) into fast on-chip SRAM, minimizing costly memory transfers. 
+
+In this paper, we focus on analyzing flash attention 2. The forward pass of FA computes the output $\rmO$ and log-sum-exp statistics $\rmL$ using an online softmax method (\cref{alg:fa_forward}). It iterates through blocks of $\rmQ$ (outer loop) and blocks of $\rmK, \rmV$ (inner loop). For each query block $\rmQ_i$, it maintains running statistics: the maximum score $\rvm_i$ and the normalization factor $\rvell_i$. In each inner loop step, it computes unnormalized attention scores $\bar{\rmP}_{i}^{(j)} = \exp(\rmS_{i}^{(j)} - \rvm_{i}^{(j)})$ and updates an unnormalized output by accumulating the product $\bar{\rmP}_{i}^{(j)}\rmV_j$. This accumulation is a key focus of our analysis. After iterating through all key/value blocks, the final output block $\rmO_i$ is correctly normalized. This tiling strategy avoids materializing the full $N \times N$ score matrix.
+The backward pass (\cref{alg:fa_backward}) leverages the same tiling strategy. \emph{It first computes a key intermediate term, $\rvdel = \mathrm{rowsum}(d\rmO \circ \rmO)$, which is central to our investigation.} Then, it recomputes attention scores on-the-fly to calculate the gradient of the scores, $d\rmS_{i}^{(j)} = \rmP_{i}^{(j)} \circ (d\rmP_{i}^{(j)} - \rvdel_i)$, where $d\rmP_{i}^{(j)} = d\rmO_i \rmV_j^\top$. The final gradients $d\rmQ, d\rmK, d\rmV$ are accumulated block-wise. This approach maintains I/O efficiency in both passes. 
+
+\begin{figure}
+  \includegraphics[width=\textwidth]{img/failure_process.pdf}
+  \vspace{-10px}
+  \caption{Analysis in different sections. Our paper traces the causal chain of training failure (blue box) in reverse to identify the root causes.}\label{fig:failure_process}
+  \vspace{-10px}
+\end{figure}
+
+
+\section{Root Causes of Instability in Flash Attention}
+
+We first introduce the failure case in \cref{ssec:failure_case}.  
+In \cref{ssec:narrow}, we narrow down the source of the numerical errors within the flash attention. Further analysis in \cref{ssec:root_cause} reveals that the failure stems from a combination of two factors: the emergence of low-rank representations and the accumulation of biased rounding errors inherent to BF16 arithmetic. The full process of such failure from root cause to loss exploding is shown in \cref{fig:failure_process}.
+
+
+
+
+\subsection{The Failure Case of Low-Precision Flash Attention}\label{ssec:failure_case}
+  
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \vspace{-15px}
+    \centering
+    \includegraphics[width=0.4\textwidth]{img/stable_unstable_loss.pdf}
+    \vspace{-20px}
+    \caption{The failure case using BF16 and flash attention results in a sudden loss explosion, while the stable configuration converges.}\label{fig:exploded_loss}
+    \vspace{-10px}
+    % visualize_loss.py
+\end{wrapfigure}
+
+Our investigation targets a well-documented and persistent failure: the catastrophic loss explosion that occurs when training Generative Pre-trained Transformer 2 (GPT-2) models with flash attention in BF16 precision~\citep{nanogpt_issue303,nanogpt_issue524,nanogpt_issue554}. This failure case, reported for over two years, manifests as a sudden loss explosion after several thousand training steps (see \cref{fig:nanogpt_issues}). While empirical workarounds like reverting to standard attention or using higher precision (FP32) stabilize training, they come at the cost of efficiency. This instability is not an isolated incident; the broader community has observed similar failures when training large language models~\citep{team2025kimi,qwen3technicalreport}. These failures are often empirically linked to phenomena such as large spectral norms of weights, large activations~\citep{yang2023spectral,rybakov2024methods}, and attention sinks~\citep{xiao2023efficient}, leading to a suite of fixes including QK normalization~\citep{henry2020query,qwen3technicalreport}, QK-clipping~\citep{team2025kimi}, and Gated Attention~\citep{qiu2025gated,qwen3technicalreport}. Despite these interventions, a fundamental understanding of the root causes has remained elusive. The absence of a clear causal chain from numerical error to loss explosion has left the community reliant on ad-hoc patches rather than principled solutions, hindering progress in robust low-precision training. This paper provides the first mechanistic explanation by reproducing the failure, dissecting its root causes, and proposing a practical, principled solution.
+
+
+
+To reproduce the failure, we employ a GPT-2 architecture with 12 layers, 12 attention heads, an embedding dimension of 768, and a context length of 1024. The model is pre-trained on the OpenWebText dataset~\citep{Gokaslan2019OpenWeb}. 
+For deterministic reproducibility, we deviate from a standard random data loader by recording and reusing the exact sequence of data batches from an initial run that led to the failure. 
+This ensures all subsequent experiments process identical data in the same order, isolating the failure from data-related randomness.
+
+We train the model using the AdamW optimizer with $\beta_1=0.9$, $\beta_2=0.95$, and zero weight decay. 
+The learning rate follows a cosine schedule with a 2000-iteration linear warmup to a peak of $1 \times 10^{-3}$, decaying to $1 \times 10^{-5}$. 
+We apply global gradient clipping with a maximum norm of 1.0. 
+Training is conducted on 4 NVIDIA A100 (80GB) GPUs using PyTorch's Distributed Data Parallel (DDP) module. 
+We use automatic mixed precision with BF16 for the forward pass and FP32 for the backward pass. 
+Each GPU processes a micro-batch size of 32, and with gradient accumulation over 4 steps, 
+the effective global batch size is 524,288 tokens per optimization step.
+
+\subsection{Isolating the Source of Failure within Flash Attention}\label{ssec:narrow}
+
+To pinpoint the source of failure within flash attention, we conduct a series of targeted experiments. We systematically modify the algorithm—disabling tiling, selectively replacing flash attention with a standard implementation, and performing key computations in high precision—to narrow down the potential causes of instability. To accelerate this analysis, we monitor empirical indicators such as the spectral norm of weights to quickly identify failing configurations.
+
+
+\vspace{-10px}
+\paragraph{Tiling is not the Source of Failure.} 
+To determine if the block-wise processing in flash attention was responsible for the failure, we conduct an experiment where we disabled tiling by setting the block size equal to the sequence length. This forces the algorithm to compute with the full matrices at once. The training process still failed, leading to the same loss explosion. This finding rules out the tiling strategy as the cause of the problem. For all subsequent experiments, we therefore use this non-tiled setup to simplify the analysis and focus on the core numerical computations.
+
+\vspace{-10px}
+\paragraph{Failure Originates in a Single Layer.} 
+We first analyze the spectral norms of weights across all layers~\citep{yang2023spectral,rybakov2024methods}. 
+This reveals an anomalous spike specifically within the second layer's attention (see \cref{fig:sp_norm}). 
+We confirm this finding with two targeted experiments: 
+(1) using flash attention only in layer 2 was sufficient to reproduce the training failure, and 
+(2) replacing flash attention with standard attention in layer 2, while retaining it in all other layers, restored training stability. 
+These results conclusively identify the flash attention in layer 2 as the origin of the failure. So, subsequent analysis focuses on this module to dissect the failure mechanism.
+
+\vspace{-10px}
+\paragraph{Failure is Linked to the Computation of $\rvdel$.} The backward pass of flash attention uses the term $\rvdel = \mathrm{rowsum}(d\rmO \circ \rmO)\in \mathbb{R}^{N}$ for computational efficiency. An alternative, mathematically equivalent formulation computes this term as $\rvdel = \mathrm{rowsum}(d\rmP \circ \rmP)$, where $d\rmP = d\rmO \rmV^\top$. We find that replacing the efficient computation with this alternative formulation restored training stability. This experiment demonstrates that numerical errors introduced when computing $\rmO$ in BF16 is likely the primary source of failure, as the alternative formulation which avoids training failure is equivalent to use $\rmO$ computed in FP32.
+\begin{wrapfigure}{r}{0.4\textwidth}
+    \centering
+    % \vspace{-10px}
+    \includegraphics[width=0.4\textwidth]{img/layer_1_wq_head_spectral_norms.pdf}
+    \vspace{-20px}
+    \caption{$\rmW^Q$ of attention head 8 has the largest spectral norm. Subsequent analysis focuses on this head.}\label{fig:head_locating}
+    \vspace{-20px}
+    % visualize_head8_sp.py
+\end{wrapfigure}
+
+\vspace{-10px}
+\paragraph{Numerical Errors in $\rmO$ are the Source of Failure.}
+Building on the finding that the computation of $\rvdel$ is critical, we further isolate the source of error to the output matrix $\rmO_{lp}$ in low-precision $\rvdel_{lp} = \mathrm{rowsum}(d\rmO \circ \rmO_{lp})$. We conduct two key experiments. First, instead of using the low-precision $\rmO$ from the forward pass to compute $\rvdel$, we recomput it as $\rmP\rmV$ in FP32 within the backward pass; this change stabilize training. Second, we find that computing $\rmO$ in high precision (FP32) during the forward pass, i.e., $\rvdel_{hp} = \mathrm{rowsum}(d\rmO \circ \rmO_{hp})$, while keeping all other operations in BF16, also restored stability. This evidence conclusively demonstrates that numerical errors introduced during the BF16 computation of $\rmO$ are the direct cause of the failure (refer to \cref{claim1}).
+
+
+\vspace{-10px}
+\paragraph{Failure is Localized to Specific Attention Heads.} To further narrow down the source of failure, we analyze individual attention heads by tracking the spectral norm~\citep{yang2023spectral,rybakov2024methods} of their query projection matrices ($\rmW^Q$), as shown in \cref{fig:head_locating}. This reveals that a few heads exhibit disproportionately large spectral norms. We confirm their role by selectively computing the output $\rmO$ in high precision for these outlier heads (1, 7, 8, 9, 11, and 12), which is sufficient to restore training stability. \emph{Since head 8 shows the largest spectral norm, we focus our subsequent analysis on this head to dissect the precise failure mechanism.}
+
+
+\begin{tcolorbox}[
+  colback=cyan!5!white,      
+  colframe=black!100,
+  boxrule=0.4pt,
+  arc=3pt,
+  left=5pt, right=5pt,
+  top=5pt, bottom=5pt,
+  width=0.95\linewidth,
+  coltitle=black,
+  center
+]
+\begin{claim}\label{claim1}
+Low-precision $\rvdel_{lp} = \mathrm{rowsum}(d\rmO \circ \rmO_{lp})$ causes training failure.
+\end{claim}
+% $\rvdel_{hp} = \mathrm{rowsum}(d\rmO \circ \rmO_{hp})$ in the backward of flash attention restores training stability.
+\end{tcolorbox}
+
+% \vspace{-5px}
+
+
+\subsection{The Root Causes of Training Failure}\label{ssec:root_cause}
+
+
+Our investigation in this section uncovers the two interconnected root causes of the training failure. In \cref{ssec:cause1}, we demonstrate how low-precision $\rvdel_{lp}$ drives the training failure by a biased weight update, and find that bias arises from the emergence of similar low-rank representations $\rmR$, whose coefficients $(\rvdel_{lp} - \rvdel_{hp})[T]$ are biased towards positive values, causing the error to accumulate rather than cancel out. In \cref{ssec:cause2}, we trace the origin of these positive coefficients $(\rvdel_{lp} - \rvdel_{hp})[T]$ to biased rounding errors inherent in the BF16 addition within the $\bar{\rmP}\rmV$ product.
+
+\subsubsection{Cause 1. Similar Low-Rank Matrices Bias Weight Updates}\label{ssec:cause1}
+
+This section traces the training failure to biased weight update. We first analyze the difference between the high and low precision gradients calculated with $\rvdel_{hp}$ and $\rvdel_{lp}$, respectively. Then we find that the low-rank representations and biased $(\rvdel_{lp} - \rvdel_{hp})[T]$ lead to loss explosion.
+
+% \vspace{-5px}
+\paragraph{Analysis of the Error between High and Low Precision Gradients} To understand how numerical errors propagate into the gradients, we analyze the difference between the high-precision ($hp$) and low-precision ($lp$) gradients for the query matrix, $d\rmQ$. The gradient $d\rmQ$ is computed from the gradient of the attention scores, $d\rmS$, as $d\rmQ = d\rmS \rmK$. The score gradient is given by $d\rmS = \alpha \rmP \circ (d\rmP - \rvdel)$, where $\rvdel = \mathrm{rowsum}(d\rmO \circ \rmO)$ is the only term that differs between the high- and low-precision backward passes based on \cref{ssec:narrow}, and $\alpha$ is a scaling factor in attention.
+
+The difference between the high-precision and low-precision query gradients can be derived as:
+% \vspace{-5px}
+\begin{equation}\label{eq:q_diff}
+  \begin{split}
+  & d\rmQ_{hp} - d\rmQ_{lp} = (d\rmS_{hp} - d\rmS_{lp})\rmK \\
+  =& \left( \alpha \rmP \circ (d\rmP - \rvdel_{hp}) - \alpha \rmP \circ (d\rmP - \rvdel_{lp}) \right) \rmK
+  = \left( \alpha \rmP \circ (\rvdel_{lp} - \rvdel_{hp}) \right) \rmK \\
+  =& \alpha \cdot \mathrm{diag}(\rvdel_{lp} - \rvdel_{hp}) (\rmP \rmK).
+  \end{split}
+% \vspace{-5px}
+\end{equation}
+In the final step, we express the row-wise scaling operation $\rmP \circ (\rvdel_{lp} - \rvdel_{hp})$ (follow broadcasting rule) as a matrix multiplication, where $\mathrm{diag}(\rvdel_{lp} - \rvdel_{hp})$  is a diagonal matrix whose diagonal entries are the elements of the vector difference $\rvdel_{lp} - \rvdel_{hp}$. This formulation reveals that the gradient error is directly proportional to the error in $\rvdel$ and is modulated by the term $\rmP \rmK$.
+
+
+\begin{figure}[t]
+  \centering
+  \subfigure[]{\includegraphics[width=0.3\textwidth]{img/PK_at_H8_batch_idx_190_6610.pdf}}
+  \subfigure[]{\includegraphics[width=0.3\textwidth]{img/X_at_batch_idx_190_train_steps_6610.pdf}}
+  \subfigure[]{\includegraphics[width=0.3\textwidth]{img/PKX_at_H8_batch_idx_190_token50_train_steps_6610.pdf}}
+  \subfigure[]{\includegraphics[width=0.3\textwidth]{img/PK_at_H8_batch_idx_209_6619.pdf}}
+  \subfigure[]{\includegraphics[width=0.3\textwidth]{img/X_at_batch_idx_209_train_steps_6619.pdf}}
+  \subfigure[]{\includegraphics[width=0.3\textwidth]{img/PKX_at_H8_batch_idx_209_token718_train_steps_6619.pdf}}
+  \vspace{-10px}
+  \caption{$\rmP \rmK$, $\rmX$, and $(\rmP \rmK)[T]^\top \rmX[T]$ at different batch indices and training steps. (c) and (f) show that $(\rmP \rmK)[T]^\top \rmX[T]$ for different tokens and training steps have some similar columns in input features 546 and 678.}\label{fig:vis_PK_X}
+  \vspace{-15px}
+  %  matrix_alignment_v2.ipynb plots PK
+  %  train_one_sample.ipynb saves the state for plotting PK
+  %  train_one_sample.ipynb plots X
+\end{figure}
+
+
+The gradient of the query projection matrix, $d\rmW^Q$, is given by the outer product of the input features $\rmX$ and the query gradient $d\rmQ$. The difference between the high-precision ($hp$) and low-precision ($lp$) gradients for $\rmW^Q$ can be expressed as:
+% \vspace{-5px}
+\begin{align}
+d\rmW^Q_{hp} - d\rmW^Q_{lp} 
+& = (d\rmQ_{hp} - d\rmQ_{lp})^\top \rmX
+=  \alpha (\rmP \rmK)^\top \mathrm{diag}(\rvdel_{lp} - \rvdel_{hp}) \rmX,
+\notag\\
+& = \alpha \sum\nolimits_{T=1}^N (\rvdel_{lp} - \rvdel_{hp})[T] \cdot (\rmP \rmK)[T]^\top \rmX[T],
+\label{eq:grad_diff}
+% \vspace{-5px}
+\end{align}
+where $(\rmP \rmK)[T]$ and $\rmX[T]$ are the $T$-th row vectors of their matrices. This equation shows that the total gradient error is a weighted sum of rank-1 matrices, with weights given by the error in $\rvdel$.
+
+
+% \vspace{-5px}
+\paragraph{Similar Low-rank Updates of Weight Cause Training Failure} In \cref{fig:vis_PK_X}, the rows of $\rmP\rmK$ (panels a, d) and $\rmX$ (panels b, e) exhibit strong structural similarity across different training steps and token positions. This implies that the resulting rank-1 matrices, $(\rmP \rmK)[T]^\top \rmX[T]$, are also highly similar to one another. For instance, \cref{fig:vis_PK_X} (panels c, f) shows this similarity for tokens 50 and 718 at training steps 6610 and 6619, respectively. Because these rank-1 error components are structurally consistent, we can approximate the total gradient difference as 
+\begin{equation}\label{eq:low_rank_approx}
+  d\rmW^Q_{hp} - d\rmW^Q_{lp} \approx \alpha \sum\nolimits_{T=1}^N (\rvdel_{lp} - \rvdel_{hp})[T] \rmR
+\end{equation}
+where $\rmR$ denotes the common low-rank structure emerging across different tokens and training steps.
+
+Eqn.(\ref{eq:low_rank_approx}) shows that the accumulation of the low-rank error direction $\rmR$ is governed by the scalar term $\sum_{T=1}^N (\rvdel_{lp} - \rvdel_{hp})[T]$. If this sum is biased towards non-zero values, the error across different training steps will accumulate rather than cancel out. We track the cumulative sum of $\sum_{T=1}^N (\rvdel_{lp} - \rvdel_{hp})[T]$ over a sequence of training steps (6580 to 6680) leading up to the failure, as shown in \cref{fig:D_do_o_analysis}(a). The plot reveals that this sum is consistently positive, indicating a systematic bias. This bias causes the error in the low-rank direction $\rmR$ to compound with each training step. Because $\rmR$ is also similar for different steps, this ultimately corrupts the weight updates, increases the spectral norm (\cref{fig:sp_norm}) and activations~\citep{yang2023spectral,rybakov2024methods}, and causes the training failure (refer to \cref{claim2}). The following section finds the root cause of this positive bias by analyzing the weights and gradients at training step 6619, a point of significant positive contribution identified in \cref{fig:D_do_o_analysis}(a).
+
+
+\begin{tcolorbox}[
+  colback=cyan!5!white,      
+  colframe=black!100,
+  boxrule=0.4pt,
+  arc=3pt,
+  left=5pt, right=5pt,
+  top=5pt, bottom=5pt,
+  width=0.95\linewidth,
+  coltitle=black,
+  center
+]
+\begin{claim}\label{claim2}
+  Weight update in low-precision training is biased by $(\rvdel_{lp} - \rvdel_{hp})[T]\rmR$, which arises from the structurally similar matrices (denoted as $\rmR$) across tokens and training steps, and its positively-biased coefficient $(\rvdel_{lp} - \rvdel_{hp})[T]$. This bias accumulates error, preventing cancellation, increasing weight spectral norm and activation, and leading to loss explosion.
+\end{claim}
+\end{tcolorbox}
+
+
+\begin{figure}[ht]
+  % \vspace{-10px}
+  \subfigure[{Positively-biased $(\rvdel_{lp} \!-\! \rvdel_{hp})[T]$}]{\includegraphics[width=0.32\textwidth]{img/cumsum_of_D_diff.pdf}}
+  \subfigure[{Large values in features 20 \& 29}]{\includegraphics[width=0.32\textwidth]{img/o_do_visualization.pdf}}
+  \subfigure[{Large error in features 20 \& 29}]{\includegraphics[width=0.32\textwidth]{img/o_diff_do_visualization.pdf}}
+  \vspace{-10px}
+  \caption{Analysis of $\rvdel=\mathrm{rowsum}(d\rmO \circ \rmO)$.}\label{fig:D_do_o_analysis}
+  % \vspace{-20px}
+    % do_o_sample_analysis.ipynb
+\end{figure}
+
+
+
+% \vspace{-10px}
+\subsubsection{Cause 2. Biased Rounding Error Leads to Positive \texorpdfstring{$(\rvdel_{lp} - \rvdel_{hp})[T]$}{}}\label{ssec:cause2}
+
+This section investigates the origin of the positive bias in $(\rvdel_{lp} - \rvdel_{hp})[T]$. We trace this error to the interaction between $d\rmO$ and the numerical discrepancy in $\rmO_{lp} - \rmO_{hp}$, which itself arises from biased rounding errors in BF16 addition during the $\bar{\rmP}\rmV$ computation.
+
+\begin{figure}[t]
+  % \vspace{-10px}
+    \centering
+    \subfigure[{Most $\rmV[:, i]$ are negative}]{\includegraphics[width=0.32\textwidth]{img/P_V_visualization.pdf}}
+    \subfigure[{Large error when $\bar{\rmP}[T, i]=1$}]{\includegraphics[width=0.32\textwidth]{img/o_error_visualization.pdf}}
+    \subfigure[{Detailed view of (b)}]{\includegraphics[width=0.32\textwidth]{img/detail_view_standalone.pdf}}
+    \vspace{-10px}
+    \caption{Analysis of $\bar{\rmP}\rmV$}\label{fig:p_v_feature_analysis}
+    % \vspace{-10px}
+    % do_o_sample_analysis.ipynb
+\end{figure}
+
+\paragraph{Locate the Large Error in $(\rvdel_{lp} - \rvdel_{hp})[T]$} We first investigate the source of the positive bias in $\sum_{T=1}^N (\rvdel_{lp} - \rvdel_{hp})[T]$. As analyzed in \cref{ssec:narrow}, the error in $\rvdel$ stems from the product of the upstream gradient $d\rmO$ and the numerical error in the low-precision output, $\rmO_{lp} - \rmO_{hp}$. To dissect this, we focus on a token position $T=718$ where the error component $(\rvdel_{lp} - \rvdel_{hp})[T]$ is positive.
+% T = 718
+% batch_id 854 -> 254
+% training step 6619
+
+ In \cref{fig:D_do_o_analysis}(b) and (c), we observe a strong sign correlation between the gradient $d\rmO[T, :]$ and the output error $\rmO_{lp}[T, :] - \rmO_{hp}[T, :]$ for specific feature dimensions such as 20 and 29 (also observed across other tokens). In these dimensions, both $d\rmO$ and the output error $\rmO_{lp} - \rmO_{hp}$ are consistently negative. This alignment ensures their product, which contributes to the error in $\rvdel$, is positive. The fact that the output error tends to be negative ($\rmO_{lp}[T, i] < \rmO_{hp}[T, i]$) indicates that the low-precision computation of $\rmO$ is systematically biased towards more negative values. Our subsequent analysis, therefore, focuses on identifying the origin of this computational bias.
+
+The output $\rmO$ is computed from an intermediate unnormalized output, $\bar{\rmO}$. The computation involves a safe softmax followed by a matrix multiplication and normalization:
+\begin{align*}
+  \bar{\rmP} &= \exp(\rmS - \mathrm{rowmax}(\rmS)), & \bar{\rmO} &= \bar{\rmP}\rmV, & \rmO &= \bar{\rmO} / \mathrm{rowsum}(\bar{\rmP}).
+\end{align*}
+Further experiments pinpoint the source of failure to the computation of the unnormalized output, $\bar{\rmO} = \bar{\rmP}\rmV$. We find that computing only this product in FP32 is sufficient to stabilize training. To understand the origin of this bias, we examine the difference between the low-precision and high-precision computation of a single element, $\bar{\rmO}[T, i]$ (for feature index $i=20$ in our analysis):
+\begin{equation}
+  \bar{\rmO}_{lp}[T, i] - \bar{\rmO}_{hp}[T, i] = (\bar{\rmP}_{lp}[T, :]\rmV[:, i])_{lp} - (\bar{\rmP}_{hp}[T, :]\rmV[:, i])_{hp}
+\end{equation}
+where the inputs $\bar{\rmP}$ and $\rmV$ are themselves the results of prior BF16 operations. Specifically, the subscript $(\cdot)_{lp}$ here computes dot product in FP32 with the final result rounded to BF16, while $(\cdot)_{hp}$ computes entirely in FP32.
+
+
+To understand how the error $\bar{\rmO}_{lp}[T, i] - \bar{\rmO}_{hp}[T, i]$ becomes systematically negative, we plot the cumulative error as the sum over token positions progresses in \cref{fig:p_v_feature_analysis}(b) and (c):
+\begin{equation}
+\bar{\rmO}_{\text{error}}(t) 
+= \left( \sum\nolimits_{t^\prime=1}^{t} \bar{\rmP}[T, t^\prime]\rmV[t^\prime, i] \right)_{lp} 
+- \left( \sum\nolimits_{t^\prime=1}^{t} \bar{\rmP}[T, t^\prime]\rmV[t^\prime, i] \right)_{hp}.
+\end{equation}
+The figure shows that the error accumulates in significant negative steps. These steps occur at token positions $t$ where the corresponding attention probability $\bar{\rmP}[T, t]$ is exactly 1 (also observed in other token positions). This happens when the pre-softmax score $\rmS[T, t]$ is the maximum value in its row, causing $\exp(\rmS[T, t] - \max(\rmS[T, :]))$ to evaluate to $\exp(0)=1$.
+
+% \vspace{-10px}
+\paragraph{Analysis of Biased Rounding Error}
+Furthermore, the bias arises from the interaction of these unit values with the distribution of the value matrix $\rmV$. As observed in \cref{fig:p_v_feature_analysis}(a), for the problematic feature dimension $i=20$, the values of $\rmV[:, i]$ are predominantly negative. When $\bar{\rmP}[T, t]=1$, the product $\bar{\rmP}[T, t]\rmV[t, i]$ is simply $\rmV[t, i]$, a negative BF16 number.
+\emph{A systematic error then occurs when two such negative BF16 numbers are added.} In floating-point arithmetic, adding two numbers with the same sign can cause the resulting significand to overflow (e.g., $\mathtt{-1.xxxx} + \mathtt{-1.yyyy}=\mathtt{-10.zzzz}$), requiring a right shift and an exponent increment to re-normalize. The bits shifted out of the 7-bit BF16 fraction determine the rounding direction. When adding two negative numbers, the rounding operation (e.g., round-to-nearest) can introduce a consistent bias.
+
+To illustrate how this rounding bias occurs, consider the addition of two significands that cause an overflow, requiring a right shift for normalization. The bit that is shifted out (the rounding bit) determines the rounding direction. We show all possible additions of the last two 2-bit numbers, where the green bit represents the bit that would be shifted out (the rounding bit):
+% \vspace{-5px}
+\begin{tcolorbox}[colback=black!5!white,      
+  colframe=black,             
+  boxrule=0.5pt,             
+  width=0.95\linewidth,       
+  arc=4pt,                     
+  boxsep=1pt,                  
+  halign=center,              
+  top=0pt,
+  bottom=0.5pt,
+  center
+]
+\vspace{-5px}
+\begin{align*}
+  \mathtt{00}+\mathtt{00}=\mathtt{0}&{\color{green}\mathtt{0}} &\; \mathtt{00} + \mathtt{01} = \mathtt{0}&{\color{green}\mathtt{1}}& \; \mathtt{00} + \mathtt{10} = \mathtt{1}&{\color{green}\mathtt{0}} &\; \mathtt{00} + \mathtt{11} = \mathtt{1}&{\color{green}\mathtt{1}} &\; \mathtt{01} + \mathtt{01} = \mathtt{1}&{\color{green}\mathtt{0}} \\
+  \mathtt{01} + \mathtt{10} = \mathtt{1}&{\color{green}\mathtt{1}} &\; \mathtt{01} + \mathtt{11} = \mathtt{10}&{\color{green}\mathtt{0}}& \; \mathtt{10}+\mathtt{10}=\mathtt{10}&{\color{green}\mathtt{0}} &\; \mathtt{10} + \mathtt{11} = \mathtt{10}&{\color{green}\mathtt{1}} &\; \mathtt{11} + \mathtt{11} = \mathtt{11}&{\color{green}\mathtt{0}}
+\end{align*}
+\end{tcolorbox}
+% \vspace{-5px}
+Because the summation is performed in FP32, the accumulation of lower-order bits from the small numbers can activate the sticky bit. Consequently, this forces a rounding up when the subsequent BF16 number is added. Therefore, the rounding bit ${\color{green}\mathtt{1}}$ indicates that rounding up is required. Because the operands $\bar{\rmP}[T, t]\rmV[t, i]$ are negative and have a large exponent (because $\bar{\rmP}[T, t]=1$ does not make $\bar{\rmP}[T, t]\rmV[t, i]$ smaller), the error of rounding up is magnified, resulting a negative error. When the rounding bit is ${\color{green}\mathtt{0}}$, the result is rounded down, introducing a positive error.
+Furthermore, the positive error is smaller compared to the negative error from rounding up, as the values being added are usually very small. This asymmetry leads to the rounding error dominated by the rounding up, resulting in negative rounding error as observed in our analysis. This systematic negative bias in the computation of $\bar{\rmO}$ is the ultimate source of the training failure.
+
+\begin{remark}
+  For $\bar{\rmP}[T, t] < 1$, its product with $\rmV[t, i]$ has non-zero least 16 bits. When rounding to BF16, this will not introduce biased rounding error.
+\end{remark}
+
+% \vspace{-20px}
+\paragraph{Analysis of Rounding Error in \cref{fig:p_v_feature_analysis}}
+To make this concrete, we now analyze the specific BF16 number addition that causes the large negative error jump shown in \cref{fig:p_v_feature_analysis}(c). Because the summation is performed in FP32, the first BF16 value is added by some small values from other tokens before the second BF16 value is added. This can activate the sticky bit, which can force a round-up when adding the second BF16 value.
+For this example, we start with the FP32 representations.
+The first operand is the accumulated sum of previous terms, which includes a BF16  ($\mathtt{1}{{\color{red}\mathtt{10000000}}}{{\color{blue}\mathtt{0011010}}}{\color{gray}\mathtt{0000000000000000}}; -2.40625$) plus small residual ($\sim 0.00087$) that activate the sticky bit. The second operand is another BF16 value. Their FP32 representations are:
+% \vspace{-5px}
+\begin{tcolorbox}[colback=black!5!white,      
+  colframe=black,             
+  boxrule=0.5pt,             
+  width=0.95\linewidth,       
+  arc=4pt,                     
+  boxsep=1pt,                  
+  halign=center,              
+  top=0pt,
+  bottom=0.5pt,
+  center]
+\vspace{-5px}
+\begin{align*}
+  \mathtt{1}{\color{red}\mathtt{10000000}}{\color{blue}\mathtt{0011010}}{\color{gray}\mathtt{0000111000101110}} &\; (-2.4071154594421387) \\
+  \mathtt{1}{{\color{red}\mathtt{10000000}}}{{\color{blue}\mathtt{0010011}}}{\color{gray}\mathtt{0000000000000000}}&\; (-2.296875)
+\end{align*}
+\end{tcolorbox}
+% \vspace{-5px}
+Since their exponents are identical, the addition is performed on their significands:
+% \vspace{-5px}
+\begin{tcolorbox}[colback=black!5!white,      
+  colframe=black,             
+  boxrule=0.5pt,             
+  width=0.95\linewidth,       
+  arc=4pt,                     
+  boxsep=1pt,                  
+  halign=center,              
+  top=0pt,
+  bottom=0.5pt,
+  center]
+\vspace{-4px}
+\begin{align*}
+  &(\mathtt{-1.}{\color{blue}\mathtt{0011010}}{\color{gray}\mathtt{0000111000101110}})
+  + (\mathtt{-1.}{\color{blue}\mathtt{0010011}}{\color{gray}\mathtt{0000000000000000}})& \\
+  =& -\mathtt{10.{\color{blue}0101101}}{\color{gray}\mathtt{0000111000101110}}
+\end{align*}
+\end{tcolorbox}
+% \vspace{-5px}
+The result overflows the significand's format, requiring normalization. The significand is shifted right by one bit, and the exponent is incremented:
+% \vspace{-5px}
+\begin{tcolorbox}[colback=black!5!white,      
+  colframe=black,             
+  boxrule=0.5pt,             
+  width=0.95\linewidth,       
+  arc=4pt,                     
+  boxsep=1pt,                  
+  halign=center,              
+  top=0pt,
+  bottom=0.5pt,
+  center]
+\vspace{-4px}
+\begin{align*}
+  \text{Significand: } \mathtt{10.{\color{blue}0101101}} \to \mathtt{1.{\color{blue}0010110}{\color{green}1}} \quad \quad
+  \text{Exponent: } {\color{red}\mathtt{10000000}} \to {\color{red}\mathtt{10000001}}
+\end{align*}
+\end{tcolorbox}
+% \vspace{-5px}
+The exact result in FP32 is $\mathtt{1}\,{\color{red}\mathtt{10000001}}\,{\color{blue}\mathtt{0010110}}{\color{green}\mathtt{1}}{\color{gray}\mathtt{000011100010111}}$, which corresponds to $-4.703990459442139$. To store this result in BF16, it must be rounded to 7 fraction bits. The significand is $\mathtt{1.{\color{blue}0010110}{\color{green}1}}$. The 7-bit fraction is ${\color{blue}\mathtt{0010110}}$. Because the rounding bit is ${\color{green}\mathtt{1}}$ and there are nonzero bits after the rounding bit, the round-to-nearest (ties-to-even) rule rounds up (adding 1 to the last bit of the fraction):
+% \vspace{-5px}
+\begin{tcolorbox}[colback=black!5!white,      
+  colframe=black,             
+  boxrule=0.5pt,             
+  width=0.95\linewidth,       
+  arc=4pt,                     
+  boxsep=1pt,                  
+  halign=center,              
+  top=0pt,
+  bottom=0.5pt,
+  center]
+\vspace{-4px}
+  \begin{align*}
+  \text{BF16 Fraction: } {\color{blue}\mathtt{0010110}} + \mathtt{1} = {\color{blue}\mathtt{0010111}}
+\end{align*}
+\end{tcolorbox}
+% \vspace{-5px}
+The final BF16 result is $\mathtt{1}{\color{red}\mathtt{10000001}}{\color{blue}\mathtt{0010111}}$, which represents $-4.71875$. This rounded value is more negative than the true sum of $-4.703990459442139$. The error introduced by this single addition is $\mathbf{-0.014759540557861328}$. When such rounding events occur systematically across many additions in the $\bar{\rmP}\rmV$ product, the errors accumulate, creating the negative bias in $\rmO$ that ultimately destabilizes training.
+
+
+
+% \vspace{-5px}
+\begin{tcolorbox}[
+  colback=cyan!5!white,      
+  colframe=black!100,
+  boxrule=0.4pt,
+  arc=3pt,
+  left=5pt, right=5pt,
+  top=5pt, bottom=5pt,
+  width=0.95\linewidth,
+  coltitle=black,
+  center
+]
+\begin{claim}\label{claim3}
+  With more than one $\bar{\rmP}[T,t]=1$ and negative $\rmV[t, i]$, the addition in $\bar{\rmP}\rmV$ can cause significand overflow. This necessitates a right shift and a significand round-up due to sticky bit, introducing negative rounding error in $\rmO$ and leading to positive $(\rvdel_{lp} - \rvdel_{hp})[T]$.
+\end{claim}
+\end{tcolorbox}
+
+
+
+
+% \vspace{-10px}
+\section{Experiment: Mitigate Bias in Rounding Error}\label{sec:stable_fa}
+
+
+Our analysis traces the failure to biased rounding errors in the $\bar{\rmP}\rmV$ computation. This occurs when multiple identical maxima in a row of the pre-softmax scores $\rmS$ cause corresponding elements in $\bar{\rmP}$ to become exactly 1. To validate our findings, we modify the softmax to detect this specific condition and adjust the normalization, ensuring all elements of $\bar{\rmP}$ are strictly less than 1. This prevents the biased rounding and restores training stability.
+
+\begin{wrapfigure}{r}{0.5\textwidth}
+%\vspace{-20px}
+\begin{align*}
+\rvr_m &= \mathrm{rowmax}(\rmS), \quad \rvr_s = \mathrm{rowsum}(\rmS \equiv \rvr_m) \\
+\rvm^\prime &= \mathrm{where}(\rvr_m > 0 \land \rvr_s > 1, \beta \rvr_m, \rvr_m), \beta > 1 \\
+\rvm &= \mathrm{where}(\rvr_m < 0 \land \rvr_s > 1, 0, \rvm^\prime) \\
+\bar{\rmP} &= \exp(\rmS - \rvm)
+\end{align*}
+\vspace{-25px}
+\end{wrapfigure}
+To prevent biased rounding, we introduce a targeted modification to the safe softmax computation. The core idea is to dynamically adjust the normalization factor $\rvm$ only when a row of the score matrix $\rmS$ contains multiple identical maximum values. This adjustment ensures that the argument to the exponential function, $\rmS - \rvm$, becomes strictly negative at these maximal positions, which in turn guarantees that all elements of $\bar{\rmP} = \exp(\rmS - \rvm)$ are less than 1. A naive approach, such as subtracting a small fixed constant, is insufficient as it introduces new systematic rounding errors (see \cref{app:design_consider}); hence, a dynamic maximum strategy is required. Our modification is presented above.
+
+\begin{wrapfigure}{r}{0.4\textwidth}
+	\centering
+	% \vspace{-20px}
+	\includegraphics[width=0.4\textwidth]{img/SFA_FA_loss.pdf}
+	% \vspace{-20px}
+	\caption{Comparison of the stabilized FA and the original FA.}\label{fig:stable_fa_comparison}
+	% \vspace{-20px}
+	% visualize_SFA_loss.py
+\end{wrapfigure}
+
+
+This modification prevents elements of $\bar{\rmP}$ from becoming exactly 1. If a row's maximum value, $\rvr_m$, is positive and repeated, the normalization factor is adjusted to $\rvm = \beta \rvr_m$ (with $\beta > 1$). This makes the new maximum in the exponent $-(\beta - 1)\rvr_m$, which is strictly negative. If $\rvr_m$ is negative and repeated, we set $\rvm = 0$, which also ensures the exponent's maximum remains negative. In both scenarios, this adjustment guarantees that $\max(\rmS - \rvm) < 0$ and thus $\max(\bar{\rmP}) < 1$, preventing the conditions that lead to biased rounding.
+
+
+
+Crucially, this modification is mathematically equivalent to standard attention in exact arithmetic, as it leverages the shift-invariance property of the softmax function ($\mathrm{softmax}(\mathbf{z}) = \mathrm{softmax}(\mathbf{z} - c)$). Our method simply chooses a different row-wise constant $c$ to ensure numerical stability. In our experiments, we set $\beta \in [2, 8]$, as smaller values risk having the result round back to 1, while larger values risk underflow. This modification is integrated into the standard flash attention tiling algorithm (line with {\color{magenta}magenta} in \cref{alg:SFA}) without altering the backward pass. As shown in \cref{fig:stable_fa_comparison}, this simple change ($\beta=7$) successfully stabilizes training, confirming our analysis. Further design details are provided in \cref{app:design_consider}.
+
+
+
+\section{Conclusion}
+
+This paper presents the first mechanistic explanation for a notorious loss explosion in low-precision flash attention training. We pinpoint the root cause to an interplay between emergent low-rank representations and biased BF16 rounding errors. A minimal, targeted modification to flash attention validates our analysis by restoring stability. Our analytical workflow provides a blueprint for diagnosing similar numerical instabilities in other architectures, scales, and low-precision formats, paving the way for more robust and efficient large-scale model training.
+
+\paragraph{Discussion}
+Our findings are consistent across various hardware (NVIDIA A100, RTX 4090, Huawei Ascend 910B) and mechanistically explain empirical observations of training instability. The growth of weight spectral norms results from the accumulation of a low-rank error matrix in the gradients. We also clarify the role of attention sinks: by attracting high attention scores, they are more likely to produce attention probabilities of 1, which triggers the biased rounding error in the $\bar{\rmP}\rmV$ computation. This provides a direct numerical link between the architectural behavior of sinks and the arithmetic instability that derails training.
+
+\paragraph{Limitations}
+Our analysis focuses on a specific failure case in a GPT-2 model. The generalizability of our findings to other architectures, larger scales, or different low-precision formats like FP8 requires further investigation. Additionally, our proposed mitigation is tailored to the specific rounding error identified and may not address other sources of numerical instability.
+
+
+% \subsubsection*{Author Contributions}
+% If you'd like to, you may include  a section for author contributions as is done
+% in many journals. This is optional and at the discretion of the authors.
+
+% \subsubsection*{Acknowledgments}
+% Use unnumbered third level headings for the acknowledgments. All
+% acknowledgments, including those to funding agencies, go at the end of the paper.
+
+\nocite{*} % This will include all references in the bibliography, even if not cited in the text.
+\bibliography{iclr2026_conference}
+\bibliographystyle{iclr2026_conference}
+
+\newpage
+\appendix
+
+
+\section{Related Work}
+
+
+\subsection{Mixed-Precision BF16 Training.}  
+Contemporary large language model (LLM) pretraining almost universally employs mixed-precision arithmetic. Early efforts by \citet{micikevicius2017mixed} demonstrated that FP16 training---using an FP32 master copy of weights and fixed loss scaling---could match FP32 accuracy for many models. However, the narrow exponent range of FP16 often causes many gradients to underflow, necessitating careful tuning. The bfloat16 (BF16) format, with an 8-bit exponent and 7-bit mantissa, retains the wide dynamic range of FP32 while halving storage cost. \citet{kalamkar2019study} showed that BF16 achieves convergence parity with FP32 on large models without specialized tuning. Since then, BF16 has become the default 16-bit format for many large-scale training frameworks, with native support in PyTorch and TensorFlow~\citep{wang2019bfloat16}. 
+
+BF16 mixed precision has enabled training of landmark LLMs at unprecedented scales, including GPT-3 (175B) \citep{brown2020language}, Google PaLM (540B) \citep{chowdhery2023palm}, DeepMind Gopher (280B) \citep{rae2021scaling}, Chinchilla (70B) \citep{hoffmann2022training}, and Meta's LLaMA family (7B-65B) \citep{touvron2023llama}. To handle the massive memory footprint, parallel training frameworks such as Megatron and DeepSpeed integrate BF16 training with techniques like the Zero Redundancy Optimizer (ZeRO) \citep{rajbhandari2020zero}.
+
+Despite its advantages, BF16 training can still exhibit instabilities. Empirical studies show that FP16 is highly unstable even with loss scaling, whereas BF16 eliminates most precision-related tuning and failures \cite{wang2019bfloat16}. However, \citet{lee2024fp8} report that roughly 10\% of GPT-2 pretraining runs diverged under pure BF16, compared to 0\% under TF32. This suggests that while BF16 substantially improves stability, complementary stabilization techniques remain necessary at scale. 
+
+\subsection{Stabilizing Low-precision Training}
+
+\paragraph{Gradient Scaling.}
+Early work by \citet{micikevicius2017mixed} introduced FP16 mixed-precision training, where weights, activations, and gradients are stored in half-precision while maintaining a master FP32 copy. They also proposed \textit{loss scaling} to prevent FP16 underflows. Even with loss scaling, some underflow can still occur in deep networks. To address this, \citet{zhao2021reducing} introduced \textit{gradient scaling}, which dynamically computes per-layer scaling factors to avoid both underflow and overflow.
+
+\paragraph{Ultra-Low-Precision (FP8/INT8) Training.}
+To further reduce cost, recent works explore FP8 or INT8 precision for training and inference.
+However, naive FP8 training tends to diverge. \citet{lee2024fp8} note that the direct application of FP8 to LLM training is unstable without additional stabilization techniques.
+To address this, \citet{perez2023training} propose dynamically adjusted per-tensor scaling factors for FP8 matrix multiplications. 
+Using this scheme, they successfully train GPT- and LLaMA-style models up to 70B parameters entirely in FP8.
+Similarly, \citet{peng2023fp8} introduce \textsc{FP8-LM}, a framework that progressively applies FP8 to gradients, optimizer states, and distributed communication, achieving a 39\% memory reduction and 75\% speedup compared to BF16.
+\citet{balancca2024scalify} present \textsc{Scalify}, which propagates scale factors throughout the computation graph to ensure stable FP8 operations without manual tuning.
+These approaches collectively demonstrate that careful scaling management enables FP8 or INT8 training to match BF16 performance while reducing memory and compute requirements.
+
+\paragraph{Optimizer and Gradient Stabilization.}
+Optimizer algorithms play a critical role in training stability.
+\citet{molybog2023theory} theoretically analyze Adam and show that catastrophic divergence often arises when the update direction becomes uncorrelated with the true descent direction in large-scale models.
+To address gradient instability, \citet{huang2025spam} propose \textsc{SPAM} (Spike-Aware Adam with Momentum Reset), which detects and mitigates rare but severe ``gradient spikes'' by resetting momentum and applying spike-aware clipping. 
+In parallel, \citet{wortsman2023stable} investigate loss spikes in vision-language models and show that AdamW often underestimates the second moment before spikes occur. 
+They propose a hybrid AdamW-AdaFactor optimizer that adaptively corrects second-moment underestimation, outperforming gradient clipping alone.
+These methods highlight how optimizer modifications directly mitigate divergence in low-precision regimes.
+
+\paragraph{Activation and Architectural Techniques.}
+The choice of activation functions and initialization strategies also impacts stability.
+\citet{fishman2024scaling} observe that the SwiGLU activation amplifies outliers during long FP8 training runs. They introduce \textit{Smooth-SwiGLU}, a modified activation that prevents outlier amplification, enabling stable trillion-token FP8 training.
+In the vision-language domain, \citet{wortsman2023stable} show that ``layer-scale zero'' initialization and carefully designed low-precision linear layers (e.g., SwitchBack) further improve stability in int8 training.
+
+
+
+\section{BF16 Addition}\label{app:bf16_add}
+
+The bfloat16 (Brain Floating-Point) format is a 16-bit floating-point representation widely used in deep learning for its balance between computational efficiency and numerical range. It consists of 1 sign bit, 8 exponent bits, and 7 fraction (or mantissa) bits. This structure gives bfloat16 the same dynamic range as the 32-bit single-precision format (FP32) but with significantly less precision.
+
+The addition of two bfloat16 numbers, say $a$ and $b$, follows the standard procedure for floating-point arithmetic:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Exponent Alignment:} The exponents of the two numbers are compared. The number with the smaller exponent has its significand (the combination of the implicit leading bit and the fraction) shifted to the right until its exponent matches the larger one. Each right shift increases the exponent by one. Bits shifted past the available precision are lost, which is an initial source of error.
+    \item \textbf{Significand Addition:} The aligned significands are added together. The sign of the result is determined by the signs and magnitudes of the operands.
+    \item \textbf{Normalization:} The result is normalized to ensure it conforms to the $\mathtt{1.xxxx...} \times 2^{e}$ format. If the addition resulted in an overflow (e.g., $\mathtt{10.xxxx...}$), the significand is shifted right and the exponent is incremented. If it resulted in cancellation (e.g., $\mathtt{0.00xx...}$), the significand is shifted left and the exponent is decremented until the leading bit is $\mathtt{1}$.
+    \item \textbf{Rounding:} The resulting significand, which may have more than 7 fraction bits after normalization, must be rounded. The standard mode is "round to nearest, ties to even". This means if the truncated part is greater than half the value of the last storable bit (LSB), the number is rounded up. If it is less, it is rounded down. If it is exactly half, it is rounded to the nearest value with an even LSB.
+\end{enumerate}
+
+The key source of numerical error comes from steps 1 and 4. During exponent alignment, precision is lost from the smaller-magnitude number. After addition, the result must be rounded back to the 7-bit fraction, which introduces another rounding error. While ``round to nearest, ties to even" is designed to be unbiased for random data, a sequence of additions on data with a specific distribution (e.g., mostly negative numbers being added together) can lead to a \emph{biased rounding error}, where the accumulated error consistently pushes the result in one direction. This accumulation of biased error is a critical factor in the training failure observed in low-precision settings.
+
+
+\section{Design Considerations for Mitigating Biased Rounding Error in Flash Attention}\label{app:design_consider}
+
+\paragraph{Use Dynamic Maximum Value Rather Than Fixed Offset} A fixed offset would cause the computed values of $\bar{\rmP}$ to be consistently rounded in one direction during BF16 conversion, introducing a fixed error. Since the elements of $\rmV$ often share the same sign, this fixed rounding error in $\bar{\rmP}$ does not average out to zero when computing $\bar{\rmP}\rmV$. This leads to a biased error in the output $\rmO$, which in turn creates a biased term $\rvdel$, reintroducing the very failure we aim to solve.
+
+
+\paragraph{Dynamic Maximum is Applied Conditionally} Our modification is applied conditionally—only when a row contains multiple identical maximum values—to avoid introducing new numerical instabilities. An unconditional adjustment is not a better option. For example, if a row has a single, very large positive maximum value $\rvr_m$, applying our rule would mean calculating $\exp(\rmS - \beta\rvr_m)$. The largest term in the exponent would become $-(\beta-1)\rvr_m$, and $\exp(-(\beta-1)\rvr_m)$ could underflow to zero. This would cause the normalization factor to become zero, leading to a division-by-zero error when computing the output $\rmO$. By applying the modification only in the specific case that causes biased rounding, we preserve the numerical stability of the standard online softmax in all other scenarios.
+
+
+\paragraph{Explanation on Dealing Negative Repeated Row Maximum} We also explore alternative stabilization methods for the negative, repeated row maximum ($\rvr_m < 0$). One approach involves setting the normalization factor $\rvm = \gamma \rvr_m$ for some $\gamma \in (0, 1)$. This makes the new maximum value in the exponent $(1-\gamma) \rvr_m$. However, we observe that if $\gamma$ is close to 1, this new maximum approaches zero. In low-precision arithmetic, $\exp((1-\gamma) \rvr_m)$ can round to exactly 1, reintroducing the very failure we aim to prevent. Consequently, we found that setting $\gamma=0$ (i.e., $\rvm=0$) is a robust choice, as it ensures the maximum value in the exponent remains sufficiently negative.
+
+
+\begin{algorithm}[h!]
+  % \algsetup{linenosize=\tiny}
+  \caption{Stablized Flash Attention by Mitigating Biased Rounding Error: Forward Pass}\label{alg:SFA}
+  \begin{algorithmic}[1]
+    \REQUIRE Matrices $\rmQ, \rmK, \rmV \in \mathbb{R}^{N \times d}$, block sizes $B_c$, $B_r$, $\beta>1$.
+    \STATE Divide $\rmQ$ into $T_r = \left\lceil\frac{N}{B_r} \right\rceil$ blocks $\rmQ_1, \dots, \rmQ_{T_r}$ of size $B_r \times d$ each,
+    and divide $\rmK, \rmV$ in to $T_c = \left\lceil \frac{N}{B_c} \right\rceil$ blocks $\rmK_1, \dots, \rmK_{T_c}$ and
+    $\rmV_1, \dots, \rmV_{T_c}$, of size $B_c \times d$ each.
+    \STATE Divide the output $\rmO \in \mathbb{R}^{N \times d}$ into $T_r$ blocks $\rmO_1, \dots, \rmO_{T_r}$ of size
+    $B_r \times d$ each, and divide the logsumexp $\rmL$ into $T_r$ blocks $\rmL_1, \dots, \rmL_{T_r}$ of size
+    $B_r$ each.
+    \FOR{$1 \le i \le T_r$}
+      % \STATE Load $\rmQ_i$ from HBM to on-chip SRAM.
+      \STATE Initialize $\rmO_{i}^{(0)} = (0)_{B_r \times d} \in \mathbb{R}^{B_r \times d}, \rvell_{i}^{(0)} = (0)_{B_r} \in \mathbb{R}^{B_r}, \rvm_{i}^{(0)} = (-\infty)_{B_r} \in \mathbb{R}^{B_r}$.
+      \FOR{$1 \le j \le T_c$}
+        % \STATE Load $\rmK_j, \rmV_j$ from HBM to on-chip SRAM.
+        \STATE Compute $\rmS_{i}^{(j)} = \rmQ_i \rmK_j^T \in \mathbb{R}^{B_r \times B_c}$.
+          \STATE {\color{magenta}$\rvr_m =  \mathrm{rowmax}(\rmS_{i}^{(j)})$, $\rvr_s = \mathrm{rowsum}(\rmS_{i}^{(j)} \equiv \rvr_m)$}
+          \STATE {\color{magenta}$\rvm_{i}^{(j)\prime} = \mathrm{where}(\rvr_m > 0 \land \rvr_s > 1, \beta \rvr_m, \rvr_m)$}
+          \STATE {\color{magenta}$\rvm_{i}^{(j)} = \mathrm{where}(\rvr_m < 0 \land \rvr_s > 1, 0, \rvm_{i}^{(j)\prime})$}
+        \STATE Compute
+        $\rvm_{i}^{(j)} = \mathrm{max}(\rvm_{i}^{(j-1)}, \rvr_m) \in \mathbb{R}^{B_r}$, $\bar{\rmP}_{i}^{(j)} = \exp(\rmS_{i}^{(j)} - \rvm_{i}^{(j)}) \in \mathbb{R}^{B_r \times B_c}$ (pointwise),
+        $\rvell_{i}^{(j)} = e^{\rvm_{i}^{(j-1)} - \rvm_{i}^{(j)}} \rvell_{i}^{(j-1)} + \mathrm{row sum}(\bar{\rmP}_{i}^{(j)}) \in \mathbb{R}^{B_r}$.
+        \STATE Compute
+        $\rmO_{i}^{(j)} = \text{diag}(e^{\rvm_{i}^{(j-1)} - \rvm_{i}^{(j)}}) \rmO_{i}^{(j-1)} + \bar{\rmP}_{i}^{(j)} \rmV_j$.
+      \ENDFOR
+      \STATE Compute $\rmO_{i} = \text{diag}(\rvell_{i}^{(T_c)})^{-1} \rmO_{i}^{(T_c)}$.
+      \STATE Compute $\rmL_{i} = \rvm_{i}^{(T_c)} + \log(\rvell_{i}^{(T_c)})$.
+      \STATE Write $\rmO_{i}$ as the $i$-th block of $\rmO$.
+      \STATE Write $\rmL_{i}$ as the $i$-th block of $\rmL$.
+    \ENDFOR
+    \STATE Return the output $\rmO$ and the logsumexp $\rmL$.
+  \end{algorithmic}
+\end{algorithm}
+
+
+\begin{algorithm}[h!]
+  % \algsetup{linenosize=\tiny}
+  \caption{Flash Attention: Forward Pass}\label{alg:fa_forward}
+  \begin{algorithmic}[1]
+    \REQUIRE Matrices $\rmQ, \rmK, \rmV \in \mathbb{R}^{N \times d}$, block sizes $B_c$, $B_r$.
+    \STATE \label{alg:stream_attn_split_qkv} Divide $\rmQ$ into $T_r = \left\lceil\frac{N}{B_r} \right\rceil$ blocks $\rmQ_1, \dots, \rmQ_{T_r}$ of size $B_r \times d$ each,
+    and divide $\rmK, \rmV$ in to $T_c = \left\lceil \frac{N}{B_c} \right\rceil$ blocks $\rmK_1, \dots, \rmK_{T_c}$ and
+    $\rmV_1, \dots, \rmV_{T_c}$, of size $B_c \times d$ each.
+    \STATE Divide the output $\rmO \in \mathbb{R}^{N \times d}$ into $T_r$ blocks $\rmO_1, \dots, \rmO_{T_r}$ of size
+    $B_r \times d$ each, and divide the logsumexp $\rmL$ into $T_r$ blocks $\rmL_1, \dots, \rmL_{T_r}$ of size
+    $B_r$ each.
+    \FOR{$1 \le i \le T_r$} \label{alg:stream_attn_outer_loop}
+      % \STATE \label{alg:stream_attn_load_q} Load $\rmQ_i$ from HBM to on-chip SRAM.
+      \STATE Initialize $\rmO_{i}^{(0)} = (0)_{B_r \times d} \in \mathbb{R}^{B_r \times d}, \rvell_{i}^{(0)} = (0)_{B_r} \in \mathbb{R}^{B_r}, \rvm_{i}^{(0)} = (-\infty)_{B_r} \in \mathbb{R}^{B_r}$.
+      \FOR{$1 \le j \le T_c$}
+        % \STATE \label{alg:stream_attn_load_kv} Load $\rmK_j, \rmV_j$ from HBM to on-chip SRAM.
+        \STATE Compute $\rmS_{i}^{(j)} = \rmQ_i \rmK_j^T \in \mathbb{R}^{B_r \times B_c}$.
+        \STATE Compute
+        $\rvm_{i}^{(j)} = \mathrm{max}(\rvm_{i}^{(j-1)}, \mathrm{rowmax}(\rmS_{i}^{(j)})) \in \mathbb{R}^{B_r}$, $\bar{\rmP}_{i}^{(j)} = \exp(\rmS_{i}^{(j)} - \rvm_{i}^{(j)}) \in \mathbb{R}^{B_r \times B_c}$ (pointwise),
+        $\rvell_{i}^{(j)} = e^{\rvm_{i}^{(j-1)} - \rvm_{i}^{(j)}} \rvell_{i}^{(j-1)} + \mathrm{row sum}(\bar{\rmP}_{i}^{(j)}) \in \mathbb{R}^{B_r}$.
+        \STATE Compute
+        $\rmO_{i}^{(j)} = \text{diag}(e^{\rvm_{i}^{(j-1)} - \rvm_{i}^{(j)}}) \rmO_{i}^{(j-1)} + \bar{\rmP}_{i}^{(j)} \rmV_j$.
+      \ENDFOR
+      \STATE Compute $\rmO_{i} = \text{diag}(\rvell_{i}^{(T_c)})^{-1} \rmO_{i}^{(T_c)}$.
+      \STATE Compute $\rmL_{i} = \rvm_{i}^{(T_c)} + \log(\rvell_{i}^{(T_c)})$.
+      \STATE Write $\rmO_{i}$ as the $i$-th block of $\rmO$.
+      \STATE Write $\rmL_{i}$ as the $i$-th block of $\rmL$.
+    \ENDFOR
+    \STATE Return the output $\rmO$ and the logsumexp $L$.
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+  \caption{Flash Attention: Backward Pass}\label{alg:fa_backward}
+  \begin{algorithmic}[1]
+    \REQUIRE Matrices $\rmQ, \rmK, \rmV, \rmO, d\rmO \in \mathbb{R}^{N \times d}$,
+    vector $L \in \mathbb{R}^N$, block sizes $B_c$, $B_r$.
+    \STATE Divide $\rmQ$ into $T_r = \left\lceil\frac{N}{B_r} \right\rceil$ blocks $\rmQ_1, \dots, \rmQ_{T_r}$ of size $B_r \times d$ each,
+    and divide $\rmK, \rmV$ in to $T_c = \left\lceil \frac{N}{B_c} \right\rceil$ blocks $\rmK_1, \dots, \rmK_{T_c}$ and
+    $\rmV_1, \dots, \rmV_{T_c}$, of size $B_c \times d$ each.
+    \STATE Divide $\rmO$ into $T_r$ blocks $\rmO_1, \dots, \rmO_{T_r}$ of size
+    $B_r \times d$ each, divide $d\rmO$ into $T_r$ blocks $d\rmO_1, \dots, d\rmO_{T_r}$
+    of size $B_r \times d$ each, and divide $\rmL$ into $T_r$ blocks $\rmL_1, \dots, \rmL_{T_r}$ of size
+    $B_r$ each.
+    \STATE Initialize $d\rmQ = (0)_{N \times d}$ and divide it into $T_r$ blocks $d\rmQ_1, \dots, d\rmQ_{T_r}$ of size $B_r \times d$ each.
+    Divide $d\rmK, d\rmV \in \mathbb{R}^{N \times d}$ in to $T_c$ blocks $d\rmK_1, \dots, d\rmK_{T_c}$ and
+    $d\rmV_1, \dots, d\rmV_{T_c}$, of size $B_c \times d$ each.
+    \STATE Compute $\rvdel = \mathrm{rowsum}(d\rmO \circ \rmO) \in \mathbb{R}^N$ (pointwise multiply), and divide it into $T_r$ blocks $\rvdel_1, \dots, \rvdel_{T_r}$ of size
+    $B_r$ each.
+    \FOR{$1 \le j \le T_c$}
+      % \STATE Load $\rmK_j, \rmV_j$ from HBM to on-chip SRAM.
+      \STATE Initialize $d\rmK_j = (0)_{B_c \times d}, d\rmV_j = (0)_{B_c \times d}$.
+      \FOR{$1 \le i \le T_r$}
+        % \STATE Load $\rmQ_i, \rmO_i, d\rmO_i, d\rmQ_i, L_i, \rvdel_i$ from HBM to on-chip SRAM.
+        \STATE Compute $\rmS_{i}^{(j)} = \rmQ_i \rmK_j^T \in \mathbb{R}^{B_r \times B_c}$.
+        \STATE Compute $\rmP_{i}^{(j)} = \exp(\rmS_{ij} - \rmL_{i}) \in \mathbb{R}^{B_r \times B_c}$.
+        \STATE Compute
+        $d\rmV_j \leftarrow d\rmV_j + (\rmP_{i}^{(j)})^\top d\rmO_i \in \mathbb{R}^{B_c \times d}$.
+        \STATE Compute
+        $d\rmP_{i}^{(j)} = d\rmO_{i} \rmV_j^\top \in \mathbb{R}^{B_r \times B_c}$.
+        \STATE Compute $d\rmS_{i}^{(j)} = \rmP_{i}^{(j)} \circ (d\rmP_{i}^{(j)} - \rvdel_i) \in \mathbb{R}^{B_r \times B_c}$.
+        % \STATE Load $d\rmQ_i$ from HBM to SRAM, then on chip, update
+        \STATE Update $d\rmQ_{i} \leftarrow d\rmQ_i + d\rmS_{i}^{(j)} \rmK_j \in \mathbb{R}^{B_r \times d}$.
+        % , and write
+        % back to HBM.
+        \STATE Compute $d\rmK_{j} \leftarrow d\rmK_j + {d\rmS_{i}^{(j)}}^\top d\rmQ_i \in \mathbb{R}^{B_c \times d}$.
+      \ENDFOR
+      % \STATE Write $d\rmK_j, d\rmV_j$ to HBM.
+    \ENDFOR
+    \STATE Return $d\rmQ, d\rmK, d\rmV$.
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{figure}[t]
+\subfigure[Loss in nanoGPT Issue \#303]{\includegraphics[width=\textwidth]{img/loss_in_nanogpt_303.png}  }
+\subfigure[Loss in nanoGPT Issue \#524]{\includegraphics[width=\textwidth]{img/loss_in_nanogpt_524.png}  }
+  \caption{Loss curves of two independent runs of GPT-2 training with flash attention in BF16 reported in the Github issue of nanoGPT.}\label{fig:nanogpt_issues}
+\end{figure}
+
+
+\begin{figure}[t]
+  \includegraphics[width=\textwidth]{img/spectral_norm_heatmap.pdf}
+  \caption{Spectral norm across layers and training steps.}\label{fig:sp_norm}
+\end{figure}
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{img/visualization_254.pdf}
+  \caption{Token difference visualization}\label{fig:token_vis}
+\end{figure}
+
+\clearpage
+
+\end{document}

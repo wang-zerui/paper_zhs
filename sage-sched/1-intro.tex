@@ -1,0 +1,50 @@
+%!TEX root = main.tex
+\section{Introduction}
+\label{sec:intro}
+
+Large language models (LLMs) have revolutionized diverse domains, from conversational assistants~\cite{openai_chatgpt,deepseek} to agentic and embodied systems~\cite{chen2023typefly,wang2024llm}.
+With the widespread adoption of LLMs, massive LLM inference requests are often concurrently served on GPU servers~\cite{sun2024llumnix}. 
+When scheduling LLM requests, it is increasingly crucial to minimize their overall service latency, or \emph{Time-to-Last-Token} (TTLT), to optimize the end-to-end user experience~\cite{shahout2024don,qiu2024efficient}.
+
+
+Nonetheless, contrary to conventional workloads, LLM inferences have two challenging characteristics in resource demands: \emph{uncertainty} and \emph{hybridity}. 
+
+On the one hand, due to the auto-regressive nature, the output token length of an LLM inference is \emph{non-deterministic} beforehand, exhibiting strong uncertainty~\cite{yu2022orca}; in contrast, OS~\cite{lozi2016linux} or big data~\cite{ousterhout2015making} workloads are often recurring with stable resource demands. 
+On the other hand, with vast matrix-based operations and heavy KVCache reliance~\cite{qin2024mooncake}, LLM inferences are both \emph{compute} and \emph{memory} intensive; in contrast, with virtual memory techniques~\cite{abrossimov1989generic}, OS schedulers only care about compute cost in process scheduling.
+
+
+Confronting the demand uncertainty and hybridity of LLM inference workloads, existing LLM schedulers fail to attain high efficiency. 
+Mainstream LLM frameworks like vLLM~\cite{kwon2023efficient} and SGLang~\cite{zheng2024sglang} adopt the classical \emph{first-come-first-serve} policy, which often inflates the overall TTLT due to \emph{head-of-line-blocking}. 
+While some recent schedulers~\cite{shahout2024don,qiu2024efficient,fu2024efficient} seek to approximate the \emph{shortest-job-first} policy with the predicted output length, they are still suboptimal. 
+{First}, those schedulers commonly rely on a fine-tuned model to directly predict the inference output-length, which is both \emph{heavy-weight} (due to costly training and predicting) and \emph{inaccurate} (due to the difficulty to emulate the original generation effect).
+    %(by losing the inherent uncertainty distribution information).
+Meanwhile, existing schedulers queue the pending requests based on their output token length, which ignores demand hybridity and fails to capture their true service costs.
+Moreover, those schedulers commonly use a single (expected mean) value as the queuing index, failing to leverage the inherent uncertainty distribution information for the best queuing effect.
+
+
+
+In this paper, we design \oursched, an LLM scheduler that attains high efficiency by properly handling the demand uncertainty and hybridity characteristics of inference workloads.
+There are three key techniques in \oursched.
+\emph{First}, in demand prediction, motivated by the correlation between prompt similarity and output-length similarity, we propose \emph{semantic-aware history-based predictor}, which combines the \emph{prompt contents} with the \emph{past inference results} to predict an output-length distribution.
+In this way, we can avoid the burden to maintain a heavy-weight prediction model for each LLM or the complexity to directly emulate the original generation effect. 
+\emph{Second}, in cost modeling, we consider resource contention in both \emph{compute} and \emph{memory} aspects. 
+By respectively studying LLM serving process in compute- and memory-bound scenarios, we build a \emph{unified cost model} that can always capture the true service cost of an LLM inference.
+\emph{Third}, given that the service cost of an inference is best depicted as a distribution, we adopt an \emph{uncertainty-aware request scheduling policy}.
+Specifically, when queuing each request, we calculate the \emph{Gittins index} out of its cost distribution, which is known to yield the best overall performance for \emph{jobs with unknown durations but known duration-distributions}~\cite{gittins1979bandit}; we also periodically refresh ongoing inferences' Gittins indices to ensure timeliness of the scheduling plan.
+
+
+
+We have implemented \oursched on top of the popular vLLM framework~\cite{vllm_v0_8_2}, and further evaluated its performance with diverse real-world LLM traces. 
+Our experiments show that \oursched surpasses state-of-the-art LLM schedulers by over 28.7\% in terms of the average TTLT. 
+Besides, our deep dive analysis further confirm the superiority of each (prediction, modeling and scheduling) techniques adopted in \oursched. 
+Moreover, large-scale simulations confirm that \oursched can scale well in large clusters with relatively low scheduling overheads.
+
+
+
+In summary, this paper makes the following contributions:
+\begin{itemize}
+    \item We identify with testbed measurements the limitations of existing schedulers when confronting the uncertainty and hybridity characteristics of LLM workloads. %  We introduce a training-free, LLM-generic method to infer per-request output-length distributions by semantic retrieval over short-term history, avoiding heavyweight per-model predictors.
+    \item We design \oursched, a TTLT-efficient LLM scheduler integrating three key techniques: semantic-aware history-based prediction, resource-bound-based cost modeling, and uncertainty-aware requesting queuing. % light-weight and also accurate prethat can attain optimal TTLT performance, 
+    \item We evaluate \oursched performance with both testbed experiments and simulations, which show that it can attain remarkable efficiency enhancement, with a TTLT improvement of over 28.7\%.
+
+\end{itemize}

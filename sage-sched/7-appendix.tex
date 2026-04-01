@@ -1,0 +1,76 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\appendix
+\onecolumn
+
+\section{A Full Version of Related Works}
+Our work focuses on \emph{request-level scheduling} under uncertain and hybrid (compute--memory) demands; the following lines of research are largely orthogonal and can be combined with \oursched.
+
+\phm{LLM inference acceleration.}
+A substantial body of work reduces the \emph{per-token} computation and memory cost of LLM inference. At the kernel level, FlashAttention and FlashAttention-2 reorganize attention computation to improve memory locality and reduce redundant reads/writes, yielding faster and more memory-efficient exact attention~\cite{dao2022flashattention,dao2023flashattention}. Model compression and low-bit quantization further reduce memory footprint while retaining accuracy, e.g., INT8 matrix multiplication and post-training quantization for transformer weights~\cite{dettmers2022gpt3,frantar2022gptq}. Recent decoding-side acceleration methods exploit \emph{speculative execution}: speculative decoding uses a fast draft model to propose multiple tokens and then verifies them with the target model~\cite{leviathan2023speculative}, while subsequent systems improve speculative serving efficiency via token-tree verification and online mechanisms~\cite{miao2023specinfer,liu2023online}. 
+
+Beyond token-level acceleration, system designs optimize the end-to-end pipeline. Prefill--decode disaggregation decouples throughput-oriented prefill from latency-critical decoding and restructures KVCache placement across devices~\cite{zhong2024distserve,qin2024mooncake,hu2024memserve,hu2024inference}, while chunked-prefill overlaps long-context prefill with decoding and improves cache reuse to better manage throughput--latency trade-offs~\cite{agrawal2024taming,hu2024inference}. 
+
+These techniques improve the \emph{execution efficiency} of each request; \oursched is complementary by deciding \emph{which} request to serve next given bounded resources and variable request lengths.
+
+\phm{LLM serving architectures and multiplexing.}
+Many systems improve backend utilization by redesigning batching, admission control, and multi-tenant resource sharing. Foundational serving frameworks (e.g., Orca-style continuous batching and modern engines such as vLLM and SGLang) emphasize high device utilization and efficient KVCache management~\cite{yu2022orca,kwon2023efficient,zheng2024sglang}. For multi-model and multi-tenant settings, recent work explores finer-grained multiplexing and pooling: MuxServe enables flexible spatial--temporal multiplexing to co-locate multiple LLM workloads on shared GPUs~\cite{duan2024muxserve}, and Aegaeon proposes effective GPU pooling for concurrent LLM serving on the market~\cite{xiang2025aegaeon}. 
+
+These systems primarily address \emph{resource sharing and placement} across models and tenants; \oursched instead targets \emph{within-backend} request ordering under uncertain service times, and can be integrated as the per-GPU (or per-pool) scheduler.
+
+\phm{LLM request scheduling and fairness.}
+A growing literature studies request scheduling to mitigate head-of-line blocking and improve tail latency. Production engines often start with FCFS, which is simple but can severely degrade TTLT under heterogeneous request lengths~\cite{kwon2023efficient,zheng2024sglang}. FastServe approximates SRPT using an MLFQ-like policy with periodic priority demotion, trading latency gains for additional preemption overheads~\cite{wu2023fast}. More recent schedulers adopt \emph{predict-and-order}: $S^3$ uses a finetuned small model to estimate generation length~\cite{jin2023s}, PO queries an LLM to anticipate its output length~\cite{po}, SSJF predicts output length with a proxy model to approximate SJF~\cite{qiu2024efficient}, and learning-to-rank approaches predict relative length ranks rather than exact lengths~\cite{fu2024efficient}. Embedding-based schedulers further exploit prompt features extracted from LLM layers to improve prioritization~\cite{shahout2024don}. 
+In parallel, fairness-aware serving formalizes the tension between efficiency and service differentiation and proposes scheduling mechanisms to meet fairness objectives~\cite{sheng2024fairness}. Llumnix addresses dynamic scheduling by incorporating runtime conditions and enabling adaptive reordering for better service quality~\cite{sun2024llumnix}. 
+
+Compared to these works, \oursched differs in three aspects: (i) it targets \emph{distributional} (rather than point) perception of output length, avoiding fragile single-value predictions; (ii) it models \emph{hybrid} compute--memory costs induced by KVCache growth, rather than using output length alone as the service cost; and (iii) it explicitly incorporates IO impact into preemption decisions, aiming to avoid excessive swapping while still correcting priority.
+
+\phm{KVCache management and long-context serving.}
+Since decoding repeatedly attends to all previous tokens, KVCache is often the dominant memory bottleneck. PagedAttention (as implemented in vLLM) improves KVCache allocation by paging KV blocks to reduce fragmentation and improve memory efficiency~\cite{kwon2023efficient}. Beyond allocation, systems reduce KVCache \emph{size} via compression or selective retention: attention sinks enable efficient streaming by stabilizing attention patterns~\cite{xiao2023efficient}, and heavy-hitter based methods retain the most important tokens to approximate full attention under memory constraints~\cite{zhang2023h2o}. More recent work dynamically manages KVCache across time: InfiniGen proposes dynamic KVCache management for efficient generative inference~\cite{lee2024infinigen}, while KIVI quantizes KV cache asymmetrically to 2-bit without tuning, reducing memory pressure and bandwidth~\cite{liu2024kivi}. 
+
+These advances improve the feasible concurrency and per-step efficiency; \oursched is orthogonal and can further improve TTLT by prioritizing requests using cost distributions that implicitly reflect KVCache growth and resource contention.
+
+% \section{CDF of The E2E Experiments}
+
+% \begin{figure}
+%   \centering 
+%   \includegraphics[width=1\linewidth]{figures/policies_1.pdf}
+%   \caption{An Illustration of the effect of different scheduling policies. We use SRJF(Shortest Remaining Job First) to present SJF scheduling algorithms enable preemption.}
+%   \label{fig:policies} 
+% \end{figure}
+
+
+% The prediction accuracy achieved by existing fine-tuning methods is relatively low. In the LTR experiment, when the bucket size is 100 on the ShareGPT dataset, $S^3$ only achieves an accuracy of 28.1\%, which is consistent with our reproduction results. We believe that even if we continue to research fine-tuning approaches, the prediction accuracy cannot be improved to a relatively high level. This is because the output length of a request is dynamically variable due to the inherent characteristics of LLMs themselves.
+% Existing prediction methods adopt classification or ranking approaches to accommodate such dynamicity. However, as shown in Fig.~\ref{fig:distributoin_example}, the variation range of output lengths for the same input is extremely large, which cannot be concealed by methods such as classifying with a bucket size of 100 or ranking. 
+
+% \begin{figure} % 开始 figure 环境，[htbp] 是位置选项
+%   \centering % 图片居中
+%   % 插入图片，设置宽度为文本宽度的 0.5 倍
+%   \includegraphics[width=0.9\linewidth]{figures/length_distribution_with_dual_y.pdf}
+%   \caption{An output distribution example of 30 generations from the same prompt and the priority indexes of the two algorithms varying with the length of processed tokens.} %The variety range is wide and will go worse when faced model and configure changes in real world workloads.} % 添加标题
+%   \label{fig:distributoin_example} % 添加标签
+% \end{figure}
+
+% As we can see in Fig.~\ref{fig:cdf}, \textit{SageSched} achieve 81.2\% (45.6\%) less P50 request response time and almost the same P90 compared to the best performance in other strategies.
+
+% \begin{figure}[t]
+%     \centering
+    
+%     \subfigure[CDF of completion time on Llama 3.1 8B (400 reqs, 4 rps)]{
+%         \includegraphics[width=0.8\linewidth]{figures/cdf_plot.pdf}
+%         \label{fig:e2e-cdf-8b}
+%     }
+%     \subfigure[CDF of completion time on Llama 3.1 70B (200 reqs, 2 rps)]{
+%         \includegraphics[width=0.8\linewidth]{figures/cdf_plot_70b.pdf}
+%         \label{fig:e2e-cdf-70b}
+%     }
+%     \caption{CDF of TTLT under different scheduling algorithms.}
+%     \label{fig:cdf}
+    
+% \end{figure}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

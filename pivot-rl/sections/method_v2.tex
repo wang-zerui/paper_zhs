@@ -1,0 +1,146 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Bridging SFT with End-to-End RL}
+
+Consider training an LLM on Supervised Fine-Tuning (SFT) trajectories $\mathbf{t}^* = (t_1^*, \dots, t_{N}^*) \sim d_{\sft}$, where at each position $n$, the expert demonstrates the ground-truth next token $t_n^*$ conditioned on the prefix $t_{1:n-1}^*$. The standard SFT objective is
+\begin{align*}
+\mathcal{L}_{\text{SFT}}(\theta)
+= -\mathbb{E}_{\mathbf{t}^* \sim d_{\sft}}
+\left[
+\sum_{n=1}^{N}
+\log \pi_\theta(t_n^* \mid t_{1:n-1}^*)
+\right].
+\end{align*}
+Formally, its gradient can be rewritten as a policy gradient with an indicator reward
+\(
+r_{\sft}(t_{1:n-1}, t_n) = \mathbf{1}[t_n = t_n^*]
+\)
+and an importance weight correcting for the mismatch between the SFT data distribution and the on-policy occupancy:
+\begin{align*}
+\nabla_\theta \mathcal{L}_{\text{SFT}}(\theta)
+= -\mathbb{E}_{(t_{1:n-1}, t_n) \sim d^{\pi_\theta}_c}
+\left[
+{\color{blue}w_{\sft}(t_{1:n-1}, t_n)}
+\nabla_\theta \log \pi_\theta(t_n \mid t_{1:n-1})
+\cdot
+{\color{blue}r_{\sft}(t_{1:n-1}, t_n)}
+\right],
+\end{align*}
+where
+\(
+w_{\sft}(t_{1:n-1}, t_n)
+=
+{d_{\sft}(t_{1:n-1}, t_n)}/{d^{\pi_\theta}_c(t_{1:n-1}, t_n)}
+\)
+and
+\(
+r_{\sft}(t_{1:n-1}, t_n)
+=
+\mathbf{1}[t_n = t_n^*].
+\)
+
+In agentic LLM fine-tuning, this formulation reveals two limitations of SFT:
+\begin{itemize}
+    \item First, the indicator reward ${\color{blue}r_{\sft}(t_{1:n-1}, t_n)} = \mathbf{1}[t_n = t_n^*]$ assigns zero reward to all tokens except the single expert token $t_n^*$ at prefix $t_{1:n-1}$. In generative agentic tasks, however, the output space is combinatorially large. A single tool call can be expressed in many functionally equivalent ways; a coding fix may use different variable names, control flow structures, or API calls while achieving identical outcomes. When SFT trains the model to reproduce one particular expert completion, the model receives no information about what would happen if it generated a slightly different token at some prefix. Therefore, the reward is not fully aligned with the true functional ability required by the task.
+    \item Second, the importance weight ${\color{blue}w_{\sft}}$ induces distribution shift from the on-policy occupancy measure. This introduces an ill-posed reward landscape, where the importance weight becomes large for low-probability tokens. As argued by \citet{wu2025generalization}, this leads to gradient mismatch and training instability, ultimately weakening the model’s ability to generalize to new problems the model has not seen during training.
+\end{itemize}
+
+To overcome these issues, PivotRL employs the following two approaches:
+\begin{itemize}
+    \item To address the first issue, PivotRL extends the \emph{token-level, strict-matching} reward $r_{\sft}$ to a \emph{turn-level, functional-matching} reward $r_{\name}$ which models each action as a complete model response turn and replaces exact token matching by functional matching empowered by string comparison or LLM-as-a-Judge. This exploits the flexibility of autoregressive policy model to generate arbitrary response sequence conditional on prefix turns, and allows mapping different thinking traces with same output as all correct.
+    \item To address the second issue, PivotRL develops a \emph{pivot selection} mechanism to filter the states and keep only informative turns where the advantage gap is large. These pivots are associated with optimal behavior policies~\citep{papini2024policy} and represents states where training can make more progress.
+\end{itemize}
+In the following sections, we will explain these designs in detail.
+
+\subsection{Turn-Level, Functional-Matching Reward}
+
+\subsubsection{From SFT Data to Partial Trajectories}
+
+We write a typical SFT dataset of trajectories as $\mathcal{D}_{\sft} = \{ \tau_i \}_{i=1}^N$, where $N$ is the number of trajectories. 
+To create candidate training samples $(s, a^\star) \sim \mathcal{D}_{\sft}$, we treat each trajectory $\tau$ as an episodic Markov Decision Process, where each trajectory is split into sequential states and actions by using each model completion as the boundary. For each $\tau \in \mathcal{D}_\sft$, we can split $\tau$ to $\tau = (s_0, a_0^\star, s_1, a_1^\star, \dots, s_{|\tau|}, a_{|\tau|}^\star)$, where $|\tau|$ is the number of model calls in $\tau$, $s_0$ is the initial prompt, $a_i$ is the model completion given $s_i$, and $s_{i+1}$ is the resulting state including the environmental feedback resulting from the action $a_i$ given $s_i$. This yields $\mathcal{D}_{\text{pivot}} = \{ (s_i, a_i^\star) \}_{i=1}^M$, where $M = \sum_{i=1}^N |\tau_i|$, which can be used for PivotRL training.
+
+\subsubsection{Reward Labeling on Tangential Rollouts}
+We apply RL on tangential rollouts: for each state-action pair $(s,a^\star(s))$ from the expert dataset $\mathcal{D}_{\text{pivot}}$, we sample multiple on-policy actions $a$ conditional on the state $s$ and label the reward of $a$ by comparing with demonstration $a^\star(s)$. This alleviates the computation overhead in comparison to full rollouts. However, the SFT reward function $r_{\sft}(s,a) = \mathbf{1}[a = a^\star(s)]$ is not suitable for RL because it enforces strict matching to the ground-truth $a^\star(s)$ while overlooking many other functionally-equivalent actions. For example, in a coding task, two different coding snippets may functionally act in an equivalent way while being written in a different way.
+
+Therefore, we introduce reward 
+\begin{align}\label{eq:pivotrl-reward}
+    r_{\name}(s, a) = \mathbf{1}[a\in \mathcal M_\epsilon(s)]
+\end{align}
+that assigns value $1$ to all candidate responses in the matching set
+$\mathcal M_\epsilon(s)
+=
+\{a\in\mathcal A:d(a,a^\star(s))\leq \epsilon\}$, 
+where $d$ is some distance function. Efficiently, we propose the following variants of $d$:
+\begin{itemize}
+    \item String Comparison: We compare the string contents of $\hat{a}_i$ and $a_i^*$ directly, under some constraints. Practically, we employ direct string matching for short words while using an IOU-based comparison with a loose threshold.
+    \item LLM-as-a-Judge~\citep{zheng2023judging, lee2023rlaif,tan2025judgebench}: We compare $\hat{a}_i$ and $a_i^*$ for some samples where string comparison is less meaningful by employing an equivalency judge for correctness. In practice, we may not need the $a_i^*$ in this case depending on the judge criterion.
+\end{itemize}
+
+
+\input{sections/theory}
+
+
+\subsection{Efficient Training via Pivot Selection}
+As the PivotRL loss is intrinsically tied to the GRPO loss, the efficacy of training is heavily tied to the advantage term from $\hat{A}_i$ Equation \ref{eq:pivot_definitions}. For example, for a set of rollouts $(a_1, a_2, \dots, a_n) \sim \pi_{\theta}(s)$ with rewards $(R_1,\dots,R_n)$, the advantage behaves as follows:
+
+\begin{equation}
+    \hat{A}_i = 
+    \begin{cases} 
+      0 & \text{if } \sum_{j=1}^{N} R_j = 0, \\
+      0 & \text{if } \sum_{j=1}^{N} R_j = N, \\
+      \neq 0 & \text{if } 0 < \sum_{j=1}^{N} R_j < N.
+    \end{cases}
+\end{equation}
+
+When $\hat{A}_i = 0$, the surrogate loss term becomes $0$ and there is no derived training signal for that sample group. Consequently, we want to train on samples where $\hat{A}_i \not = 0$. To facilitate efficient training, we propose $3$ ways of filtering the PivotRL training data $\mathcal{D}_{\text{pivot}}$:
+\begin{enumerate}
+    \item Random Pivot ($\mathcal{D}_{\text{random}}$): This is the naive approach to using $\mathcal{D}_{\text{pivot}}$. We simply run RL on all samples from the dataset.
+    \item Mixed Rewards ($\mathcal{D}_{\text{mixed}}$): We profile all samples in $\mathcal{D}_{\text{pivot}}$ on the untrained policy model $\pi_{ref}$, choosing only samples with nonzero reward variance over multiple rollouts.
+    \item Advantage Gap ($\mathcal{D}_{\text{adv}}$): From the Mixed Rewards setting, we filter for samples which are difficult with a set threshold, artificially creating a large advantage gap for positive samples in the GRPO prompt group.
+\end{enumerate}
+
+\paragraph{Reward Profiling}
+To curate each dataset variant, we first perform reward profiling using the initial policy $\pi_{ref}$. For every sample $(s_i, a_i) \in \mathcal{D}_{\text{pivot}}$, we execute $n$ independent rollouts using $\pi_{ref}$. Let $R_{i,k}$ denote the reward of the $k$-th rollout for the $i$-th sample. We compute the empirical mean return $\mu_i$ and reward variance $\sigma^2_i$ for sample $s_i$ as:
+\begin{equation}
+    \mu_i = \frac{1}{n} \sum_{k=1}^n R_{i,k}, \quad \sigma^2_i = \frac{1}{n-1} \sum_{k=1}^n (R_{i,k} - \mu_i)^2
+\end{equation}
+
+\subsubsection{Random Pivot}
+The Random Pivot dataset utilizes the entire episodic history without filtering. It can be formalized as:
+\begin{equation}
+    \mathcal{D}_{\text{random}} = \mathcal{D}_{\text{pivot}}
+\end{equation}
+
+\subsubsection{Mixed Rewards}
+The Mixed Rewards dataset filters for samples that exhibit reward variance in their outcomes under $\pi_0$:
+\begin{equation}
+    \mathcal{D}_{\text{mixed}} = \{ (s_i, a_i, r_i) \in \mathcal{D}_{\text{episode}} \mid \sigma^2_i > 0 \}
+\end{equation}
+Under the PivotRL training paradigm, this equates to filtering for any samples with nonzero advantage, maximizing training signal in the first training step.
+
+One downside of the Mixed Rewards dataset is that it relies on profiled rewards from the initial policy $\pi_{ref}$. As the policy is updated during training, there is no guarantee that the advantage will stay nonzero for each sample. To mitigate this effect, we propose the advantage gap pivot selection method.
+
+\subsubsection{Advantage Gap}
+The Advantage Gap dataset focuses on samples that are both uncertain (from $\mathcal{D}_{\text{mixed}}$) and currently difficult for $\pi_0$. We apply a difficulty threshold $\lambda_{\text{diff}}$ to the mean return:
+\begin{equation}
+    \mathcal{D}_{\text{adv}} = \{ (s_i, a_i, r_i) \in \mathcal{D}_{\text{mixed}} \mid \mu_i < \lambda_{\text{diff}} \}
+\end{equation}
+Intuitively, taking harder questions under $\pi_0$ will partially as the policy $\pi_\theta$ progresses in traning, the harder samples continue to yield mixed rewards while easier samples tend zero advantage. This is akin to choosing samples with an artificially high advantage in GRPO training for positive rollouts.
+
+Empirically, we find that by setting $\lambda_{\text{diff}} = 0.6$, the standard deviation of the rewards in a given train batch tend to be higher over a longer time than using $\mathcal{D}_{\text{random}}$ or $\mathcal{D}_{\text{mixed}}$, which is graphed in Figure \ref{fig:rl_tau_reward_stddev}. Surprisingly, we also see that the peak model accuracy to be higher when trained on $\mathcal{D}_{\text{adv}}$, yielding a stronger policy than when training under other dataset variants.
+
+\subsection{PivotRL Loss}
+
+Combining everything together, we introduce the following PivotRL loss:
+\begin{equation}
+\mathcal{J}_{\text{PivotRL}}(\theta) = \mathbb{E}_{s \sim \mathcal{D}_{\text{adv}}, \{a_i\}_{i=1}^G \sim \pi_{\theta_{\text{old}}}(\cdot \mid s)} \left[ \frac{1}{G} \sum_{i=1}^G \left( \min \left( w_i(\theta) \hat{A}_i, \text{clip}(w_i(\theta), 1-\varepsilon, 1+\varepsilon) \hat{A}_i \right) \right) \right]
+\label{eq:pivotrl_loss}
+\end{equation}
+
+\noindent where the importance sampling ratio $w_i(\theta)$ and advantage $\hat{A}_i$ are:
+
+\begin{equation}
+w_i(\theta) = \frac{\pi_\theta(a_i \mid s)}{\pi_{\theta_{\text{old}}}(a_i \mid s)}, \qquad \hat{A}_i = \frac{r_{\name}(s, a_i) - \text{mean}\left(\{r_{\name}(s, a_j)\}_{j=1}^G\right)}{\text{std}\left(\{r_{\name}(s, a_j)\}_{j=1}^G\right)}
+\label{eq:pivot_definitions}
+\end{equation}

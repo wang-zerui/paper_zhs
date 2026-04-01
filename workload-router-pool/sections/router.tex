@@ -1,0 +1,178 @@
+% =============================================================================
+\section{Dimension 2: The Router Layer}
+\label{sec:router}
+% =============================================================================
+
+The router sits between the client and the inference pool.  Our
+publications cover three adaptation regimes: static rules, online
+bandit adaptation, and RL-based selection.
+
+% -----------------------------------------------------------------------------
+\subsection{Static Semantic Routing}
+\label{sec:router:static}
+% -----------------------------------------------------------------------------
+
+The \vsr{} position paper~\cite{vllmsr2026} established the
+signal-driven architecture: composing thirteen signal types into
+deployment-specific policies across vLLM, OpenAI, Anthropic, Azure,
+Bedrock, and Gemini backends.  The embedding similarity signal is
+powered by mmBERT-Embed~\cite{mmberted2025}, whose 2D Matryoshka
+design lets operators dial latency vs.\ quality per deployment
+(2.56\,ms at layer-6 for real-time routing, 11\,ms at layer-22 for
+maximum recall).  ProbPol~\cite{probpol2026} formalized conflict
+detection for these signals.
+
+Token-budget pool routing~\cite{poolrouting2026} implements a
+specialized static rule: dispatching to short or long pools based on
+estimated total token budget, achieving 17--39\% GPU reduction.
+OATS~\cite{oats2026} addresses tool selection with zero-cost
+embedding refinement, improving NDCG@5 from 0.869 to 0.940.
+
+Separately, WhenToReason~\cite{wang2025reason} classifies whether a
+query warrants reasoning-mode invocation, avoiding unnecessary
+chain-of-thought tokens on simple queries.  The Factcheck
+Classifier~\cite{factcheck2026} adds another pre-route signal:
+queries classified as fact-seeking can be steered toward models with
+lower hallucination rates or flagged for post-response validation
+via HaluGate~\cite{halugate2025}.
+
+For multi-turn sessions, the \vsr{} project~\cite{vllmsr2026}
+provides two mechanisms beyond single-request classification.
+First, \emph{context memory injection}: the router accumulates
+contextual signals from prior turns (topic, domain, user profile,
+difficulty trajectory) and injects this context into the routing
+decision for subsequent turns, giving the inference endpoint richer context that improves response
+accuracy.  This is similar in spirit to the conversation-state
+management in multi-turn APIs like OpenAI's Responses API.  Second, \emph{contrastive embedding classification
+for multi-turn safety}: rather than classifying each turn in
+isolation, the router uses few-shot contrastive embeddings to detect
+jailbreak attempts that spread adversarial content across multiple
+turns, which single-turn classifiers cannot detect.
+
+Content safety and privacy form another pre-route gate.  The
+MLCommons Safety Level-1 classifier~\cite{safetyl1_2026} performs a
+binary safe/unsafe check on every inbound request; flagged requests
+are passed to the Level-2 hazard classifier~\cite{safetyl2_2026},
+which assigns one of nine MLCommons categories (violent crimes,
+non-violent crimes, sex crimes, weapons/CBRNE, self-harm, hate,
+specialized advice, privacy, misinformation).  This hierarchical
+design keeps latency negligible for safe traffic (only unsafe
+requests pay the second-stage cost) and enables per-category routing
+policies: privacy-violating prompts can be blocked at the gateway,
+misinformation queries routed to fact-grounded models, and
+specialized-advice requests logged for compliance auditing.  Both
+classifiers use mmBERT LoRA adapters, fitting the project's
+low-resource design constraint.
+
+FastRouter~\cite{fastrouter2026} ensures all these routing
+decisions---single-turn and multi-turn---happen within the latency
+budget: 50\,ms end-to-end with an 800\,MB GPU footprint, small
+enough to co-locate with serving.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Online Adaptive Routing for Chat}
+\label{sec:router:online}
+% -----------------------------------------------------------------------------
+
+Chat workloads offer a natural feedback signal: the user's next message indicates whether the previous response was
+satisfactory.  Our
+mmBERT-32K Feedback Detector~\cite{feedbackdet2026} classifies each
+user turn into four categories (satisfied, needs clarification, wrong
+answer, wants different approach) at 98.8\% accuracy with
+$<$1\,ms overhead.  When the detector flags dissatisfaction, the
+router can re-route subsequent turns to a stronger model or a
+different pool---no explicit reward model is needed because the
+user's own reaction serves as the reward.  Combined with the
+router's context memory injection (\Cref{sec:router:static}), the
+adaptation becomes session-aware: the router knows not just that the
+user is dissatisfied, but which topic and difficulty level triggered
+the dissatisfaction, enabling targeted re-routing rather than a
+blanket model upgrade.
+
+Beyond our project, RouteLLM~\cite{ong2025routellm} learns routers
+from human preference data (95\% GPT-4 quality at 26\% cost);
+MixLLM~\cite{lu2025mixllm} uses contextual bandits with query tags
+(97.25\% of GPT-4 quality at 24.18\% cost);
+SageServe~\cite{jia2025sageserve} integrates traffic forecasting
+with ILP-based routing (25\% GPU-hour savings at Microsoft scale).
+
+
+% -----------------------------------------------------------------------------
+\subsection{RL-Based Routing for Agents}
+\label{sec:router:rl}
+% -----------------------------------------------------------------------------
+
+Agent workloads lack the per-turn user feedback that chat enjoys:
+the ``user'' is another LLM or an orchestrator, and task success is
+only observable at the end of a multi-step session.  This delayed,
+sparse reward makes RL a better fit than bandit methods.
+Router-R1~\cite{routerr1_2025} demonstrates the approach: it
+instantiates the router itself as an LLM, interleaving ``think''
+actions (internal reasoning) with ``route'' actions (model
+invocation), and trains end-to-end via PPO with a composite
+reward---format, outcome, and cost---that lets the router learn
+performance--cost trade-offs without hand-crafted heuristics.
+R2-Router~\cite{r2router2026} jointly selects model and output
+length budget at 4--5$\times$ lower cost.
+M-CMAB~\cite{mcmab2026} uses online RL for multi-modal scheduling
+under heterogeneous budgets.
+
+Our AVR system~\cite{avr2026} applies cascading to VLM agent tasks:
+Tier~1 multimodal classifier ($\sim$10\,ms), Tier~2 small-VLM
+confidence probing with token-filtered scoring, Tier~3 large-model
+escalation, projecting up to 78\% cost reduction while staying
+within 2\,pp of an all-large-model baseline.  When combined with the
+Visual Confused Deputy guardrail~\cite{vcd2026}, high-risk actions
+escalate directly to the strongest model.
+
+\paragraph{Adaptation regime depends on workload.}
+For \emph{chat}, per-turn user feedback detected by classifiers like
+our Feedback Detector~\cite{feedbackdet2026} provides a fast,
+low-overhead signal to adjust routing online.  For \emph{agents},
+task-level outcomes observed only after multi-step sessions call for
+RL-based optimization~\cite{routerr1_2025} that reasons over
+sequential routing decisions.
+
+
+% -----------------------------------------------------------------------------
+\subsection{Agent Loops, Memory, and Fleet-Scale Orchestration}
+\label{sec:router:agent-loops}
+% -----------------------------------------------------------------------------
+
+Recent agent-serving work argues that inference for tool-using agents
+should be treated as a \emph{data-systems} problem, not a sequence of
+independent chat completions.  Helium~\cite{helium2026} reframes
+agentic LLM serving around workflow structure, reuse, and operator
+placement; Sutradhara~\cite{sutradhara2026} co-designs orchestrator
+and engine for tool-heavy inference; CONCUR~\cite{concur2026}
+applies congestion-aware batching to high-throughput agentic
+inference; AgServe~\cite{agserve2025} shows that
+\emph{session-aware} scheduling transcends static cost--quality
+trade-offs; Continuum~\cite{continuum2025} couples multi-turn
+scheduling with KV-cache time-to-live so that paused tool calls do
+not silently destroy locality.  These systems align with
+experience-driven routing (EvoRoute~\cite{evoroute2026}) and
+budget-aware sequential routing (BAAR~\cite{baar2026}), but they are
+typically evaluated inside a single stack.
+
+The semantic router complements them by exporting a \emph{fleet-wide}
+control surface: the same hooks that implement signal-driven model
+routing can (i)~reshape tool and instruction payloads
+(ITR-style~\cite{itr2026}, evaluated on that paper's controlled
+benchmark), (ii)~attach memory-tier decisions (full
+context vs.\ summary vs.\ retrieval-first prefill informed by
+MemCost~\cite{memcost2026} and provider prompt-caching studies on
+long-horizon agents~\cite{dontbreakcache2026}), and (iii)~emit scheduling hints
+(admission deferral, batch affinity) that reduce queueing-induced
+retries---a common hidden driver of extra agent rounds.  xRouter's
+RL-trained orchestration~\cite{xrouter2025} is evidence that the
+router layer can learn cost-aware policies when rewards are defined
+over full trajectories; combining that with gateway-native stacks
+such as OpenClaw~\cite{openclaw2026}---where real users drive
+high-variance multi-turn traffic through a single control
+plane---multiplies the diversity of trajectories available for
+learning without requiring every framework to share one memory or
+tool SDK.
+
+

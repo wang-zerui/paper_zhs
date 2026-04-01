@@ -1,0 +1,62 @@
+\section{引言}
+\label{sec:intro}
+
+\noindent
+本文研究如何将 LLM 请求高效路由到由服务实例组成的集群——实例是模型部署的最小单元。
+LLM 服务已成为现代社会的关键基础设施，而 LLM 提供商通常会部署实例集群来提供服务；每个集群中都包含一个\emph{全局调度器}，负责将进入的请求路由到其管理的实例上~\cite{305212,DBLP:conf/sosp/Xiang0QYZYZL0025,
+DBLP:journals/corr/abs-2505-09999, llm-d, ai-Dynamo, aigw, vllm-code}。
+当实例接收到一个请求后，会分两个阶段生成结果 token：
+预填充（P）阶段生成第一个结果 token，其服务质量由首 token 时间（time-to-first-token, TTFT）衡量；
+随后，解码（D）阶段以流式方式生成剩余 token，其服务质量由每输出 token 时间（time-per-output-token, TPOT）衡量。
+
+在集群级 LLM 服务中，提供有效的调度策略至关重要，因为与传统请求路由类似~\cite{DBLP:conf/asplos/DelimitrouK14,DBLP:conf/eurosys/ZhangTHJGW13,DBLP:conf/osdi/GogSGWH16}，
+更好的放置决策能够借助更优的实例间负载均衡等因素显著降低整体请求时延（更低的 TTFT 和 TPOT）。
+低时延服务对于当前的交互式应用尤其关键，例如 ChatGPT~\cite{chatgpt} 和各类 copilot~\cite{copilot}，因为它直接关系到能否满足用户预期~\cite{latency-study,DBLP:conf/osdi/ZhongLCHZL0024,aws-latency}。
+此外，近期的 agentic 工作负载还会通过执行计算程序快速消耗 token~\cite{claudeapi,geminiapi,openaiapi}。
+
+实现良好的 LLM 特定调度策略并不简单。
+首先，只考虑不同实例之间的负载均衡——这是最近的最先进服务系统 vLLM~\cite{vllm-code} 以及传统请求路由所采用的方法——是不够的。
+原因在于，由于 {\kvcache}——已处理 token 的中间上下文——的存在，不同实例处理同一请求所需的计算量可能不同（\textsection{\ref{sec:kvcache-aware}}）。
+具体而言，如果某个新到请求的（部分）输入 token 命中某实例中缓存的 {\kvcache}，该实例就可以跳过为这些命中 token 生成对应 {\kvcache} 的计算，从而加速后续的预填充与解码阶段。
+然而，只把 {\kvcache} 感知指标纳入调度决策（例如请求被路由到某实例时的 {\kvcache} 命中率）同样不够，因为这会让请求偏向那些有 {\kvcache} 命中的实例，从而损害跨实例的负载均衡（\textsection{\ref{sec:challenge-balancing}}）。
+
+为了在这两个目标——{\kvcache} 感知与负载均衡——之间取得平衡，当前主要有三类不同的组合策略。
+第一类是线性组合策略（即加权求和）~\cite{vllm,ai-Dynamo}，它将分别对应这两个目标的指标组合成一个调度分数（\textsection{\ref{sec:linear-combination}}）。
+这是最简单、也最流行的一类策略，已被当前研究以及全球顶级 LLM 服务提供商之一（{\company}）采用。
+然而，线性组合需要复杂的、面向具体工作负载的超参数调优，才能同时兼顾两个目标。
+此外，静态调好的超参数在工作负载动态变化时往往又会变成次优（\textsection{\ref{sec:linear-combination}}）。
+
+第二类是基于过滤的策略：它先过滤掉那些被怀疑负载失衡的实例，再在剩余实例中选择 {\kvcache} 命中最多的实例~\cite{aibrix}。
+这类方法仍然需要不平凡的、面向具体工作负载的阈值调优来决定过滤门槛。
+更糟的是，它在调度上偏向负载均衡，因此无法充分利用 {\kvcache} 缓存（\textsection{\ref{sec:filter-combination}}）。
+
+最后，基于模拟的策略~\cite{305212, llm-d, DBLP:journals/corr/abs-2507-17769, DBLP:journals/corr/abs-2504-08784}
+会先用模拟器预测将请求路由到各实例后的预期时延，再把该时延作为调度分数。
+模拟器依据当前指标（例如 {\kvcache} 内容和排队请求）来估计时延，因此它可以被视为对其他策略所用指标的一种高阶组合。
+然而，这类策略的有效性高度依赖模拟器的准确性，而要做到这一点需要复杂的、面向每种模型、每种硬件以及每种部署方式的开发工作。
+否则，不准确的模拟就会导致糟糕的调度性能（\textsection{\ref{sec:prediction-combination}}）。
+即便模拟器足够准确，在某些情况下它的性能也仍可能无法与其他候选方法媲美。
+
+本文表明，将一个用于 {\kvcache} 感知的指标与一个用于负载均衡的指标相乘，并把结果作为调度分数，可以在不依赖复杂超参数调优或任何模拟器的前提下，有效结合这两个目标。
+其核心思想是：用乘法替代线性组合中的加法后，超参数会在不同实例之间的分数比较过程中被抵消。
+因此，这个分数能够保留与线性组合相似的趋势，却不再需要任何超参数调优（\textsection{\ref{sec:method}}）。
+
+为了让这种简单乘法在实践中真正有效，我们发现精心选择指标十分关键（\textsection{\ref{sec:indicators}}）。
+例如，将“请求被路由到某实例时、考虑 {\kvcache} 命中后的新增预填充 token 数”作为 {\kvcache} 感知指标，比使用 {\kvcache} 命中率更好。
+此外，使用实例当前的批大小作为负载均衡指标，也优于使用实例上排队总 token 数（包括解码上下文 token）。
+最后，乘法在一些罕见情况下确实会失效；因此我们从数学上推导了这些情形的大致条件。
+基于这些条件，我们发现它们在实践中极为罕见，而且可以通过两阶段方法检测出来（\textsection{\ref{sec:m-analyze}}）。
+一旦检测到，我们还可以退化回仅考虑负载均衡的策略来缓解问题。
+
+我们将该方法与多种最先进方法进行了比较，包括 vLLM~\cite{vllm-code}、AI-Dynamo~\cite{ai-Dynamo}、LLM-D~\cite{llm-d}，以及 {\company}——全球最大的 LLM 提供商之一——所使用的方案，并在覆盖聊天机器人、API 调用和代码智能体的真实 LLM 服务工作负载上进行了评估（\textsection{\ref{sec:eval-setup}}）。
+在流行模型（同时涵盖稠密模型与 MoE 架构）上的评测表明，在最多 16 张 H20 GPU 的集群上，我们的方法具有明显优势。
+
+我们将在论文发表时开源全部代码，包括所有基准测试工具以及开放的轨迹数据。
+
+\stitle{讨论：PD 同置与 PD 解耦。\,}
+本文假设预填充与解码请求都由同一个实例处理，这种设置称为 PD-colocation。
+虽然也存在预填充与解码由不同实例分别处理的部署方式，即 PD-disaggregation~\cite{DBLP:conf/isca/PatelCZSGMB24,DBLP:conf/osdi/ZhongLCHZL0024}，
+但 PD 同置在实践中仍被采用~\cite{DBLP:conf/sosp/Xiang0QYZYZL0025}，因为它更容易维护（无需管理实例角色），
+也不依赖实例间的高速网络。
+尽管 {\company} 大量部署了 PD 解耦服务，仍有一些服务依赖 PD 同置部署。
+面向 PD 解耦服务的高效调度超出了本文的讨论范围。

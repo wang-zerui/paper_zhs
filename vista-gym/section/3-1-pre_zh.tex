@@ -1,0 +1,24 @@
+\section{预备知识}
+\label{sec:pre}
+\noindent \textbf{问题设定。}
+我们研究的是一种视觉接地问答任务，它要求模型同时对图像与文本做复杂推理，并最终输出预测 $\hat{y}$。模型配备一个预定义、有限的工具集合（即动作空间）\(\mathcal{A}\)。形式化地说，目标是合成一条交错包含推理步骤 $g_t$ 与外部工具调用 $a_t \in \mathcal{A}$ 的轨迹 $U$。整条解题路径可表示为 $U=(g_0, a_0, \dots, g_T, \hat{y})$，其中 $T$ 表示到达最终答案所需的工具交互轮数。
+
+\noindent \textbf{VLM 中的工具集成推理。}
+我们把 VLM 中的 TIR 形式化为一个部分可观测马尔可夫决策过程（POMDP），记为 $\langle\mathcal{S},\mathcal{O},\mathcal{A},\mathcal{I},\mathcal{P},\mathcal{R}\rangle$，其中 $\mathcal{I}$、$\mathcal{S}$、$\mathcal{O}$、$\mathcal{A}$ 和 $\mathcal{R}$ 分别表示指令、环境状态、智能体观测、动作和奖励空间，$\mathcal{P}: \mathcal{S}\times\mathcal{A}\to\mathcal{S}$ 表示确定性的状态转移函数。遵循 ReAct~\cite{yao2023react}，我们约束智能体的输出先生成推理思考，再生成动作。给定问题描述 $x\in\mathcal{I}$、历史以及当前反馈，在第 $t$ 轮，智能体先生成思考 $g_{t+1}\sim\pi_\theta(\cdot|x,g_1,a_1,o_1,\cdots,g_t,a_t,o_t)$，随后生成动作 $a_{t+1}\sim\pi_\theta(\cdot|x,g_1,a_1,o_1,\cdots,g_t,a_t,o_t,g_{t+1})$。在执行 $a_{t+1}$ 之后，环境经由 $\mathcal{P}$ 转移到新状态 $s_{t+1}$，并给出新的部分观测 $o_{t+1}\sim\mathcal{O}(\cdot|s_{t+1})$。因此整条轨迹可写为
+\begin{equation*}
+    \begin{aligned}
+        \tau=(g_0,a_0,o_0,\cdots,o_{T-1},g_T,\hat{y})\sim\pi_\theta(\tau|x),
+    \end{aligned}
+\end{equation*}
+其中 $\hat{y}$ 是由模型最终生成得到的答案，$\pi_\theta$ 可以分解为
+\begin{equation*}
+    \begin{aligned}
+        &\pi_\theta(\tau|x)=\pi_\theta(g_T|x,c_{T-1})\cdot\prod_{t=0}^{T-1}\pi_\theta(g_t,a_t|x,c_{t-1}) \\
+        & =\pi_\theta(g_T|x,c_{T-1})\cdot\prod_{t=0}^{T-1}\pi_\theta(a_t|x,c_{t-1},g_t)\cdot\pi_\theta(g_t|x,c_{t-1}),
+    \end{aligned}
+\end{equation*}
+其中 $c_{t-1}=(g_0,a_0,o_0,\cdots,g_{t-1},a_{t-1},o_{t-1})$ 表示截至第 $t-1$ 步的交互历史。
+
+\noindent \textbf{探索性实验。}
+\input{table/table-error-type}
+我们在三个 VQA 任务 \cite{masry2022chartqa,chen2022unigeo,chang2022mapqa} 上，使用闭源与开源 VLM 做了探索性实验。如图~\ref{fig:teaser} 所示，如果直接给基础模型开放工具能力，准确率会明显下降：\emph{在缺少指令先验和推理先验的情况下，外部工具更像干扰项而不是帮助。} 为了定位失败模式，我们在 GPT‑5 和 InternVL3‑8B 的 500 个启用工具但回答错误的样本上做了人工标注（表~\ref{tab:error-def}）。大多数失败都来自工具调用的 \emph{是否调用 / 何时调用 / 调哪个工具 / 如何调用}、参数或模式选择，以及执行正确性（E1–E5）；其次是 \emph{工具使用后的推理错误}（E6）。这些观察促使我们训练具备 TIR 能力的 VLM。为便于扩展，我们提出了 \env{}（图~\ref{fig:overview}）：我们收集了可验证、视觉中心且带工具的任务（\cref{sec:4.1}），构建了一个可交互、可执行的环境（\cref{sec:4.2}），并提供可扩展训练设施（\cref{sec:4.3}），从而系统性地提升开源 VLM 智能体在 \env{} 中交错进行推理与工具执行的能力（\cref{sec:training}）。

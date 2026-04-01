@@ -1,0 +1,114 @@
+% =============================================================================
+\section{引言}
+\label{sec:intro}
+% =============================================================================
+
+决定生产环境 LLM 推理形态的有三个变量：工作负载、路由策略和 GPU 资源池架构。对它们的研究大多分别由彼此相对独立的社区展开，即工作负载刻画、模型路由以及系统/集群优化，这些社区很少彼此交互。但在实际中，针对某一种工作负载和某一种资源池拓扑调优出来的路由决策，换到另一种组合上往往就不再最优。
+
+\paragraph{我们的研究计划。}
+vLLM Semantic Router（\vsr{}）项目~\cite{vllmsr2026}一直在构建\emph{推理路由栈}。围绕不断扩展的工作体系（见 \Cref{tab:ownwork} 与 \Cref{sec:foundation}），我们已经覆盖了四个支柱方向：
+\begin{itemize}[nosep]
+  \item \textbf{路由架构}：包括由信号驱动的语义路由及其可组合信号机制~\cite{vllmsr2026}，面向概率式机器学习谓词的无冲突策略语言~\cite{probpol2026}，通过 Flash Attention 与提示压缩实现的 98$\times$ 路由器延迟下降~\cite{fastrouter2026}，用于可配置延迟-质量权衡的二维 Matryoshka 嵌入~\cite{mmberted2025}，选择性推理路由~\cite{wang2025reason}，类别感知语义缓存~\cite{wang2025cache}，由用户反馈驱动的在线路由自适应~\cite{feedbackdet2026}，利用条件式事实核查分类与 token 级检测实现的幻觉感知响应校验~\cite{halugate2025, factcheck2026}，以及遵循 MLCommons AI Safety Taxonomy 的分层内容安全分类，用于隐私保护和越狱防护，其中包含二元安全/不安全门控~\cite{safetyl1_2026}与九类危险分类器~\cite{safetyl2_2026}，从而支持按类别执行策略并实现保护隐私的路由；
+  \item \textbf{资源池路由与集群优化}：包括令牌预算感知的资源池路由~\cite{poolrouting2026}，带有网关层压缩的 FleetOpt 分析式集群配置~\cite{fleetopt2026}，基于排队论的容量规划工具 inference-fleet-sim~\cite{fleetsim2026}，以及面向能效分析的 1/W 定律~\cite{onewlaw2026}；
+  \item \textbf{多模态与智能体路由}：包括多模态智能体路由~\cite{avr2026}、工具选择~\cite{oats2026}、CUA 安全~\cite{vcd2026}，以及以网关为中心、支持多轮上下文记忆与安全控制的个人助理栈 OpenClaw~\cite{openclaw2026}；
+  \item \textbf{治理与标准}：包括 IETF 中提出的语义推理路由协议 SIRP~\cite{sirp2025}，以及面向智能体 AI 推理 API 的多提供方扩展~\cite{mpext2025}。
+\end{itemize}
+
+这些论文各自解决了一个具体问题，但这些问题彼此耦合。例如，资源池路由~\cite{poolrouting2026}会形成一个成本陡崖，而要通过网关层压缩来缓解它，则取决于工作负载提示长度 CDF 的原型结构~\cite{fleetopt2026}。1/W 定律~\cite{onewlaw2026}表明，相比 GPU 代际，路由拓扑才是更强的能耗杠杆，但前提是资源池支持按上下文长度进行划分。
+
+\begin{figure}[t]
+      \centering
+      \begin{tikzpicture}[
+          >=Stealth,
+          box/.style={draw, rounded corners=3pt, minimum width=3.2cm,
+                      minimum height=1cm, font=\small\sffamily, align=center,
+                      line width=0.8pt},
+          dimbox/.style={box, line width=1.2pt, minimum width=4cm,
+                         minimum height=1.3cm, font=\sffamily\bfseries},
+          arr/.style={->, line width=0.8pt},
+          darr/.style={<->, line width=0.8pt, dashed},
+      ]
+      \node[dimbox, fill=workloadblue!15, draw=workloadblue]
+          (W) at (0, 0) {工作负载\\刻画};
+      \node[dimbox, fill=routergreen!15, draw=routergreen]
+          (R) at (5.5, 0) {路由器\\层};
+      \node[dimbox, fill=poolorange!15, draw=poolorange]
+          (P) at (11, 0) {资源池\\架构};
+
+      \node[box, fill=workloadblue!5, draw=workloadblue!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (w1) at (0, -2) {聊天 vs.\ 智能体};
+      \node[box, fill=workloadblue!5, draw=workloadblue!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (w2) at (0, -3.2) {暖请求 vs.\ 冷请求};
+      \node[box, fill=workloadblue!5, draw=workloadblue!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (w3) at (0, -4.4) {prefill 主导 vs.\ decode 主导};
+
+      \node[box, fill=routergreen!5, draw=routergreen!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (r1) at (5.5, -2) {静态语义规则};
+      \node[box, fill=routergreen!5, draw=routergreen!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (r2) at (5.5, -3.2) {在线 bandit / 反馈};
+      \node[box, fill=routergreen!5, draw=routergreen!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (r3) at (5.5, -4.4) {RL / 级联选择};
+
+      \node[box, fill=poolorange!5, draw=poolorange!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (p1) at (11, -2) {同构 vs.\ 异构 GPU};
+      \node[box, fill=poolorange!5, draw=poolorange!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (p2) at (11, -3.2) {解耦 prefill/decode};
+      \node[box, fill=poolorange!5, draw=poolorange!60,
+            minimum width=3.6cm, font=\scriptsize\sffamily]
+          (p3) at (11, -4.4) {KV-cache 拓扑};
+
+      \foreach \s in {w1,w2,w3} \draw[arr, workloadblue!70] (W) -- (\s);
+      \foreach \s in {r1,r2,r3} \draw[arr, routergreen!70] (R) -- (\s);
+      \foreach \s in {p1,p2,p3} \draw[arr, poolorange!70] (P) -- (\s);
+
+      \draw[darr, objectivepurple] (W) -- (R)
+          node[midway, above=1pt, font=\scriptsize\itshape, text=objectivepurple]
+          {工作负载塑造路由};
+      \draw[darr, objectivepurple] (R) -- (P)
+          node[midway, above=1pt, font=\scriptsize\itshape, text=objectivepurple]
+          {路由塑造资源池需求};
+      \draw[darr, objectivepurple] (W) to[bend left=25] node[midway, above=2pt,
+          font=\footnotesize\itshape, text=objectivepurple] {工作负载决定资源池容量} (P);
+
+      \definecolor{safetyred}{RGB}{180,40,60}
+      \node[draw=safetyred, fill=safetyred!8, rounded corners,
+            minimum width=12cm, minimum height=0.8cm,
+            font=\small\sffamily\bfseries, text=safetyred]
+          (safety) at (5.5, -5.8) {安全与隐私：内容门控
+          \textbullet\ 越狱检测
+          \textbullet\ 危害分类
+          \textbullet\ 隐私路由};
+
+      \draw[arr, safetyred!50] (safety) -- (0, -5.1);
+      \draw[arr, safetyred!50] (safety) -- (5.5, -5.1);
+      \draw[arr, safetyred!50] (safety) -- (11, -5.1);
+
+      \node[draw=objectivepurple, fill=objectivepurple!8, rounded corners,
+            minimum width=12cm, minimum height=0.8cm,
+            font=\small\sffamily\bfseries, text=objectivepurple]
+          (obj) at (5.5, -7.2) {优化目标：成本
+          \textbullet\ 准确率 \textbullet\ 延迟 \textbullet\ 能耗};
+
+      \draw[arr, objectivepurple!50] (obj) -- (0, -6.3);
+      \draw[arr, objectivepurple!50] (obj) -- (5.5, -6.3);
+      \draw[arr, objectivepurple!50] (obj) -- (11, -6.3);
+      \end{tikzpicture}
+      \caption{Workload--Router--Pool（WRP）架构。三条维度通过虚线双向箭头相互作用。安全与隐私是一个横切层：内容门控与危害分类会同时影响这三个维度。底部的优化目标则进一步约束整个系统。我们此前的工作覆盖了这一框架中的一个或多个单元。}
+      \label{fig:wrp}
+      \end{figure}
+
+\paragraph{我们的贡献。}
+我们提出了 \textbf{Workload--Router--Pool（WRP）架构}（\Cref{fig:wrp}），它是一个三维框架，用来组织我们已有的工作及更广泛的研究版图。本文的贡献如下：
+\begin{enumerate}[nosep]
+  \item 给出一个\textbf{结构化分解}，将问题分为 Workload、Router、Pool 三个相互作用的维度，这一分解建立在我们以往工作的证据之上。
+  \item 将既有工作\textbf{映射}到一个 $3 \times 3$ 的 WRP 交互矩阵中，展示我们已经覆盖了哪些单元、哪些仍然空缺。
+  \item 提出一份包含二十一项具体机会的\textbf{研究路线图}，这些机会都位于不同维度的交叉处，并都以我们已有的测量结果为依据。
+\end{enumerate}

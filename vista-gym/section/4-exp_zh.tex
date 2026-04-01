@@ -1,0 +1,144 @@
+\input{table/table-main}
+
+\section{实验}
+\label{sec:exp}
+
+\subsection{实验设置}
+\noindent \textbf{评测数据集。}
+遵循多项已有工作 \cite{liu2025visionreasoner,huang2025vision,han2025tiger,li2025self}，我们聚焦于\emph{推理密集型 VQA 任务}，评估 \env{} 在提升开源 VLM 工具集成推理能力方面的有效性。对\emph{分布内}评测，我们从 \env{} 的 13 个训练数据集中选取 5 个具有官方测试集划分的数据集；对\emph{分布外}泛化能力，我们进一步在 6 个未参与训练的基准上测试。更详细的数据集信息见附录 \ref{app:data}。
+
+\noindent \textbf{基线。}
+我们在 \env{} 上比较三类基线：(i) 基于 API 的闭源 VLM；(ii) 开源 VLM；(iii) 已经集成工具或推理能力的 VLM。除工具集成基线遵循其原有工具配置外，其他基线均在\emph{不开放工具访问}的设置下评测，因为如果没有充分智能体训练，直接给模型开放工具会显著损害性能（见表~\ref{tab:fig-tir}）。更多基线细节见附录~\ref{app:baseline}。
+
+\noindent \textbf{实现细节。}
+我们使用四个不同大小的骨干模型来实例化 \ours{}，包括 InternVL3-2B/8B/14B 和 Qwen2.5-VL-7B，并基于 Verl-Tool~\cite{jiang2025verltool} 实现训练。SFT 阶段训练 1 个 epoch，batch size 为 128，学习率为 $2\times10^{-6}$，上下文长度为 16,384 token。RL 阶段中，每张 GPU 的 micro-batch size 为 8，mini-batch size 为 128，每次更新使用 $G=8$ 条 rollout；正则系数设为 $\beta=10^{-3}$，最大响应长度设为 26,780 token，学习率为 $5\times10^{-7}$，总训练步数为 $E=300$。我们采用准确率（ACC）作为主要评测指标，所有实验均在 8 张 NVIDIA H200 GPU 上完成。Prompt 模板与更多实现细节见附录。
+
+\subsection{主要实验结果}
+表~\ref{tab:main_results} 给出了在 11 个视觉推理数据集上，使用 \env{} 训练得到的 \ours{} 与各类基线的对比结果。结果显示出三点关键信息。第一，\ours{} 在相近规模模型中表现非常强：尤其是 \ours{}-8B，相较于同尺寸基线提升了 9.51\% 到 18.72\%；即便\emph{不使用工具}，也能有 2.03\% 到 11.24\% 的提升。第二，RL 对提升 VLM 的 TIR 能力至关重要。单纯把工具暴露给 VLM 而不提供显式推理监督，会降低准确率；相比之下，RL 能带来显著收益，说明基础 checkpoint 并不天然具备稳健的 TIR 能力，而 RL 是解锁视觉推理中工具使用能力的关键。第三，\ours{} 具备很强的参数效率：\ours{}-2B 已能达到甚至超过若干 8B 基线的水平，而 \ours{}-8B 的表现则可与 38B 参数量级的基线相比肩。这些结果表明，\env{} 为工具集成智能体 RL 提供了可扩展训练场，使得开源 VLM 也能获得稳健的视觉推理能力。
+
+\begin{figure*}[t]
+    \centering
+    \begin{subfigure}[t]{0.33\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/effect-of-training-stage.pdf}
+        \caption{训练阶段的影响}
+        \label{fig:abl-training}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.33\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/effect-of-RL-method.pdf}
+        \caption{RL 算法的影响（$E$=100）}
+        \label{fig:abl-rl}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.33\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/effect-of-Reward.pdf}
+        \caption{奖励设计的影响}
+        \label{fig:abl-reward}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.33\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/effect-of-data-diversity.pdf}
+        \caption{数据多样性的影响}
+        \label{fig:adata-diversity}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.33\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/effect-of-tool-diversity.pdf}
+        \caption{工具多样性的影响（$E$=50）}
+        \label{fig:tool-diversity}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.33\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/effect-of-traj-quality.pdf}
+        \caption{思维轨迹质量的影响}
+        \label{fig:effect-of-traj-quality}
+    \end{subfigure}
+    \caption{以 InternVL3-8B 为骨干模型的消融实验与多样性分析。}
+    \label{fig:ablation-study}
+\end{figure*}
+
+\input{table/table-tir-fig1}
+
+\subsection{\ours{} 的消融实验}
+\noindent \textbf{工具集成推理的作用。}
+表~\ref{tab:main_results} 还专门拆分了\emph{推理}与\emph{工具使用}的作用，分别报告了三种变体：(1) \emph{w/o Tools}，保留推理但禁用工具访问；(2) \emph{w/o Reasoning}，提供工具与工具选择先验，但不强化推理；(3) 同时交错推理和工具使用的完整 \ours{}。结果表明，仅加强推理或仅开放工具虽然偶尔能带来收益，但都明显不如完整 \ours{}。两个结论尤为明显：其一，若缺乏足够推理能力来导航动作空间，单纯开放工具反而可能有害；其二，最优问题求解方式来自“由推理引导工具调用”的交错闭环，而不是单独依赖其中任一能力。
+
+\noindent \textbf{奖励设计的作用。}
+图~\ref{fig:abl-reward} 比较了多种奖励设计，包括稠密奖励、稀疏奖励、难度自适应奖励以及本文设计。相比之下，我们的奖励把\emph{可验证、低噪声的二值终局信号}与基于组归一化优势的\emph{难度自适应缩放}结合起来，因此能在避免过拟合简单样本或利用中间信号漏洞的同时，实现更好的准确率。
+
+\noindent \textbf{原始 VLM 中工具和推理的作用。}
+表~\ref{tab:fig-tir} 总结了在开源和闭源原始 VLM 上，工具与推理各自带来的影响。直接给 VLM 开放工具通常会显著降低准确率，而仅靠内在 CoT 推理在复杂 VQA 上带来的提升也很有限。提供\emph{工具选择先验}能够改善表现，但其收益在商业 VLM 上高度任务依赖，小型开源 VLM 仍然困难重重。这些现象共同说明，为 VLM 赋予稳健、可泛化且适配多种视觉推理场景的工具使用能力既重要又不容易。
+
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}[t]{0.72\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/traj-quality.pdf}
+        \caption{不同长度专家思维轨迹的质量。}
+        \label{fig:traj-quality}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.27\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/error_analysis.pdf}
+        \caption{错误分析。}
+        \label{fig:error-transfer}
+    \end{minipage}
+\end{figure*}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figure/epoch_plot.pdf}
+        \caption{训练扩展}
+        \label{fig:train-scale}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.49\linewidth}
+        \centering
+    \includegraphics[width=\linewidth]{figure/tailpatch.pdf}
+    \caption{Tailpatch}
+    \label{fig:tailpatch}
+    \end{subfigure}
+    \caption{从易到难的训练扩展。}
+    \label{fig:scale}
+\end{figure}
+
+\subsection{\env{} 的更多分析}
+\noindent \textbf{数据多样性：数据混合的作用。}
+图~\ref{fig:adata-diversity} 研究了 RL 期间任务组成如何影响 TIR。单任务训练的跨任务迁移能力较弱，特别是在不同领域之间；而多任务训练则更稳定地提升泛化能力，说明在训练期间接触多样化任务混合，对学习可迁移的 TIR 策略十分关键。
+
+\noindent \textbf{工具多样性：工具混合的作用。}
+图~\ref{fig:tool-diversity} 以 ChartMoE 为例分析工具组成对 TIR 的影响。只在单一工具类别上训练，会导致策略在该类任务上有效，但向其他工具结构差异较大的任务迁移能力有限。与数据混合类似，接触更多样的工具模式与参数格式，可以显著缓解过度专门化，并拓宽学到的动作策略。
+
+\noindent \textbf{推理轨迹质量。}
+我们用 token 长度作为一个简单代理，评估不同专家轨迹（GPT-5、Qwen2.5VL-72B、Qwen3VL-235B）的质量，结果见图~\ref{fig:traj-quality}。如预期，更长的轨迹在 SFT 预热阶段能建立更强的行为先验，因此在后续 RL 中带来更高性能（图~\ref{fig:effect-of-traj-quality}）。需要注意的是，商业 API 如 GPT‑5 往往不会公开全部中间推理，因此生成轨迹明显更短，在相同训练配方下对智能体 RL 的增益也更弱。
+
+\noindent \textbf{Tail-Patch 课程学习。}
+为了突破性能平台期，我们采用从易到难的课程策略，通过 \emph{tail-patch} 持续加入更困难的样本。我们把前一 checkpoint 的 rollout 通过率作为动态难度信号，筛出通过率落在 $[0.125, 0.375]$ 的“难但可学”样本。只在这一高难度子集上继续 RL，能够把性能从 69.54\% 进一步提升到 71.27\%（图~\ref{fig:scale}）。这表明，一个通用原则是把优化预算集中在模型“能力边界”附近的样本上。
+
+\subsection{错误分析与案例研究}
+\noindent \textbf{错误分析。}
+我们在 InternVL3-8B 经 \env{} 训练前后，对表~\ref{tab:error-def} 中相同的 500 个样本重新做错误模式分析。结果显示，\env{} 中的智能体训练显著减少了基础模型中常见的大部分工具调用错误与推理错误。
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figure/human-study.pdf}
+    \caption{关于轨迹质量的人类评测。}
+    \label{fig:human-study}
+\end{figure}
+
+\noindent \textbf{轨迹质量的人类评测。}
+由于 TIR 轨迹是 \env{} 的关键组成部分，我们还对生成出的交错工具使用与推理步骤质量进行了人工评估。图~\ref{fig:human-study} 报告了每个数据集随机抽取 40 条解题轨迹后的平均人工评分（1–5 分）。结果表明，两阶段训练都显著改善了不同任务和不同模型规模下的 TIR 质量。
+
+\input{table/table-case}
+
+\noindent \textbf{案例研究。}
+表~\ref{tab:case_study} 给出了四个案例，展示了模型在 \env{} 中接受智能体训练后获得的能力，包括：模式与参数正确的工具调用、基于工具输出的后续推理、跨工具泛化，以及面对不完美工具输出时的鲁棒性。
