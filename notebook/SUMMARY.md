@@ -5,6 +5,7 @@
 * [Baichuan M3](papers/baichuan-m3.md)
 * [BlitzScale](papers/blitzscale.md)
 * [ByteCheckpoint](papers/byte-checkpoint.md)
+* [Catalyzer](papers/catalyzer.md)
 * [Colossal Auto](papers/colossal-auto.md)
 * [CONCUR](papers/concur.md)
 * [EAGLE-3](papers/eagle-3.md)

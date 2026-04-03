@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from urllib.parse import quote
 
 from paper_catalog import BOOK_ROOT, REPO_ROOT, discover_paper_directories, repo_url
 
@@ -58,60 +57,48 @@ def discover_entries() -> list[NotebookEntry]:
     return entries
 
 
-def format_cards(entries: Iterable[NotebookEntry], repo_base: str) -> str:
-    cards = []
+def raw_file_url(repo_base: str, repo_path: str) -> str:
+    encoded_path = quote(repo_path, safe="/")
+    if repo_base.startswith("https://github.com/"):
+        raw_base = repo_base.replace("https://github.com/", "https://raw.githubusercontent.com/", 1)
+        return f"{raw_base}/main/{encoded_path}"
+    return f"{repo_base}/blob/main/{encoded_path}"
+
+
+def format_cards(entries: list[NotebookEntry], repo_base: str) -> str:
+    lines: list[str] = []
     for entry in entries:
         repo_link = f"{repo_base}/blob/main/{entry.repo_path}"
-        cards.append(
-            f"""<a class="paper-card" href="{entry.detail_link}">
-  <span class="paper-card__badge">{html.escape(entry.badge)}</span>
-  <strong>{html.escape(entry.title)}</strong>
-  <span>{html.escape(entry.repo_path)}</span>
-  <span class="paper-card__actions">
-    <span>Notebook</span>
-    <span>PDF</span>
-    <span>GitHub</span>
-  </span>
-  <span class="paper-card__links">
-    <span>{html.escape(entry.detail_link)}</span>
-    <span>{html.escape(entry.pdf_link)}</span>
-    <span>{html.escape(repo_link)}</span>
-  </span>
-</a>"""
+        pdf_link = raw_file_url(repo_base, entry.repo_path)
+        lines.append(
+            f"- [{entry.title}]({entry.detail_link}) · {entry.badge} · [PDF]({pdf_link}) · [GitHub]({repo_link})"
         )
-    return "\n".join(cards)
+    return "\n".join(lines)
 
 
 def write_readme(entries: list[NotebookEntry], repo_base: str) -> None:
-    cards_html = format_cards(entries, repo_base)
+    cards_markdown = format_cards(entries, repo_base)
     content = f"""# Paper Notebook
 
-> 一个面向论文 PDF 阅读的 GitBook notebook。内容由仓库中论文目录里的候选主 PDF 自动生成。
+> 一个面向 GitBook Sync 的论文目录。内容由仓库中论文目录里的候选主 PDF 自动生成。
 
-<section class="notebook-hero">
-  <div>
-    <p class="eyebrow">GitHub Pages / HonKit / PDF notebook</p>
-    <h1>在一个侧边栏里浏览这批论文</h1>
-    <p class="lede">这里会自动收集仓库中每个论文目录的主 PDF，并为它生成单独的阅读页、仓库源文件链接和直接打开 PDF 的入口。</p>
-  </div>
-  <dl class="stats">
-    <div><dt>Papers</dt><dd>{len(entries)}</dd></div>
-    <div><dt>Source</dt><dd>Workspace PDFs</dd></div>
-    <div><dt>Deploy</dt><dd>GitHub Pages</dd></div>
-  </dl>
-</section>
+## Overview
 
-## Library
-
-<div class="paper-grid">
-{cards_html}
-</div>
+- Papers: **{len(entries)}**
+- Source: 仓库里的 tracked PDF
+- Mode: GitBook Sync / GitHub repo integration
 
 ## 使用方式
 
-1. 左侧目录直接进入单篇论文阅读页。
-2. 每个阅读页都内嵌浏览器 PDF viewer，同时保留原始 PDF 打开入口。
-3. 新增论文后运行 `python3 scripts/build_paper_notebook.py`，再执行 `npm run build:notebook` 即可刷新站点。
+1. 在 GitBook 中连接这个 GitHub 仓库。
+2. 将文档根目录设置为 `notebook/`。
+3. 左侧目录进入单篇论文页，点击文件块或 PDF 链接阅读。
+
+> GitBook 更适合做“文档索引 + PDF 打开入口”；PDF 会通过文件块或链接打开，而不是像静态站那样用 iframe 内嵌阅读。
+
+## Library
+
+{cards_markdown}
 """
     (BOOK_ROOT / "README.md").write_text(content, encoding="utf-8")
 
@@ -132,30 +119,20 @@ def write_paper_pages(entries: list[NotebookEntry], repo_base: str) -> None:
 
     for entry in entries:
         repo_link = f"{repo_base}/blob/main/{entry.repo_path}"
+        raw_pdf_link = raw_file_url(repo_base, entry.repo_path)
         page = f"""# {entry.title}
 
-<section class="viewer-shell">
-  <div class="viewer-toolbar">
-    <span class="viewer-badge">{html.escape(entry.badge)}</span>
-    <span class="viewer-path">{html.escape(entry.repo_path)}</span>
-    <a href="../pdfs/{entry.pdf_output_name}" target="_blank" rel="noopener noreferrer">Open PDF</a>
-    <a href="{repo_link}" target="_blank" rel="noopener noreferrer">View On GitHub</a>
-  </div>
-  <iframe
-    class="viewer-frame"
-    src="../pdfs/{entry.pdf_output_name}#view=FitH"
-    title="{html.escape(entry.title)} PDF viewer"
-    loading="lazy"
-  ></iframe>
-</section>
+> {entry.badge} · `{entry.repo_path}`
+
+{{% file src="{raw_pdf_link}" %}}
+{entry.title} PDF
+{{% endfile %}}
 
 ## Notes
 
 - 源文件：`{entry.repo_path}`
-- 直链：[`../pdfs/{entry.pdf_output_name}`](../pdfs/{entry.pdf_output_name})
+- PDF 直链：[{entry.pdf_file_name}]({raw_pdf_link})
 - 仓库页：[{repo_link}]({repo_link})
-
-> 如果浏览器不支持内嵌 PDF，点击上方 `Open PDF` 即可在新标签页打开。
 """
         (PAPERS_DIR / entry.detail_markdown).write_text(page, encoding="utf-8")
 
@@ -191,7 +168,7 @@ def ensure_layout_dirs() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate a HonKit notebook for tracked paper PDFs.")
+    parser = argparse.ArgumentParser(description="Generate GitBook-friendly notebook pages for tracked paper PDFs.")
     parser.add_argument("--copy-pdfs-to", type=Path, help="Copy selected PDFs into the target directory.")
     args = parser.parse_args()
 

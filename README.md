@@ -1,26 +1,20 @@
 # papers_agent
 
-这是一个论文源码 / 翻译工作区，现在它的主输出形态已经可以作为一个**随处访问的静态 PDF 阅读器**来使用：
+这是一个论文源码 / 翻译工作区。为了避免继续折腾 GitHub Pages 自动部署，现在仓库的**主接入方式改成 GitBook Sync**：
 
-- 每个顶层论文目录会自动挑选候选主 PDF
-- 生成 `site/` 静态站点，可直接部署到 GitHub Pages
-- 首页支持搜索 / 过滤 / 随机打开
-- 单篇阅读页支持移动端目录、上一页 / 下一页、直接打开 PDF、跳 GitHub 源文件
-
-仓库里仍然保留：
-
-- 多个单篇论文目录（源码、翻译稿、编译产物、原始 `source.tar`）
-- `notebook/`：旧的 HonKit / GitBook 版本阅读站
-- `scripts/`：生成索引、旧 notebook、以及新的静态 PDF 阅读器
-- `pdf/`：聚合导出的 PDF 目录
+- 继续扫描每个顶层论文目录里的候选主 PDF
+- 自动生成 `notebook/` 下的 GitBook 目录页和单篇论文页
+- 通过 `.gitbook.yaml` 让 GitBook 直接把 `notebook/` 当作文档根目录
+- 每篇论文页提供 PDF 文件块、PDF 直链、GitHub 源文件链接
 
 ## 主要入口
 
 - `REPO_INDEX.md`：本地工作区总览，扫描所有论文目录
 - `repo_index.json`：对应的机器可读索引
-- `scripts/build_pdf_reader_site.py`：生成新阅读器站点
-- `site/`：新的静态阅读器构建产物
-- `.github/workflows/deploy-paper-notebook.yml`：推送到 `main` 后自动发布 GitHub Pages
+- `.gitbook.yaml`：GitBook 配置，指定文档根目录为 `notebook/`
+- `notebook/README.md`：GitBook 首页
+- `notebook/SUMMARY.md`：GitBook 左侧目录
+- `scripts/build_paper_notebook.py`：生成 GitBook-friendly 页面
 
 ## 当前约定
 
@@ -39,15 +33,15 @@
 - 项目名/论文名目录统一写成 `flashinfer`、`byte-checkpoint`、`workload-router-pool` 这种形式
 - 只有在标题还不明确时，才临时保留编号风格目录名
 
-### 2. 阅读器站点与本地索引的区别
+### 2. GitBook 目录与本地索引的区别
 
 - `REPO_INDEX.md` 会扫描**所有本地目录**
-- `site/` / `notebook/` 会优先使用每个目录里的**候选主 PDF**
+- `notebook/` 会优先使用每个目录里的**候选主 PDF**
 
 这样可以同时满足：
 
 - 本地整理时能看到完整工作区
-- 本地预览和提交后的 GitHub Pages 构建都走同一套目录扫描逻辑
+- GitBook 展示时只暴露适合阅读的 PDF 入口
 
 ### 3. `00README.json`
 
@@ -62,38 +56,24 @@
 # 刷新本地仓库索引
 python3 scripts/build_repo_index.py
 
-# 生成新的静态 PDF 阅读器
-python3 scripts/build_pdf_reader_site.py
-
-# 本地预览新的阅读器
-python3 -m http.server 8000 --directory site
-
-# 也可以用 npm scripts
-npm run build:reader
-npm run serve:reader
-
-# 刷新 notebook 源文件
+# 生成 GitBook 页面
 python3 scripts/build_paper_notebook.py
 
-# 构建 GitHub Pages / HonKit 站点
+# 如果还想本地看旧的 HonKit 版本
 npm run build:notebook
-
-# 本地预览 notebook
 npm run serve:notebook
 ```
 
-## 部署方式
+## GitBook 接入方式
 
-默认工作流已经改成发布新的静态阅读器：
+1. 在 GitBook 新建一个 space。
+2. 连接这个 GitHub 仓库。
+3. 让 GitBook 使用仓库根目录下的 `.gitbook.yaml`。
+4. GitBook 会读取 `notebook/README.md` 和 `notebook/SUMMARY.md` 作为文档入口。
 
-1. push 到 `main`
-2. GitHub Actions 执行 `python3 scripts/build_pdf_reader_site.py`
-3. 将 `site/` 作为 GitHub Pages artifact 发布
+## 说明
 
-这样部署后，你就能通过 GitHub Pages 从任意设备直接访问整套 PDF 阅读站。
-
-## 补充说明
-
-- `notebook/` 还保留着，方便继续使用原来的 HonKit 结构
-- 新的 `site/` 不依赖 Node / HonKit，纯静态 HTML + CSS + JS，更适合直接发布
-- 没有删除现有论文源码/翻译文件，只是在此基础上新增了阅读器生成链路
+- 当前主路线是 **GitBook Sync**，不是 GitHub Pages 自动发布
+- `.github/workflows/deploy-paper-notebook.yml` 已改为仅手动触发，避免每次 push 都报错
+- `site/` 静态阅读器脚本还保留着，但不再作为默认方案
+- GitBook 更适合作为“论文索引 + PDF 打开入口”；如果未来要追求站内内嵌 PDF 阅读体验，再回到静态站方案会更合适

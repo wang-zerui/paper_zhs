@@ -1,24 +1,13 @@
 # FlashInfer
 
-<section class="viewer-shell">
-  <div class="viewer-toolbar">
-    <span class="viewer-badge">主论文</span>
-    <span class="viewer-path">flashinfer/main.pdf</span>
-    <a href="../pdfs/flashinfer.pdf" target="_blank" rel="noopener noreferrer">Open PDF</a>
-    <a href="https://github.com/wang-zerui/paper_zhs/blob/main/flashinfer/main.pdf" target="_blank" rel="noopener noreferrer">View On GitHub</a>
-  </div>
-  <iframe
-    class="viewer-frame"
-    src="../pdfs/flashinfer.pdf#view=FitH"
-    title="FlashInfer PDF viewer"
-    loading="lazy"
-  ></iframe>
-</section>
+> 主论文 · `flashinfer/main.pdf`
+
+{% file src="https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/flashinfer/main.pdf" %}
+FlashInfer PDF
+{% endfile %}
 
 ## Notes
 
 - 源文件：`flashinfer/main.pdf`
-- 直链：[`../pdfs/flashinfer.pdf`](../pdfs/flashinfer.pdf)
+- PDF 直链：[main.pdf](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/flashinfer/main.pdf)
 - 仓库页：[https://github.com/wang-zerui/paper_zhs/blob/main/flashinfer/main.pdf](https://github.com/wang-zerui/paper_zhs/blob/main/flashinfer/main.pdf)
-
-> 如果浏览器不支持内嵌 PDF，点击上方 `Open PDF` 即可在新标签页打开。
