@@ -135,6 +135,7 @@ def write_markdown(papers: list) -> None:
             "## Commands",
             "",
             "- 刷新仓库索引：`python3 scripts/build_repo_index.py`",
+            "- 构建新的静态 PDF 阅读器：`python3 scripts/build_pdf_reader_site.py`",
             "- 刷新 notebook 源文件：`python3 scripts/build_paper_notebook.py`",
             "- 构建 notebook 站点：`npm run build:notebook`",
             "",
