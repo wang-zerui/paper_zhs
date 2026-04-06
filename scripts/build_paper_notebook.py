@@ -65,13 +65,18 @@ def raw_file_url(repo_base: str, repo_path: str) -> str:
     return f"{repo_base}/blob/main/{encoded_path}"
 
 
+def viewer_url(pdf_url: str) -> str:
+    return f"https://mozilla.github.io/pdf.js/web/viewer.html?file={quote(pdf_url, safe='')}"
+
+
 def format_cards(entries: list[NotebookEntry], repo_base: str) -> str:
     lines: list[str] = []
     for entry in entries:
         repo_link = f"{repo_base}/blob/main/{entry.repo_path}"
         pdf_link = raw_file_url(repo_base, entry.repo_path)
+        full_viewer_link = viewer_url(pdf_link)
         lines.append(
-            f"- [{entry.title}]({entry.detail_link}) · {entry.badge} · [PDF]({pdf_link}) · [GitHub]({repo_link})"
+            f"- [{entry.title}]({entry.detail_link}) · {entry.badge} · [Viewer]({full_viewer_link}) · [PDF]({pdf_link}) · [GitHub]({repo_link})"
         )
     return "\n".join(lines)
 
@@ -92,9 +97,9 @@ def write_readme(entries: list[NotebookEntry], repo_base: str) -> None:
 
 1. 在 GitBook 中连接这个 GitHub 仓库。
 2. 将文档根目录设置为 `notebook/`。
-3. 左侧目录进入单篇论文页，点击文件块或 PDF 链接阅读。
+3. 左侧目录进入单篇论文页，优先点击 `Viewer` 链接全屏阅读。
 
-> GitBook 更适合做“文档索引 + PDF 打开入口”；PDF 会通过文件块或链接打开，而不是像静态站那样用 iframe 内嵌阅读。
+> GitBook 不支持直接嵌入外部 `iframe`，而 PDF 文件块对 PDF 通常是点击后查看或下载；因此这里默认给出 `Viewer` 链接，尽量调用浏览器 / PDF.js 阅读器，移动端体验会比直接文件下载更稳定。
 
 ## Library
 
@@ -120,9 +125,20 @@ def write_paper_pages(entries: list[NotebookEntry], repo_base: str) -> None:
     for entry in entries:
         repo_link = f"{repo_base}/blob/main/{entry.repo_path}"
         raw_pdf_link = raw_file_url(repo_base, entry.repo_path)
+        full_viewer_link = viewer_url(raw_pdf_link)
         page = f"""# {entry.title}
 
 > {entry.badge} · `{entry.repo_path}`
+
+## 阅读入口
+
+- [全屏打开 Viewer（推荐）]({full_viewer_link})
+- [直接打开 PDF（尝试调用浏览器 PDF 阅读器）]({raw_pdf_link})
+- [查看 GitHub 源文件]({repo_link})
+
+> 在手机上，优先使用上面的 **Viewer**。如果系统浏览器本身支持 PDF 预览，`直接打开 PDF` 也可能走浏览器内置阅读器；否则可能触发下载。
+
+## 备用文件块
 
 {{% file src="{raw_pdf_link}" %}}
 {entry.title} PDF
@@ -131,6 +147,7 @@ def write_paper_pages(entries: list[NotebookEntry], repo_base: str) -> None:
 ## Notes
 
 - 源文件：`{entry.repo_path}`
+- Viewer：[{full_viewer_link}]({full_viewer_link})
 - PDF 直链：[{entry.pdf_file_name}]({raw_pdf_link})
 - 仓库页：[{repo_link}]({repo_link})
 """
@@ -146,6 +163,7 @@ def copy_pdfs(entries: list[NotebookEntry], destination: Path) -> None:
 
 
 def write_catalog(entries: list[NotebookEntry]) -> None:
+    repo_base = repo_url()
     catalog = [
         {
             "title": entry.title,
@@ -153,6 +171,8 @@ def write_catalog(entries: list[NotebookEntry]) -> None:
             "repo_path": entry.repo_path,
             "pdf_file_name": entry.pdf_file_name,
             "pdf_output_name": entry.pdf_output_name,
+            "pdf_url": raw_file_url(repo_base, entry.repo_path),
+            "viewer_url": viewer_url(raw_file_url(repo_base, entry.repo_path)),
             "badge": entry.badge,
         }
         for entry in entries
