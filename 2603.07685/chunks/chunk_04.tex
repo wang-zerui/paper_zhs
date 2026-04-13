@@ -1,0 +1,247 @@
+\section{Long-Context MoE Training}\label{sec:long-context-training}
+
+The preceding sections addressed the three walls (memory, communication, and compute efficiency) under the assumption that MoE layers dominate computational cost. This assumption holds for typical training tasks with sequence lengths of 4K--8K tokens, where expert computation and all-to-all communication are the primary bottlenecks. However, the rise of reasoning models (OpenAI o1, DeepSeek-R1 \cite{deepseekai2025deepseekr1}, etc.) and RL-based training have created a new frontier: sequences of 16K, 64K, or even longer. At these lengths, a fundamental shift occurs in the performance characteristics of MoE training: attention dominates the computation, and the relative importance of the three walls changes accordingly. This section examines how long-context training reshapes the three walls for MoE models, and how Megatron-Core addresses the new challenges.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/long_context_flops_ratio.pdf}
+    \caption{SDPA exhibits $O(s^2)$ complexity, while MoE and the remaining attention operations exhibit $O(s)$ complexity. Therefore, SDPA dominates the computation at longer sequence lengths.}
+    \label{fig:long_context_flops_ratio}
+\end{figure}
+
+\subsection{When Attention Dominates: The Computational Shift}
+
+In Section~\ref{key-features-optimizations}, we established that MoE training faces three fundamental walls: memory, communication, and compute efficiency. The optimizations presented there (activation management, dispatcher optimization, Grouped GEMM, and CUDA Graphs) target scenarios where MoE layers dominate the computational profile. Long-context training fundamentally alters this assumption. The key insight is the differing computational complexity between MoE and attention layers, as shown in \figref{fig:long_context_flops_ratio}:
+\begin{itemize}
+    \item \textbf{MLP Components}: Computational cost scales linearly with sequence length, exhibiting $O(s)$ complexity.
+    \item \textbf{Attention Components}: Scaled dot-product attention (SDPA) dominates the computational cost, scaling quadratically with sequence length, exhibiting $O(s^2)$ complexity. This quadratic scaling has motivated extensive research into efficient attention mechanisms~\cite{beltagy2020longformer,zaheer2020bigbird}.
+\end{itemize}
+
+For example, at 64K tokens, SDPA consumes 69\% of FLOPs, compared to only 10--15\% in short-sequence scenarios. \textbf{Attention becomes dominant in computation.} Fortunately, SDPA is highly optimized in most GPU-accelerated libraries such as FlashAttention \cite{dao2022flashattention,dao2023flashattention2,shah2024flashattention3} and cuDNN (Table~\ref{tab:sdpa-cudnn-perf}), so SDPA does not become a performance bottleneck. The optimization focus therefore shifts to memory and communication: as long as we address these two challenges without introducing excessive overhead, training performance is preserved.
+
+\begin{table}[ht]
+\centering
+\caption{SDPA performance in cuDNN for DeepSeek-V3.}
+\label{tab:sdpa-cudnn-perf}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Platform} & \textbf{Sequence Length} & \textbf{Forward TFLOPS} & \textbf{Backward TFLOPS} \\
+\midrule
+\multirow{2}{*}{Hopper}
+ & 4096  & 553  & 422 \\
+ & 16384 & 638  & 523 \\
+\midrule
+\multirow{2}{*}{Blackwell}
+ & 4096  & 1324 & 1083 \\
+ & 16384 & 1698 & 1298 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Managing Activation Memory Growth}
+
+Activation memory growth with sequence length is the primary challenge in long-context training. To address this intensified memory wall, we apply a set of techniques that work together, informed by large-scale MoE workloads, including DeepSeek-V3 \cite{deepseekai2025deepseekv3technicalreport} and Qwen3 \cite{yang2025qwen3technicalreport}. These techniques extend the memory-optimization principles introduced in Section~\ref{sec:memory-wall}.
+
+\textbf{Context Parallelism and Tensor Parallelism.}
+Combining Context Parallelism (CP) and Tensor Parallelism (TP) distributes activation memory across devices, enabling sequence lengths that would otherwise exceed GPU capacity. The key principle is to keep sub-sequence length (sequence length per CP/TP shard) approximately constant, typically 4096 or 8192. Scaling $\text{CP} \times \text{TP}$ with sequence length keeps per-device memory near baseline levels. This makes the workload resemble short-context training, except for SDPA and TP/CP-specific communication, so most short-context optimizations remain applicable.
+
+\textbf{Optimizer CPU Offloading.}
+Optimizer states often consume tens of gigabytes per GPU in large models. CPU offloading can reclaim this memory almost entirely, at the cost of transfer and host-side optimizer overhead. The choice is therefore a trade-off between memory headroom and throughput. For DeepSeek-V3 on 256 H100 GPUs, at around 50\% MFU and sequence lengths of at least 16K, the worst-case overhead is about 2\%. Although the exact trade-off depends on model size, sequence length, and cluster scale, optimizer CPU offloading is usually worthwhile for long-context training.
+
+\textbf{Selective Recomputation.}
+Recomputation trades compute for memory by discarding intermediate activations in forward and regenerating them in backward. The key is module-level selectivity based on memory-to-compute trade-offs. In long-context settings, SDPA dominates total computation, so recomputing SDPA (core attention recomputation in Megatron-Core) is usually too expensive. In contrast, recomputing lower-cost components such as MLP-related modules often provides better net benefit. For DeepSeek-V3 at 64K sequence length, SDPA contributes up to 72\% of total compute; recomputing it adds about 18\% compute overhead, causes about 16\% performance loss, and saves only 9 GB memory. Recomputing non-SDPA components instead saves 89.8 GB globally with comparable or lower performance impact. We therefore recommend disabling core attention recomputation and prioritizing recomputation of other modules.
+
+In practice, CP and TP are the primary mechanisms for long-context memory efficiency. Optimizer CPU offloading and selective recomputation then provide additional headroom, especially on memory-constrained platforms. These techniques work well together and can be combined as needed.
+
+\subsection{Context Parallelism vs. Tensor Parallelism}
+
+Because CP and TP are the two most effective strategies in long-context training, the practical question is how to combine them when attention dominates computation.
+
+Both CP and TP reduce activation memory in long-context training, but their communication patterns and memory effects differ (Figure~\ref{fig:cp-comm-type}). CP partitions activations along the sequence dimension and reduces activation memory by a factor of $\text{CP}$. For SDPA, CP has two communication modes: point-to-point (P2P) and all-to-all. P2P CP exchanges the KV cache within the CP group in a ring-style pattern that overlaps with SDPA computation~\cite{liu2023ringattention,brandon2023striped,jacobs2023deepspeedulysses}. All-to-all CP transforms tensors from sequence-sharded to head-sharded form before SDPA, then restores sequence-sharded form afterward. TP additionally shards linear weights, reducing parameter memory but introducing extra collectives in linear layers. In both all-to-all CP and TP, SDPA runs on head-sharded tensors, which increases per-shard sub-sequence length and can improve SDPA kernel efficiency.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/cp_comm_type.pdf}
+    \caption{Communication and computation patterns of TP and two types of CP.}
+    \label{fig:cp-comm-type}
+\end{figure}
+
+In practice, P2P CP is the more common CP mode. Relative to TP, its main advantage is that communication overlaps naturally with computation, while TP communication is often harder to hide. TP, however, reduces dense parameter memory and can improve SDPA efficiency. As a result, TP is usually preferred within a node, where communication is fast and memory benefits are strong. Across nodes, P2P CP often becomes preferable because TP communication overhead grows while P2P overlap remains effective. All-to-all CP sits between the two: it avoids multi-step ring exchange used by P2P CP and avoids linear-weight sharding overhead introduced by TP. In practice, all-to-all CP is often combined with TP for intra-node execution when ring-style exchange is undesirable and TP communication cost is high.
+
+Megatron-Core supports combining both CP backends as \textbf{hierarchical CP}, enabling topology-aware pairing with TP. A practical starting point is to use all-to-all CP with TP inside nodes to improve SDPA kernel performance and reduce parameter memory, while using P2P CP across nodes to preserve communication-computation overlap. These are guidelines rather than hard rules, but they work well as an initial configuration for TP/CP tuning.
+
+\subsection{Packed Sequences for Variable-Length Training}\label{subsec:packed-sequence}
+
+The preceding subsections examined how the Three Walls (memory, communication, and compute efficiency) shift when sequence length increases. These analyses assumed fixed-length sequences within each batch. However, practical training scenarios, particularly reinforcement learning and supervised fine-tuning, often involve variable-length sequences that introduce additional efficiency challenges.
+
+Traditional batching requires padding all sequences to the maximum length within each batch, leading to substantial waste when sequence lengths vary widely~\cite{krell2021efficient}. For instance, if a batch contains sequences of lengths 4K, 8K, and 32K tokens, all sequences must be padded to 32K, wasting $\sim$60\% of computation and memory on padding tokens. This inefficiency compounds the memory and compute challenges discussed above.
+
+To address this, Megatron-LM introduces \textbf{packed sequences} to process variable-length sequences within a single batch without padding waste. Furthermore, to address the DP imbalance and CP inefficiency caused by variable-length sequences, we introduce \textbf{Dynamic Context Parallelism (Dynamic-CP)}, which adaptively selects the effective CP size on a per-microbatch basis, jointly with the sequence packing plan.
+
+\subsubsection{Packed Sequence Support}\label{subsec:packed_sequence_support}
+
+Megatron-LM supports packed sequences, enabling multiple variable-length sequences to be concatenated and processed within a single batch without inter-sequence padding. This is achieved through the THD (Total tokens $\times$ Heads $\times$ Dimension) tensor format, as opposed to the conventional SBHD (Sequence $\times$ Batch $\times$ Heads $\times$ Dimension) format. THD represents attention tensors as \texttt{[total\_tokens, num\_heads, head\_dim]}, where sequences from different samples are concatenated along the token dimension.
+
+The core mechanism relies on cumulative sequence length tracking, which marks the start and end positions of each individual sequence within the packed tensor. These parameters are propagated through the attention mechanism to Transformer Engine's fused kernels, enabling efficient SDPA and RoPE operations that respect sequence boundaries. The attention computation uses cumulative sequence lengths to ensure queries and keys from different sequences do not attend to each other, maintaining correctness while eliminating padding overhead.
+
+The implementation in Megatron-LM supports packed sequences across multiple training scenarios:
+\begin{itemize}
+    \item \textbf{Reinforcement Learning}: Bin-packing algorithms group variable-length trajectories into fixed-size bins, maximizing GPU utilization.
+    \item \textbf{Multimodal Training}: Vision-language models with variable image token counts use packed sequences to handle heterogeneous sequence lengths from different numbers of visual patches combined with text tokens.
+    \item \textbf{Context Parallelism Integration}: When Context Parallelism is enabled with padding requirements, the system automatically switches to THD format and provides both padded and unpadded cumulative lengths to handle communication alignment while preserving computational efficiency.
+\end{itemize}
+
+The benefits of packed sequence support are particularly pronounced in long-context scenarios. For RL training with thinking models, where sequence lengths can vary from hundreds to tens of thousands of tokens, packed sequences can reduce memory usage by 40--60\% and improve training throughput by 1.5--2$\times$ compared to traditional padding-based approaches. This efficiency gain becomes increasingly critical as context lengths extend beyond 32K tokens, where padding waste would otherwise dominate memory consumption and significantly reduce effective batch sizes.
+
+\subsubsection{Dynamic Context Parallelism for Packed Sequences}
+\label{subsec:dynamic-cp}
+
+While packed sequences in THD format remove padding waste, they do not eliminate computational imbalance across data-parallel (DP) ranks. Even when packed samples have identical total token counts, their attention workload can still vary substantially due to the quadratic complexity of dot-product attention with respect to sub-sequence lengths. For example, \Figref{fig:packing-sequences} shows sequences packed to equal total lengths, yet as \Figref{fig:packing-sequence-imbalance} reveals, their compute workloads differ significantly.
+
+This DP imbalance leads to GPU idling at gradient synchronization points and can further amplify pipeline-parallel bubbles. Moreover, when Context Parallelism (CP) is enabled, a static CP size is typically chosen to satisfy the memory requirement of the longest packed sample in the batch. Consequently, shorter packed samples that would fit on fewer devices are still forced to use the same CP size, incurring unnecessary CP communication. In practice, CP communication is expected to be hidden by attention computation; however, under packed sequences that consist of many short sub-sequences, the compute per CP shard may become insufficient to hide CP collectives, especially when CP spans inter-node links. We refer to this effect as CP inefficiency.
+
+
+    \begin{figure}[ht]
+      \centering
+      \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=0.8\textwidth]{figures/unpacked_sequence.pdf}
+        \caption{Unpacked sequences.}
+        \label{fig:unpacked-sequence}
+      \end{subfigure}
+      \hfill
+      \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \raisebox{0.8cm}{\includegraphics[width=0.8\textwidth]{figures/packed_sequence.pdf}}
+        \caption{Packed sequences.}
+        \label{fig:packed-sequence}
+      \end{subfigure}
+      \caption{Unpacked vs. Packed sequences.}
+      \label{fig:packing-sequences}
+    \end{figure}
+
+    \begin{figure}[ht]
+      \centering
+
+        \includegraphics[width=0.8\textwidth]{figures/packed_sequence_imbalance.pdf}
+        \caption{Compute imbalance in causal attention over packed sequences.}
+      \label{fig:packing-sequence-imbalance}
+    \end{figure}
+
+To address both DP imbalance and CP inefficiency, we introduce Dynamic Context Parallelism (Dynamic-CP) \cite{nvidia_dynamiccp_blog}, which adaptively selects the effective CP size on a per-microbatch basis, jointly with the packing plan. The key observation is that resizing CP is comparatively lightweight: it only changes how token slices are partitioned and which CP communication group is used by attention operators, without requiring any parameter redistribution or optimizer-state migration. Therefore, Dynamic-CP provides a practical form of dynamic parallelism for variable-length training with minimal framework overhead. Related work, including ByteScale~\cite{ge2025bytescale} and WLB-LLM~\cite{wang2025wlb}, addresses similar load-balancing challenges.
+
+
+For example, consider the case in \Figref{fig:input-sequences} with three sequences. We assume only two GPUs are available. If we adopt the standard CP2 configuration (i.e., DP=1, CP=2), the workload is executed in two micro-batches as illustrated in \Figref{fig:standard-cp}. In microbatch-0, the orange sequence is sufficiently long that it must be partitioned across the two GPUs. In microbatch-1, the packed blue and green sequences are also partitioned across the two GPUs. However, this introduces an unnecessary split for the blue and green sequences, since both sequences can fit on a single GPU without partitioning.
+
+As shown in \Figref{fig:dynamic-cp}, with Dynamic-CP, the orange sequence in microbatch-0 still requires CP=2. In microbatch-1, we no longer need to split the blue and green sequences; instead, we let each of them run with CP=1 independently.
+
+    \begin{figure}[ht]
+      \centering
+      \begin{subfigure}[b]{0.19\textwidth}
+        \centering
+        \raisebox{0.8cm}{\includegraphics[width=0.8\textwidth]{figures/sequence_example.pdf}}
+        \caption{Input sequences.}
+        \label{fig:input-sequences}
+      \end{subfigure}
+      \hfill
+      \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \makebox[\linewidth][c]{\raisebox{0.2cm}{\hspace*{-0.8cm}\includegraphics[width=1.4\textwidth]{figures/standard_cp.pdf}}}
+        \caption{Standard CP2.}
+        \label{fig:standard-cp}
+      \end{subfigure}
+        \hfill
+      \begin{subfigure}[b]{0.3\textwidth}
+        \centering
+        \makebox[\linewidth][c]{\raisebox{0.2cm}{\hspace*{-0.8cm}\includegraphics[width=1.4\textwidth]{figures/dynamic_cp.pdf}}}
+        \caption{Dynamic-CP.}
+        \label{fig:dynamic-cp}
+      \end{subfigure}
+
+      \caption{Dynamic Context Parallelism for Packed Sequences.}
+      \label{fig:dynamic-cp-example}
+    \end{figure}
+
+
+To make per-microbatch CP resizing practical in Megatron-Core, Dynamic-CP avoids any expensive redistribution of model states. Instead, it treats CP resizing as a lightweight runtime choice: changing only how token slices are partitioned and which CP communication group is used by attention operators. Concretely, rather than binding each rank to a single statically constructed \texttt{cp\_group}, the framework pre-constructs multiple CP groups per rank during initialization, with candidate \texttt{cp\_size} ranging from 1 up to \texttt{dp}$\times$\texttt{cp} (restricted to powers of two). At runtime, the scheduler selects the effective \texttt{cp\_size} for each microbatch and the corresponding pre-built \texttt{cp\_group}, enabling Dynamic-CP without incurring the overhead of dynamically creating communication groups.
+
+Dynamic-CP is designed for the THD layout, where variable-length sequences are packed under a length constraint and the original batch/sequence dimensions collapse into a token dimension. A direct consequence is that the number of microbatches is no longer a fixed quantity derived from \texttt{global\_batch\_size} and \texttt{micro\_batch\_size}; it can vary across iterations because the number of original sequences packed into each microbatch is not constant. To minimize invasive changes to existing Megatron-Core pipeline schedulers, Dynamic-CP introduces a lightweight \texttt{data\_iterator\_wrapper} around the original \texttt{data\_iterator}. For each global batch, the wrapper (i) reschedules and packs sequences to create balanced workloads across DP ranks, (ii) chooses an effective \texttt{cp\_size} for each microbatch to avoid over-sharding short packed samples, and (iii) returns the effective \texttt{num\_microbatches} for the current iteration. Because only a subset of ranks typically drives scheduling decisions under PP/VPP, the framework broadcasts the dynamic scheduling metadata (including \texttt{num\_microbatches}, \texttt{max\_seqlen}, and \texttt{cu\_seqlens}) to ensure consistent execution across pipeline stages. Furthermore, \texttt{PackedSeqParams} is extended to carry both the selected \texttt{cp\_size} and \texttt{cp\_group}; all CP-dependent components (e.g., position embedding and attention) retrieve CP configuration from \texttt{PackedSeqParams} rather than relying on globally static CP variables.
+
+Given variable-length sequences in THD, different samples contribute different numbers of valid tokens. Therefore, loss is computed on a per-token basis to avoid bias from padding:
+\begin{equation}
+\mathcal{L} = \frac{\sum_{t\in \mathcal{V}} \ell_t}{|\mathcal{V}|},
+\end{equation}
+where $\mathcal{V}$ denotes the set of valid (non-padding) tokens in the packed representation. On the planning side, the Dynamic-CP solver jointly determines packing and per-microbatch CP sizes under GPU memory constraints. Since attention compute scales roughly as $\mathcal{O}(S^2)$ with respect to sub-sequence lengths while activation memory scales closer to $\mathcal{O}(S)$, it is difficult to simultaneously balance compute and memory. Dynamic-CP therefore alternates between workload-oriented and memory-oriented decisions: microbatches whose estimated workload exceeds a target quota are assigned larger \texttt{cp\_size} to reduce per-rank compute, after which memory becomes the dominant constraint and remaining capacity is filled by selecting less compute-heavy samples while preserving feasibility.
+
+Finally, Dynamic-CP is engineered to keep runtime overhead negligible. Constructing a plan requires an additional pass over the global batch to probe lightweight shape and sequence-length metadata; this I/O pressure is mitigated by distributing the probing across the cluster and gathering only compact metadata. The solver itself runs asynchronously (e.g., within the \texttt{data\_sampler}) to overlap with training iterations. To keep the search space manageable, exhaustive search is replaced by a one-dimensional grid search over the microbatch count, constrained so that all DP ranks use the same \texttt{num\_microbatches}. This count is swept from \texttt{PP}$\times$1 up to a small multiple of \texttt{PP}, capturing the trade-off between per-microbatch workload and pipeline bubbles; in practice, the search can be further narrowed by selecting the ``knee'' point on the workload-versus-microbatch curve and exploring only its neighborhood.
+
+
+Overall, Dynamic-CP complements packed sequence training by (i) reducing synchronization stalls caused by DP imbalance and (ii) preventing unnecessary CP communication for microbatches that do not benefit from large CP sizes, thereby improving throughput in long-context variable-length training. According to the benchmark, Dynamic-CP yields a 35--60\% end-to-end performance improvement in real-world scenarios with highly imbalanced sequence length distributions, such as multi-modal training. \footnote{Explore \href{https://github.com/NVIDIA/Megatron-LM/pull/2000}{PR\#2000} and \href{https://github.com/NVIDIA/Megatron-LM/pull/2959}{PR\#2959} to start training models with variable-length sequences using Megatron-Core optimizations.}
+
+\subsection{Summary}
+
+Long-context MoE training represents a distinct optimization regime where the fundamental assumptions of Section~\ref{key-features-optimizations} must be revisited. While the Three Walls (memory, communication, and compute efficiency) remain the fundamental barriers, their relative importance shifts substantially as sequence length increases:
+
+\begin{itemize}
+    \item \textbf{Computational Shift}: Attention's $O(s^2)$ complexity displaces MoE layers as the dominant computational bottleneck, consuming $>$ 69\% of FLOPs at $>$ 64K tokens. The MoE-focused optimizations of Section~\ref{sec:compute-wall} remain valuable but no longer address the primary bottleneck.
+    
+    \item \textbf{Memory Wall Intensified}: Activation memory scales with sequence length, requiring the parallelism strategies from Section~\ref{parallelism-strategies} (specifically CP and TP) combined with the memory techniques from Section~\ref{sec:memory-wall} (recomputation, offloading) to maintain feasible memory footprints.
+    
+    \item \textbf{Communication Trade-offs}: The choice between CP and TP involves nuanced trade-offs between communication overhead, memory savings, and SDPA computational efficiency, a balance distinct from the MoE-centric all-to-all optimization focus of Section~\ref{sec:comm-wall}.
+\end{itemize}
+
+By combining context parallelism, tensor parallelism, selective recomputation, and optimizer offloading, Megatron-Core enables efficient training across diverse sequence lengths. Our experiments on 256 Hopper GPUs at 256K sequence length demonstrate this: DeepSeek-V3 achieves 88\% of its short-context MFU using TP, optimizer CPU offloading, and selective recomputation, while Qwen3-235B-A22B reaches 129\% of its short-context MFU with TP, CP, and selective recomputation (the latter exceeding 100\% because SDPA kernels are highly efficient when dominating the computation at longer sequences). The packed sequence and Dynamic-CP features further extend these capabilities to variable-length workloads in RL and SFT training.
+
+
+%==============================================================================
+% SECTION 7: PRODUCTION Features
+%==============================================================================
+
+\section{Production Features}\label{sec:production-features}
+
+The previous sections focused on performance optimizations that address the Three Walls. However, production MoE training also requires robustness, flexibility, and ease of use. This section describes features that address these operational requirements: load balancing to ensure stable training, shared and latent expert architectures, distributed checkpointing for flexible deployment, upcycling to use existing dense models, and integration with advanced training paradigms like multi-token prediction.
+
+\subsection{Load Balancing and Token Dropping}
+
+Dynamic routing in MoE models can lead to significant workload imbalance, where certain experts receive disproportionately more tokens than others. This causes computational inefficiency, memory bottlenecks, and degraded hardware utilization. We address these challenges with two coordinated mechanisms: load balancing and token dropping.
+
+\textbf{Load Balancing.}
+\Figref{fig:load-balancing-strategies} illustrates the load balancing strategies available in Megatron-Core MoE. 
+We provide multiple strategies to encourage uniform token distribution. The primary approach employs an \textbf{auxiliary loss}~\cite{lepikhin2020gshard,fedus2022switchtransformersscalingtrillion}, a differentiable penalty term that discourages routing all tokens to a small subset of experts. We also support \textbf{expert choice routing}~\cite{zhou2022mixtureofexpertsexpertchoicerouting}, which formulates balanced routing as an optimal transport problem, and \textbf{auxiliary-loss-free balancing} via learnable expert bias terms~\cite{wang2024auxiliarylossfreeloadbalancingstrategy} that dynamically adjust routing decisions based on historical load.
+
+\textbf{Token Dropping.}
+We support two dispatch strategies with different capacity management policies. In \textit{dropless mode} (the default), all routed tokens are processed without capacity constraints, maximizing model expressiveness at the cost of variable per-expert workload. In \textit{droppable mode}, explicit expert capacity limits are enforced~\cite{lepikhin2020gshard,fedus2022switchtransformersscalingtrillion}: when tokens assigned to an expert exceed its capacity, excess tokens are dropped and bypassed through residual connections. This provides predictable memory bounds, useful during early training when the router is poorly initialized.
+
+\textbf{Pad-to-Max for Static Shapes.}
+Droppable mode also enables \textit{pad-to-max} functionality, which pads all expert inputs to the same capacity limit. This converts MoE's inherently dynamic per-expert token counts into static shapes, enabling optimizations like CUDA Graphs (Section~\ref{sec:cuda-graphs}) that require fixed tensor dimensions across iterations.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=\textwidth]{figures/load-balancing-strategies.drawio.pdf}
+    \caption{Load balancing strategies in Megatron-Core MoE.}
+    \label{fig:load-balancing-strategies}
+\end{figure}%
+
+\subsection{Shared Experts}
+
+Some MoE architectures (DeepSeek-V2/V3 \cite{deepseekai2024deepseekv2strongeconomicalefficient,deepseekai2025deepseekv3technicalreport}, Qwen \cite{qwen2025qwen25technicalreport}) include a shared expert that processes all tokens regardless of routing, providing consistent baseline capacity across all tokens (\figref{fig:shared-expert-architecture}). When overlap is enabled (\texttt{-{}-moe-shared-expert-overlap}), shared expert computation runs in parallel with the all-to-all communication and routed expert computation, hiding its latency behind the dispatch-compute-combine pipeline.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/shared-expert-architecture.drawio.pdf}
+    \caption{Shared expert architecture in Megatron-Core MoE. The shared expert processes \emph{all} tokens while routed experts process only their assigned tokens. When overlap is enabled, shared expert computation runs in parallel with the token dispatch/combine communication, hiding its latency.}
+    \label{fig:shared-expert-architecture}
+\end{figure}
+
+\subsection{Latent MoE}\label{sec:latent-moe}
+
+In standard MoE, all2all communication dispatches tokens at the full hidden dimension \(d\), and each expert is parameterized by weight matrices in \(\mathbb{R}^{m \times d}\) and \(\mathbb{R}^{d \times m}\). LatentMoE~\cite{elango2026latentmoe} reduces both costs by inserting a shared down-projection \(W_\downarrow \in \mathbb{R}^{\ell \times d}\) before dispatch and an up-projection \(W_\uparrow \in \mathbb{R}^{d \times \ell}\) after combine, where \(\ell < d\) is the latent dimension. Routing still operates on the full hidden dimension to preserve routing quality; each routed expert operates entirely in the compressed latent space; shared experts remain at dimension \(d\). The layer output becomes:
+\[
+\text{output}(\mathbf{x}) = W_\uparrow \cdot \Bigl(\sum_{i \in \mathcal{T}_{K,E}} p_i \, E_i(W_\downarrow \cdot \mathbf{x};\, \ell)\Bigr) + \sum_{j} E_j^{\text{shared}}(\mathbf{x};\, d).
+\]
+
+The compression ratio \(\alpha = d / \ell\) reduces all2all communication volume by a factor of \(\alpha\) (tokens are dispatched at dimension \(\ell\) instead of \(d\)) and per-expert weight size by the same factor (expert matrices shrink from \(\mathbb{R}^{m \times d}\) to \(\mathbb{R}^{m \times \ell}\)). Elango et al.~\cite{elango2026latentmoe} define two ways to exploit these savings. In \(\ell\text{-MoE}_{\text{eff}}\), the total expert count \(E\) is scaled by \(\alpha\) while top-\(K\) is unchanged, preserving baseline accuracy at reduced inference cost. In \(\ell\text{-MoE}_{\text{acc}}\) (recommended), both \(E\) and top-\(K\) are scaled by \(\alpha\), which restores inference cost to the standard-MoE level but exponentially expands the combinatorial space of expert selections (\(\binom{\alpha E}{\alpha K} \geq \binom{E}{K}^{\alpha}\)), yielding higher accuracy at iso-cost. At scales up to 95B parameters, \(\ell\text{-MoE}_{\text{acc}}\) consistently outperforms standard MoE in accuracy per FLOP and per parameter. The architecture has been adopted by NVIDIA's Nemotron-3 Super and Ultra models.
+
+\textbf{Implementation.}
+LatentMoE is enabled via \texttt{-{}-moe-latent-size}, which sets \(\ell\). The \texttt{MoELayer} instantiates two \texttt{TELinear} projections: \texttt{fc1\_latent\_proj} (down-projection in the \texttt{preprocess} step, after routing but before dispatch) and \texttt{fc2\_latent\_proj} (up-projection in the \texttt{postprocess} step, after combine). Expert backends (\texttt{TEGroupedMLP}, \texttt{SequentialMLP}) automatically adapt their input and output dimensions to \(\ell\).
+

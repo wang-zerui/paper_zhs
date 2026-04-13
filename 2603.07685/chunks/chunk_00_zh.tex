@@ -1,0 +1,303 @@
+
+% Header shows only main title (without "Technical Report" subtitle)
+\fancyhead[C]{\footerfont 具有威震天核心的混合专家模型的可扩展训练}
+\maketitle
+% Add copyright as unnumbered footnote in the same footnote area
+\vspace{-15pt}
+\begingroup\renewcommand\thefootnote{}\footnotetext{\par\vspace*{2pt}\textcopyright\, \the\year{} 英伟达。版权所有。}\endgroup
+% \vspace{-5pt}
+\begin{abstract}
+扩展专家混合 (MoE) 训练引入了密集模型中不存在的系统挑战。由于每个令牌仅激活专家的子集，因此这种稀疏性使得总参数的增长速度比每个令牌的计算速度快得多，从而在内存、通信和计算之间创建耦合约束。优化一个维度通常会将压力转移到另一个维度，这要求整个系统堆栈中的协同设计。
+
+\vspace{0.5em}
+我们通过跨内存（细粒度重新计算、卸载等）、通信（优化调度程序、重叠等）和计算（分组 GEMM、融合、CUDA 图等）的集成优化来解决 MoE 训练的这些挑战。该框架还提供Parallel Folding实现灵活的多维并行、对FP8和NVFP4的低精度训练支持以及高效的长上下文训练。在 NVIDIA GB300 和 GB200 上，DeepSeek-V3-685B 达到 1,233/1,048 TFLOPS/GPU，Qwen3-235B 达到 974/919 TFLOPS/GPU。作为一种高性能、可扩展且可立即投入生产的开源解决方案，它已在学术界和工业界广泛使用，用于在可扩展到数千个 GPU 的集群上训练数十亿到数万亿个参数的 MoE 模型。
+
+\vspace{0.5em}
+本报告解释了这些技术的工作原理、它们的权衡以及它们在系统级别的交互，为使用威震天核心扩展 MoE 模型提供了实用指导。
+\end{abstract}
+\abscontent%
+% Graphical Abstract - Visual overview of Megatron-Core MoE
+\vspace{1ex}
+\begin{figure}[H]
+    \centering
+    \vspace{-0ex}
+    \includegraphics[width=0.93\textwidth,trim=0 0pt 0 2pt,clip]{figures/megatron_core_moe.drawio.png}
+    \label{fig:graphical-abstract}
+\end{figure}
+\vspace{2ex}
+\tableofcontents % Add a table of contents
+\newpage
+
+\section{介绍}
+
+大规模训练密集变压器需要随着模型大小线性增长的计算 \cite{kaplan2020scaling,hoffmann2022chinchilla}。专家混合 (MoE) 模型遵循不同的扩展模式：通过将每个令牌路由到选定的专家网络子集而不是激活所有参数，每个令牌的计算量随模型大小呈亚线性增长 \cite{shazeer2017,fedus2022switchtransformersscalingtrillion}。最近的 MoE 模型已经证明，相对于质量匹配的密集模型，训练成本降低了几个数量级 \cite{jiang2024mixtralexperts,deepseekai2025deepseekv3technicalreport,Cai_2025}。
+
+然而，大规模训练 MoE 会带来系统挑战，而密集模型框架并不是针对这些挑战而设计的。本报告介绍了 Megatron-Core MoE，Megatron-Core 中的 MoE 训练堆栈~\cite{shoeybi2020megatronlmtrainingmultibillionparameter}，涵盖高吞吐量训练万亿参数级 MoE 模型所需的架构、并行策略和系统优化。
+
+\subsection{专家荟萃}
+
+专家混合 (MoE) 模型通过一组称为 \emph{专家}，连同轻量级 \emph{路由器} （或门控网络）动态选择处理每个输入的专家 \cite{shazeer2017,jacobs1991adaptive,eigen2013learning}。在基于 Transformer 的语言模型的背景下 \cite{vaswani2017attention}，MoE 层通常取代密集的前馈网络 (FFN) 块：MoE 层包含多个 FFN 专家，而不是应用于所有令牌的单个 FFN，并且每个令牌都路由到一个小子集（例如，top-$k$）这些专家基于学习到的路由权重。
+
+形式上，给定输入令牌表示 $\mathbf{x}$，路由器计算概率分布 $E$ 专家：
+\[
+\mathbf{p}(\mathbf{x}) = \text{Softmax}(\mathbf{W}_r \mathbf{x})
+\]
+然后，MoE 层的输出被计算为所选专家输出的加权组合：
+\[
+\text{MoE}(\mathbf{x}) = \sum_{i \in \text{TopK}(\mathbf{p}(\mathbf{x}))} p_i(\mathbf{x}) \cdot E_i(\mathbf{x})
+\]
+在哪里 $E_i$ 表示 $i$-th 专家网络。该架构提供了三个关键优势：通过添加更多专家，模型容量可以独立于计算成本而增长（\emph{可扩展容量}）；每个令牌仅激活一小部分参数，相对于同等大小的密集模型减少了 FLOP（\emph{计算效率}）；不同的专家可以专注于不同的输入类型（\emph{专业化}）。附录~\ref{sec:notation} 提供本报告中使用的所有符号和缩写的符号参考。
+
+虽然这个概念可以追溯到 20 世纪 90 年代初 \cite{jacobs1991adaptive,eigen2013learning}，MoE 与现代变形金刚的集成重新激发了人们的兴趣。 GShard 开创了大规模分布式 MoE 训练的先河，引入了专家并行性和负载平衡辅助损失 \cite{lepikhin2020gshard}。 Switch Transformer 证明 MoE 可以扩展到万亿参数，同时保持训练稳定性 \cite{fedus2022switchtransformersscalingtrillion}。 GLaM 表明 MoE 可以以训练成本的一小部分来匹配密集模型质量 \cite{du2022glamefficientscalinglanguage}。包括 Tutel 在内的框架 \cite{hwang2023tutel} 和 DeepSpeed-MoE \cite{rajbhandari2022deepspeedmoe} 进一步完善教育部培训体系。
+
+教育部在研究和行业中的采用加速了。 Mixtral-8x7B 表明开放权重 MoE 模型可以匹配专有的密集模型，同时降低推理成本 \cite{jiang2024mixtralexperts}。 DeepSeek-V2 和 DeepSeek-V3 通过细粒度专家架构对此进行了扩展，使用数百个小型专家来最大化容量计算比 \cite{dai2024deepseekmoe,deepseekai2024deepseekv2strongeconomicalefficient,deepseekai2025deepseekv3technicalreport}。 NVIDIA 的 Nemotron-3 系列~\cite{nvidia2025nemotron3} 采用混合 Mamba-Transformer MoE 架构和 LatentMoE~\cite{elango2026latentmoe}，使用 Megatron-Core 进行大规模训练。扩展定律研究证实，细粒度 MoE 实现了有利的计算优化权衡 \cite{krajewski2024scaling,ludziejewski2025jointmoescalinglaws}，加速了这一趋势——同时放大了它所带来的系统挑战。
+
+\subsection{训练大规模 MoE 模型的挑战}\label{sec:challenges}
+
+随着模型向数百名个人能力较小的专家推进，教育部培训的系统挑战也成比例增长。这些挑战源于一个根本原因：教育部 \textbf{稀疏性}---表现为 \emph{参数计算不匹配} （总参数远远超过主动计算，本节）和 \emph{密集-稀疏不匹配} （注意层和 MoE 层需要冲突的并行配置，第 ~\ref{parallelism-strategies}).
+
+\textbf{核心的不对称来自于稀疏性。} 在密集变压器中，每个参数都参与每个训练步骤。一个模型与 $N_{\text{total}}$ 参数大致需要 $6 N_{\text{total}}$ 每个令牌的 FLOP 数（向前和向后组合），因此参数和每个令牌的计算规模是同步的。将模型拆分到更多 GPU 上通常也会以相同的比例拆分计算，从而使每个 GPU 保持足够的繁忙，从而保持较小的通信开销。
+
+对于 MoE 来说，稀疏性会导致这种耦合破坏：仅 $K$ 的 $E$ 每个代币激活的专家总数，因此每个代币的计算量大致为 $6 N_{\text{active}}$ 而不是 $6 N_{\text{total}}$， 在哪里 $N_{\text{active}}$ 规模与 $K$ 尽管 $N_{\text{total}}$ 规模与 $E$， 和 $K \ll E$。这造成了基本的参数计算不匹配：与每个令牌的活动参数匹配的密集模型相比，MoE 模型的总参数要多得多，通常是一个数量级。 DeepSeek-V3 具体说明了这一点：总共 685B 个参数，但每个代币只有 37B 个活跃参数，即 18 个$\times$ 差距。
+
+由于每个标记的计算量如此之少，模型分区比密集模型需要更多的关注——天真地对专家矩阵进行分片（如张量并行）会分割已经很小的计算，从而使它们的效率更低。由于教育部专家是独立的网络，因此自然的策略是 \emph{专家并行性} (EP)：将不同的专家放在不同的 GPU 上，保留全尺寸的专家 GEMM。 EP 引入了全对全通信，以将代币路由到其指定的 GPU（第~\ref{parallelism-strategies} 详细说明了为什么 EP 是首选以及并行折叠如何解决由此产生的挑战）。这种参数计算不匹配和 EP 的通信需求共同造成了三个紧密耦合的挑战—— \emph{三堵墙}---限制了教育部的每个训练步骤：
+
+\textbf{记忆墙。} 全部 $E$ 专家的参数、梯度和优化器状态在训练期间必须驻留在内存中，即使只是 $K$ 激活每个令牌。这产生的内存压力远远超过具有可比的每个令牌计算的密集模型的内存压力~\cite{fedus2022switchtransformersscalingtrillion,Cai_2025}。减轻这种压力需要在其他方面进行支出：在更多设备上分配参数成本 \emph{通讯带宽};重新计算激活而不是存储它们的成本 \emph{额外的计算};卸载到主机内存成本 \emph{PCIe带宽}。动态路由使事情变得更加复杂：当一些专家收到不成比例的负载时，不均匀的令牌分布会导致不可预测的内存峰值~\cite{lepikhin2020gshard,wang2024auxiliarylossfreeloadbalancingstrategy}.
+
+\textbf{通讯墙。} EP要求全体集体向指定的专家发送代币并收集结果~\cite{lepikhin2020gshard}。每个 all-to-all 中的每 GPU 发送量约为 $T \cdot K \cdot h \cdot \frac{EP-1}{EP}$， 在哪里 $T$ 是本地令牌计数， $K$ 顶部-$k$， 和 $h$ 隐藏维度；完整的调度和组合周期使该周期加倍。随着 EP 的增长，这个数量饱和，但通信逐渐从高带宽节点内链路（例如 NVLink）转移到更窄的节点间互连，其中可用带宽下降了一个数量级~\cite{deepep2025}。同时，稀疏激活模式提供了有限的计算来与这种通信重叠。在像 DeepSeek-V3 这样的架构中，专家跨越多个节点，未优化的 all-to-all 可能会消耗多达 60\% 的总训练时间。
+
+\textbf{计算效率墙。} MoE 引入了密集模型中不存在的计算效率低下的问题：
+\begin{itemize}[nosep,leftmargin=*]
+    \item \textbf{小型 GEMM。} 细粒度专家会产生许多未充分利用 GPU 计算单元的小型矩阵乘法~\cite{megablocks}。在我们的测量中，GEMM 占 $\sim$70\% Llama-3 405B（密集）的执行时间但低于 50\% 在 DeepSeek-V3 (MoE) 中。剩余部分由随张量计数而不是 FLOP 计数扩展的操作消耗。
+    \item \textbf{路由和排列开销。} 密集模型中不存在的令牌路由和排列，添加 $\sim$9\% 即使在优化后也可以对执行时间进行分层。
+    \item \textbf{负载不平衡。} 动态路由为专家分配的令牌数量不均匀，导致一些专家超载，而另一些则闲置，浪费计算能力~\cite{wang2024auxiliarylossfreeloadbalancingstrategy}.
+    \item \textbf{主机开销。} 由于稀疏性和路由，MoE 会针对相同数量的 FLOP 启动更多内核，并且每次启动都会带来固定的主机端成本，这些成本加起来会使 GPU 在内核之间处于空闲状态。在无滴式 MoE 中，动态张量形状还需要昂贵的主机设备同步。
+\end{itemize}
+
+这三堵墙紧密相连：优化一堵墙通常会将压力转移到另一堵墙。增加批量大小可以提高 GEMM 利用率，但会增加内存压力和通信量。 CUDA Graph 消除了主机开销，但需要静态张量形状，这与无丢路由相冲突。跨专家对令牌进行分组可以提高计算效率，但会使负载平衡变得复杂。部分~\ref{parallelism-strategies} 提供 EP 和 Parallel Folding 底层的详细并行性分析；部分~\ref{key-features-optimizations} 介绍了威震天核心的集成方法，用于解决所有三堵墙的问题，同时管理它们的相互作用。
+
+
+\subsection{威震天核心 MoE}
+内置于 Megatron-Core，一个基于 PyTorch 的库，用于大规模 Transformer 训练~\cite{shoeybi2020megatronlmtrainingmultibillionparameter,paszke2019pytorchimperativestylehighperformance}，这个 MoE 训练堆栈同时解决了所有三堵墙：
+
+\textbf{多维并行性。} 专家并行 (EP) 与张量、管道、序列和数据并行集成。 MoE平行折叠 \cite{liu2025moeparallelfoldingheterogeneous} 解耦注意力和 MoE 层配置，打破传统 $\text{EP} \leq \text{DP}$ 针对特定模型架构和硬件拓扑定制的约束和启用配置。
+
+\textbf{内存优化。} 细粒度激活重新计算、内存高效排列、精度感知优化器和激活卸载可在不牺牲吞吐量的情况下减少内存占用 \cite{korthikanti2022reducingactivationrecomputationlarge,a2023learningwithdistributedoptimization}。专家 GEMM、激活和通信中的全面降低精度训练（FP8 和 FP4）支持进一步减少激活存储，同时通过选择性精度策略保持收敛。
+
+\textbf{沟通优化。} 高性能令牌调度程序（DeepEP、HybridEP）可最大限度地提高带宽利用率。通信计算重叠隐藏了专家计算背后的所有延迟。
+
+\textbf{计算优化。} 分组 GEMM 内核、内核融合、CUDA 图和无同步执行解决了细粒度 MoE 架构中固有的计算碎片问题。
+
+\textbf{生产特点。} 负载平衡策略、具有容量控制的令牌丢弃、分布式优化器和 FSDP 支持、具有灵活重新分片的分布式检查点以及从密集检查点进行升级可实现大规模部署。
+MoE 堆栈的模块化设计可实现快速实验，而其生产级优化则支持从研究原型到万亿参数模型的训练~\cite{nvidiamcoremoeuserguide}。本报告解释了该堆栈提供的功能、做出关键设计决策的原因以及它们如何应对 MoE 培训挑战，并提供配置和调整的实用指导。
+
+\subsection{本文的结构}
+
+本报告的其余部分遵循从架构到优化再到评估的进展：
+
+\begin{itemize}
+
+\item \textbf{部分~\ref{meg-core-architecture}：Megatron-Core MoE 架构。}
+分两部分介绍Megatron-Core MoE的设计：MoE层本身的内部设计（路由器、令牌调度程序、专家）和四阶段前向传递（路由、调度、计算、组合），然后是外部设计，包括与变压器模型的集成、并行进程组组织和专家参数的优化器处理。
+
+\item \textbf{部分~\ref{parallelism-strategies}：通过并行折叠和多维并行性缩放 MoE。}
+研究 MoE 的稀疏性如何打破密集训练的并行性假设，为什么需要专家并行 (EP) 和传统策略，以及 MoE 并行折叠如何解决注意力层和 MoE 层之间产生的密集稀疏不匹配，从而解耦它们的并行配置，以实现万亿参数规模的灵活、高效映射。
+
+\item \textbf{部分~\ref{key-features-optimizations}：打破内存、通信和计算效率的障碍。}
+介绍了 Megatron-Core MoE 针对三个基本障碍的解决方案：内存墙（激活管理、重新计算策略、卸载、分布式参数存储）、通信墙（优化调度程序，包括 DeepEP 和 HybridEP、通信计算重叠）和计算效率墙（分组 GEMM、内核融合、CUDA 图形、无滴 MoE 的无同步执行）。
+
+\item \textbf{部分~\ref{sec:reduced-precision-training}：MoE 的 FP8/FP4 低精度训练。}
+涵盖降低精度训练作为横切优化，通过减少激活内存、减半通信量和加速 Tensor Core GEMM，同时影响所有三堵墙，同时提出选择性精度策略以保持训练稳定性。
+
+\item \textbf{部分~\ref{sec:long-context-training}：长情境教育部培训。}
+检查长上下文场景（16K 到 64K+ 令牌）如何从根本上改变注意力计算占主导地位的优化格局，并提出通过上下文并行和张量并行缩放来管理激活内存增长的技术。
+
+\item \textbf{部分~\ref{sec:production-features}：生产特点。}
+描述生产训练的操作功能：用于稳定训练的负载平衡和令牌丢弃、用于与并行性无关的重新分片的分布式检查点、从密集检查点升级以及与多令牌预测集成。
+
+\item \textbf{部分~\ref{performance-evaluations}：绩效评估。}
+通过跨 GB200 和 H100 平台的 DeepSeek-V3 和 Qwen3-235B 的实证基准验证框架的有效性，展示完整优化堆栈的影响。
+
+\item \textbf{部分~\ref{sec:best-practices}：DeepSeek-V3 案例研究的性能最佳实践。}
+提供用于识别最佳并行配置的系统工作流程，并通过详细的 DeepSeek-V3 案例研究进行验证，该案例研究演示了优化如何协同工作以实现最先进的性能。
+
+\item \textbf{部分~\ref{sec:rl}：强化学习中的威震天核心 MoE。}
+解决新兴的 RL 训练后范式，涵盖 RL 工作负载特有的挑战（可变序列长度、内存卸载、在线权重导出）、Megatron-Bridge 与流行的 RL 框架的集成，以及 RL 特定的优化，包括打包序列支持、动态上下文并行性和路由器重放。
+
+\end{itemize}
+
+
+\section{威震天核心 MoE 架构}\label{meg-core-architecture}
+
+本节分两部分介绍 Megatron-Core 的 MoE 实现架构。我们首先描述 \textbf{内部设计} MoE 层本身：其模块化组件（路由器、令牌调度程序、专家）以及将输入令牌转换为输出表示的四阶段前向传递。然后我们检查 \textbf{外部设计}：如何组织并行进程组以支持分布式执行，以及优化器如何以不同于密集层的方式处理专家参数。
+
+\subsection{MoE 层架构和前向传递}\label{sec:moe-layer-architecture}
+
+MoE 层用一组专家 FFN 取代了变压器块中的密集前馈网络 (FFN)，只有其中的一个子集处理每个令牌。 Megatron-Core 通过三个模块化组件（一个 \emph{路由器} 对于令牌到专家的分配， \emph{令牌调度程序} 用于跨 GPU 通信，以及 \emph{专家} 用于计算）通过四级前向传递连接，如图所示 \figref{fig:moe-forward-pass}。这种关注点分离可以实现独立优化：路由器可以融合到 CUDA Graph 中，而不影响调度程序逻辑，调度程序可以在 all-to-all 和 DeepEP 之间交换，而无需修改专家计算，专家实现可以透明地使用不同的 GEMM 后端。
+
+\subsubsection{前向传递：路由、调度、计算、组合}
+
+MoE 层通过四个连续阶段处理输入令牌：
+
+% Fix the typo in this figure
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/moe_forward_pass.drawio.pdf} 
+\caption{数据流经 MoE 层：路由、调度、计算和组合阶段。}
+\label{fig:moe-forward-pass}
+\end{figure}
+
+\textbf{第一阶段：路线。} 这 \texttt{TopKRouter} 确定哪些专家处理每个令牌。学习的线性投影将每个标记的隐藏状态映射到 $E$ logits（每个专家一个），评分函数（softmax 或 sigmoid）将 logits 转换为概率，并且 top-$k$ 选择确定每个代币得分最高的专家。路由器输出两个张量： \texttt{probs} 包含路由权重，以及 \texttt{routing\_map}，一个布尔掩码，指示令牌专家分配。为了获得许多专家的数值稳定性，路由器可以通过以下方式在 FP32 中运行 \texttt{-{}-moe-router-dtype fp32}.
+
+\textbf{第二阶段：调度。} 令牌调度程序为跨 GPU 通信准备令牌。它首先对令牌进行排列，以便发往同一专家的所有令牌都是连续的；这种排列对于专家方面的高效密集 GEMM 至关重要。然后，调度程序使用三个后端之一将代币转移到托管其指定专家的 GPU：AllGather（简单但内存密集型）、all-to-all（基于标准 NCCL）或 Flex（支持 DeepEP 和 HybridEP 等优化后端）。
+
+\textbf{第三阶段：专家计算。} 每个 GPU 对收到的令牌执行其本地专家。所有本地专家通过以下方式在单个分组 GEMM 调用中运行 \texttt{TEGroupedMLP}，即使单个专家工作负载很小，也能最大限度地提高 GPU 利用率。
+
+\textbf{第四阶段：合并。} 反向通信将处理后的令牌返回到其原始 GPU，然后进行取消排列以恢复原始序列顺序。如果配置了共享专家，则在此阶段添加其输出（可以选择与路由专家并行计算）。
+
+\subsubsection{路由器：代币到专家的分配}
+
+路由器通过两个操作将全局令牌批次转换为专家特定的工作负载 \cite{shazeer2017}:
+
+\begin{enumerate}
+    \item \textbf{门控：} 线性投影 $\mathbf{W}_r \in \mathbb{R}^{h \times E}$ 映射每个标记的隐藏状态 $\mathbf{x} \in \mathbb{R}^h$ 到逻辑 $\mathbf{l} = \mathbf{W}_r^\top \mathbf{x} \in \mathbb{R}^E$.
+
+    \item \textbf{顶部-$k$ 选择：} 评分函数将 logits 转换为概率：softmax ($p_i = e^{l_i} / \sum_j e^{l_j}$) 或乙状结肠 ($p_i = \sigma(l_i) / \sum_j \sigma(l_j)$，由 DeepSeek-V3 使用 \cite{deepseekai2025deepseekv3technicalreport}）。顶部-$k$ 每个代币都会选择概率最高的专家。
+\end{enumerate}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/router.pdf}
+    \caption{路由器架构：线性投影、分数函数、top-$k$ 选择和负载平衡。}
+    \label{fig:router-architecture}
+\end{figure}
+
+专家利用率不均匀会降低训练效率和模型质量。如图所示 \figref{fig:router-architecture}，Megatron-Core支持多种负载均衡策略；这些都在章节中讨论~\ref{sec:production-features}.
+
+\subsubsection{令牌调度程序：通信抽象}
+
+调度程序通过六阶段管道管理 GPU 之间的令牌移动： \texttt{dispatch\_preprocess} $\rightarrow$ \texttt{token\_dispatch} $\rightarrow$ \texttt{dispatch\_postprocess} （向前），以及 \texttt{combine\_preprocess} $\rightarrow$ \texttt{token\_combine} $\rightarrow$ \texttt{combine\_postprocess} （落后）。
+
+\textbf{通信后端。} 可以使用三种调度程序类型：
+\begin{itemize}
+    \item \textbf{齐聚} (\texttt{allgather})：每个 GPU 收集本地专家的所有标记和过滤器。简单但占用内存；适用于小 EP 尺寸。
+    \item \textbf{多对多} (\texttt{all-to-all})：基于标准 NCCL 的点对点通信 \cite{lepikhin2020gshard}。每个 GPU 仅发送每个目的地所需的令牌。可扩展性良好，但会产生同步开销。
+    \item \textbf{柔性} (\texttt{flex}）：支持DeepEP的统一设计（仅集成高吞吐量内核，通过重叠隐藏NVLink通信延迟） \cite{deepep2025} 和 HybridEP（高带宽 MoE 通信内核，可在 NVL72 等富含 NVLink 的拓扑上提供更好的性能）。
+\end{itemize}
+
+\subsubsection{专家：计算模块}
+
+每个专家都是一个带有可选门控的两层 MLP（用于 SwiGLU/GeGLU 激活） \cite{shazeer2020glu}）。分组 GEMM 可实现多个专家计算的高效批处理 \cite{megablocks,hwang2023tutel}。有两种实现方式可供选择：
+
+\begin{itemize}
+    \item \textbf{TE集团MLP}: 变压器发动机 \cite{nvidia_transformer_engine} 支持 FP8 和 FP4 量化的优化实现。
+    \item \textbf{顺序MLP}：循环中一次执行一个专家。对于调试很有用，但速度明显慢。
+\end{itemize}
+
+\textbf{共享专家。} 一些架构（DeepSeek-V2/V3 \cite{deepseekai2024deepseekv2strongeconomicalefficient,deepseekai2025deepseekv3technicalreport}, 琪文 \cite{qwen2025qwen25technicalreport}）包括一个共享专家，无论路由如何，它都会处理所有令牌。共享专家计算可以与调度-计算-组合管道并行运行，隐藏其延迟。见章节~\ref{sec:production-features} 了解详情。
+
+
+\subsection{系统集成：并行性和优化器}\label{sec:moe-system-integration}
+
+描述了 MoE 层的内部工作原理后，我们现在研究它如何集成到分布式训练系统中：并行进程组和优化器处理。
+
+\subsubsection{平行集团管理}
+
+MoE 层需要与密集层不同的进程组，因为不同的组件具有不同的通信模式。威震天核心通过以下方式组织这些团体 \texttt{ProcessGroupCollection}:
+
+\begin{lstlisting}
+ProcessGroupCollection
+|-- Attention Layer Groups: tp, cp, dp, pp
+|-- Expert Layer Groups:    ep, expt_tp, expt_dp, pp
+\end{lstlisting}
+
+每个 MoE 组件根据其通信要求使用特定的组：
+
+\begin{table}[ht]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{成分} & \textbf{使用的组} & \textbf{原因} \\
+\midrule
+路由器 & \texttt{tp}, \texttt{cp}, \texttt{tp\_cp} & EP 排名中的权重重复 \\
+令牌调度程序 & \texttt{ep}, \texttt{tp\_ep} & 跨专家队伍的全方位 \\
+专家 & \texttt{ep}, \texttt{expt\_tp}, \texttt{expt\_dp} & 跨 EP 分片； EDP​​ 梯度降低 \\
+共享专家 & \texttt{tp} & 与密集 MLP 相同 \\
+\bottomrule
+\end{tabular}
+\caption{MoE 组件处理组映射。}
+\label{tab:moe-process-groups}
+\end{table}
+
+这种分离使得 \textbf{平行折叠} （节~\ref{sec:parallel-folding})：注意力层和 MoE 层可以使用不同的 TP/DP 配置。例如，注意力层可能使用 TP=4，而 MoE 层使用具有更高 EP 的 ETP=1，独立优化每个层类型。
+
+\subsubsection{优化器和梯度处理}
+
+专家参数需要在分布式优化中进行独特的处理。威震天核心使用 \texttt{Chained\-Optimizer} 它包装了针对密集参数和专家参数的单独优化器。三个关键设计决策支持正确的 MoE 优化：
+
+\begin{enumerate}
+    \item \textbf{参数识别。} 专家参数标记为 \texttt{allreduce=False}，将它们与使用标准数据并行梯度下降的密集参数区分开来。
+
+    \item \textbf{单独的还原组。} 密集层减少了梯度 \texttt{dp\_cp\_group} （完全数据并行），而专家则减少跨 \texttt{expt\_dp\_group} （专家数据并行性）。这确保了梯度在正确数量的副本上平均。
+
+    \item \textbf{梯度缩放。} 专家梯度的缩放比例为 \texttt{edp\_size / dp\_size} 考虑专家（处理依赖于路由的令牌子集）与密集层所看到的不同有效批量大小。
+\end{enumerate}
+
+这种设计允许 ZeRO 式优化器状态分片 \cite{rajbhandari2020zero} 与 MoE 无缝协作：专家参数的优化器状态在 EP 组中进行分片，而密集参数的状态则遵循标准 DP 分片。
+
+架构建立完毕，Section~\ref{parallelism-strategies} 解决如何跨设备分发它，以及部分〜\ref{key-features-optimizations} 解决大规模出现的内存、通信和计算效率挑战。
+
+\section{Scaling MoE：并行折叠和多维并行}\label{parallelism-strategies}
+
+部分~\ref{sec:challenges} 确定 MoE 的稀疏性将模型大小与每个令牌计算解耦，从而产生参数计算不匹配，使得专家并行 (EP) 成为必要，但引入了全对全通信。本节将研究这种不匹配如何具体影响并行性设计。我们首先回顾密集模型的并行性基线及其所需的权衡，然后展示 MoE 的稀疏性如何打破这些策略背后的假设。最后，我们呈现 \textbf{MoE平行折叠}，威震天核心的解决方案 \emph{稠密-稀疏失配}：注意力层和 MoE 层具有相互冲突的最佳并行配置，而并行折叠解耦了它们的映射，以便每个层都可以使用其最佳拓扑。
+
+%==============================================================================
+% 3.1 Opening: Why Parallelism, and Why MoE is Different
+%==============================================================================
+\subsection{为什么并行，为什么 MoE 不同}\label{sec:why-parallelism}
+
+在研究 MoE 特定的挑战之前，我们先确定并行性对于大型模型训练是必要的根本原因以及它带来的权衡。
+
+\subsubsection{为什么大型模型训练需要并行性}
+
+\textbf{记忆是根本的限制。} 单个 GPU 的内存有限，但训练大型模型需要同时存储模型参数、优化器状态、梯度和激活 \cite{rasley2020deepspeed}。考虑 Llama-405B \cite{grattafiori2024llama3herdmodels,touvron2023llama,touvron2023llama2} 使用 BF16 精度和 Adam 优化器进行训练：
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{成分} & \textbf{内存（Llama-405B、BF16）} \\
+\midrule
+型号参数 & $\sim$810GB \\
+优化器状态 (Adam) & $\sim$4860GB \\
+渐变 & $\sim$1620GB \\
+激活（8K 序列） & $\sim$5575GB \\
+\midrule
+\textbf{全部的} & \textbf{$\sim$12865GB} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+这远远超过了任何单个 GPU 的容量。多个 GPU 不是可选的；他们是 \emph{必需的} 保持模型。
+
+\textbf{计算吞吐量是效率的原因。} 除了内存之外，单个 GPU 的计算能力也有限。大型模型训练需要天文数字的 FLOPs；聚合多个 GPU 可以提高吞吐量，并将挂钟训练时间从几年缩短到几周。
+
+\subsubsection{并行性的权衡}
+
+并行性不是免费的。每个并行策略都会带来开销：
+
+\begin{itemize}
+    \item \textbf{通信开销}：GPU 之间的数据交换会消耗时间和带宽。
+    \item \textbf{同步}：快速 GPU 必须在同步点等待慢速 GPU。
+    \item \textbf{管道气泡}：管道并行性在管道边界引入了空闲时间。
+    \item \textbf{降低计算强度}：分片会减少每个 GPU 矩阵的大小，从而降低 GEMM 效率。
+\end{itemize}
+
+结果：模型 FLOP 利用率（MFU）很大程度上受并行策略的影响，有效的并行设计可以最小化理想 MFU 与实际 MFU 之间的差距。
+
+\textbf{密集模型的关键见解}：并行性的“成本”和“收益”成比例。更多参数需要更多 GPU，但更多参数也意味着每次前向-后向传递需要更多计算。由于计算量随着模型规模的增长而增长，因此通信在每个步骤中所占的份额较小，从而随着模型规模的扩大，保持 MFU 相对稳定。
+
+教育部的稀疏性破坏了这种平衡。因为只有 $K$ 的 $E$ 专家激活每个代币，总参数按比例缩放 $E$ 而每个代币的计算规模只能与 $K$。内存需要更多 GPU，但每个令牌的计算量无法匹配，从而导致通信开销暴露。以下部分将研究这种不对称性如何打破传统并行策略的假设，以及为什么需要新的并行维度。
+
+%==============================================================================
+% 3.2 The Challenge of MoE Parallelism
+%==============================================================================

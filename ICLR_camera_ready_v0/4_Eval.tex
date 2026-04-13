@@ -1,0 +1,164 @@
+\section{Evaluation}\label{sec:evaluation}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.90\textwidth]{figures/throughput_mean_2x2_models.pdf}
+    \caption{End-to-end throughput (tokens/s/GPU) across three dataset settings (Image-Heavy/Video-Heavy/Only-Video) under different model scales and cluster sizes. Geo3K, NExTQA, and LongVILA-Reason mixtures with sampling weights 5:2:1, 1:2:5, and only LongVILA-Reason, respectively. Speedup labels are computed against veRL Bucketing when available, otherwise against Ulysses (SP=4). Red \textbf{OOM} markers CPU or GPU out-of-memory.}
+    \label{fig:e2e_throughput_2x2_models}
+\end{figure}
+\subsection{Evaluation Setup}
+
+% \noindent\textbf{Implementation.}~We implement \SysName~in Python on top of veRL~\citep{verl} and the Ray~\citep{Ray} framework, leveraging their distributed computing capabilities for scalable deployment. 
+
+\noindent\textbf{Testbed.}~We evaluate \SysName~on two 128-GPU clusters (each 16$\times$8): one with NVIDIA H800 GPUs and one with NVIDIA H200 GPUs. Intra-node GPU interconnect bandwidth is 400GB/s (H800) and 900GB/s (H200) via NVLink/NVSwitch. Inter-node connectivity uses RoCEv2 RDMA, with aggregate per-node bandwidth of 1600Gb/s (H800 cluster) and 3200Gb/s (H200 cluster). Unless otherwise stated, end-to-end comparisons are reported on the H800 cluster.
+
+\noindent\textbf{Models and Datasets.}~We evaluate \SysName~on MiMo-VL-7B-RL~\citep{mimovl} and Qwen2.5-VL-32B~\citep{qwen25vl}. We benchmark on a mixture of image-text (Geo3K~\citep{geo3k}), short-video (NExTQA~\citep{nextqa}), and long-video (LongVILA-Reason~\citep{LongVILA}) datasets under different sampling weights: (1) Image-Heavy: 5:2:1; (2) Video-Heavy: 1:2:5; (3) Only-Video: LongVILA-Reason only. We use the GRPO for all experiments, with a maximum response length of 1024 tokens. For the 7B model, we use TP=4 for rollout and FSDP=16 for model forward/update. For the 32B model, we use TP=16 for rollout and FSDP=64 for model forward/update. We set the maximum sharding budget $p_{\max}$ to 8 for all runs unless otherwise specified.
+
+\subsection{Main Results}
+
+\noindent\textbf{End-to-end Results.}~We compare \SysName~with two baselines: (1) \textbf{veRL+Bucketing}, the original veRL system with bucketing; and (2) \textbf{Ulysses-SP}, conventional sequence parallelism with a fixed sharding degree. Figure~\ref{fig:e2e_throughput_2x2_models} reports end-to-end throughput (tokens/GPU/s) for GRPO under different dataset sampling weights, global batch sizes, and maximum numbers of video frames. Overall, \SysName consistently outperforms both veRL+Bucketing and fixed-degree Ulysses-SP. In particular, \SysName improves end-to-end throughput by up to $8.47\times$ over the baselines. In image-heavy settings, \SysName achieves up to a $7.35\times$ speedup, while in video-heavy settings the speedup reaches up to $5.35\times$. In the only-video setting, where sequence lengths are longest and most heterogeneous, \SysName achieves the largest gain of up to $8.47\times$. The improvements are more pronounced for larger models and video-heavy datasets, where load imbalance is more severe. Moreover, throughput scales well with the video volume, demonstrating \SysName's effectiveness in handling long sequences. In contrast, the veRL baseline suffers from severe slowdowns and out-of-memory (OOM) issues due to ViT-induced load imbalance as the number of video samples increases. Ulysses-SP mitigates the veRL baseline by balancing attention computation; however, its fixed sharding degree incurs substantial communication overhead, and its performance gain diminishes as the batch size increases.
+
+
+
+% \noindent\textbf{Efficiency Under Different Settings.}~To assess robustness to practical training configurations, we run a settings sweep on 32 H800 GPUs with the same dataset mixture (Geo3K, NExTQA, and LongVILA-Reason; 5:2:1) and \texttt{max\_response\_length}=256, while varying (i) \texttt{global\_batch\_size}, (ii) \texttt{max\_frame\_number} (as a proxy for sequence length), and (iii) the maximum sharding budget $p_{\max}$ exposed to FlexUlysses. We keep TP=4 and FSDP=32 fixed and enable both ShadowLoader and FlexUlysses for all runs. Table~\ref{tab:different_settings} shows that FlexRL maintains high throughput across the sweep, and increasing $p_{\max}$ from 4 to 8 provides additional scheduling flexibility without degrading end-to-end efficiency.
+
+% \begin{table}[h]
+%     \centering
+%     \caption{FlexRL robustness under different GRPO settings on 32 H800 GPUs (MiMo-VL-7B-RL; Geo3K+NExTQA+LongVILA-Reason mixture).}
+%     \label{tab:different_settings}
+%     \resizebox{0.92\textwidth}{!}{%
+%     \begin{tabular}{ccccccc}
+%     \toprule
+%     $p_{\max}$ & \texttt{global\_batch\_size} & \texttt{max\_frame\_number} & Update Actor (s) & Ref Log Prob (s) & Old Log Prob (s) & Throughput (tokens/s/GPU) \\ \midrule
+%     2 & 128 & 64  & 3.9  & 1.4 & 2.5 & 183.0 \\
+%     4 & 256 & 128 & 8.1  & 2.6 & 4.4 & 227.1 \\
+%     4 & 256 & 512 & 8.9  & 2.8 & 4.1 & 317.3 \\
+%     4 & 384 & 256 & 11.4 & 4.1 & 7.8 & 258.0 \\
+%     8 & 384 & 256 & 10.9 & 3.7 & 7.6 & 260.2 \\
+%     8 & 192 & 512 & 9.5  & 3.2 & 6.0 & 282.8 \\ \bottomrule
+%     \end{tabular}}
+% \end{table}
+
+% We observe that the system scales well with batch size and sequence length, demonstrating FlexRL's efficiency in computation-bound regimes. Increasing the $p_{\max}$ expands the scheduling space and provides additional throughput gains in this sweep. Since sequence sharding introduces SeqAlltoAll communication, we next isolate the trade-off between improved load balance and added communication overhead.
+
+\begin{figure}[t]
+    \centering
+    \resizebox{0.8\textwidth}{!}{%
+    \begin{subfigure}[t]{0.70\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/flexrl_ablation.pdf}
+        \caption{Per-stage and E2E Throughput.}
+        \label{fig:flexrl_ablation_throughput}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[t]{0.28\textwidth}
+        \centering
+        \raisebox{-0.55em}{%
+        \includegraphics[width=\linewidth]{figures/time_breakdown_ablation_3bars_20260301_173601.pdf}%
+        }
+        \vspace{-10pt}
+        \caption{Step time breakdown.}
+        \label{fig:flexrl_ablation_time}
+    \end{subfigure}%
+    }
+    \caption{Ablation results on 128 H800 GPUs with MiMo-VL-7B-RL. (a) Throughput (tokens/s) for each RL stage and the end-to-end throughput, along with the speedup against veRL. (b) Normalized iteration time breakdown.  }
+    \label{fig:flexrl_ablation}
+\end{figure}
+
+\noindent\textbf{Comparison with Ulysses-SP.}~We evaluate our method and Ulysses-SP method using the image-heavy dataset and 7B model on 32 GPUs. We enable ShadowLoader for all methods to eliminate the influence of dataloading, and compare fixed-degree Ulysses-SP (SP=$\{2,4,8\}$) against ours. We set veRL+Bucketing as the baseline. The attention \emph{balance ratio} equals the maximum per-GPU attention FLOPs / mean FLOPs. As shown in Figure~\ref{fig:ulysses}, when using Ulysses-SP, increasing the SP degree can also achieve load balance. However, the throughput gain of Ulysses-SP is limited due to the all2all communication dominating overhead. In contrast, FlexUlysses succeeds to reaches a balance ratio of 1.0 while improving throughput by 1.50$\times$. Figure~\ref{fig:ulysses} further breaks down the per-stage step time. The results show that our method achieves the highest speedup across all stages, demonstrating the effectiveness of our fine-grained sharding strategy in improving load balance and reducing communication overhead.
+
+
+% \begin{table}[t]
+%     \centering
+%     \caption{Benchmark on SP degree. RL training update actor time, throughput, and average balance ratio of different methods on different hardware.}
+%     \label{tab:comm_overhead}
+%     \resizebox{0.9\textwidth}{!}{%
+%     \begin{tabular}{lcccccc}
+%     \toprule
+%     \textbf{Method} & \multicolumn{2}{c}{\textbf{Update Actor (s)}} & \multicolumn{2}{c}{\textbf{Throughput (tokens/s/GPU)}} & \multicolumn{2}{c}{\textbf{Balance Ratio ($\to$1.0)}} \\
+%     \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7}
+%     & \textbf{H200} & \textbf{H800} & \textbf{H200} & \textbf{H800} & \textbf{H200} & \textbf{H800} \\ \midrule
+%     Ulysses-SP (SP=1) & 5.90 & 6.24 & 155 (1.00x) & 103 (1.00x) & 6.70 & 6.70 \\
+%     Ulysses-SP (SP=2) & 4.43 & 5.13 & 162 (1.05x) & 123 (1.19x) & 3.82 & 3.82 \\
+%     Ulysses-SP (SP=4) & 4.33 & 4.41 & 173 (1.12x) & 153 (1.49x) & 1.12 & 1.12 \\
+%     Ulysses-SP (SP=8) & 5.81 & 5.81 & 175 (1.13x) & 141 (1.37x) & 1.00 & 1.00 \\
+%     \textbf{FlexUlysses} & \textbf{3.52 (1.68x)} & \textbf{3.90 (1.60x)} & \textbf{232 (1.50x)} & \textbf{172 (1.67x)} & \textbf{1.00} & \textbf{1.00} \\ \bottomrule
+%     \end{tabular}}
+% \end{table}
+
+
+
+
+% In summary, FlexRL maintains high throughput across a wide sequence length range distribution, effectively handling the load imbalance challenges of VLM RL training.
+
+\subsection{Ablation Study.} 
+
+We separately evaluate the contributions of ShadowLoader and FlexUlysses under the image-heavy setting using the 7B model. Figure~\ref{fig:flexrl_ablation} reports both the throughput breakdown and the iteration time breakdown. Figure~\ref{fig:flexrl_ablation_throughput} shows that ShadowLoader primarily removes the data bottleneck, improving data-loading throughput by 84.09$\times$ and end-to-end throughput by 4.68$\times$. Figure~\ref{fig:flexrl_ablation_time} further confirms that this translates into a 5.35$\times$ reduction in overall step time by largely eliminating the data-loading slice. In contrast, FlexUlysses mainly improves compute-heavy stages (e.g., 2.01$\times$ rollout and 1.28$\times$ training throughput) but yields limited end-to-end gains (1.17$\times$) when data loading remains dominant. Without ShadowLoader, the single controller has to send the data to all workers, incurring high data transfer latency. Combining both components yields complementary benefits: after ShadowLoader makes the workload compute-bound, FlexUlysses' fine-grained sharding translates into large gains in inference (11.83$\times$) and training (6.47$\times$), reaching 117.42$\times$ data-loading throughput, 7.67$\times$ end-to-end throughput, and a 7.68$\times$ reduction in step time. The detailed per-stage runtimes and throughput are shown in Table~\ref{tab:ablation}. %We detail per-stage runtimes and step time to Appendix Table~\ref{tab:ablation}.
+
+% \subsection{Comparison against LongRL}
+
+% We compare FlexRL to LongRL on 128 H800 GPUs (16$\times$8) with MiMo-VL-7B-RL under the same GRPO configuration (Table~\ref{tab:longrl}). We train on the image-heavy setting with global batch size 512 ($\sim$2M tokens), max frames 256. LongRL uses MMSP(size=8)+FSDP, while FlexRL uses FlexUlysses with sharding degrees 1--4. FlexRL achieves a 5.32$\times$ overall speedup by eliminating I/O bottlenecks via ShadowLoader and better balancing compute load via FlexUlysses compared to LongRL's MMSP strategy.
+% \begin{table}[h]
+%     \centering
+%     \caption{Comparison with LongRL baseline under the same GRPO configuration.}
+%     \label{tab:longrl}
+%     \resizebox{0.7\textwidth}{!}{%
+%     \begin{tabular}{lcc}
+%     \toprule
+%     Metric & LongRL & FlexRL \\ \midrule
+%     Data Loading Latency (s) & 356.7 (1.00x) & 3.2 (117.19x) \\
+%     Update actor runtime (s) & 18.1 (1.00x) & 9.5 (1.91x) \\
+%     Ref log prob runtime (s) & 4.6 (1.00x) & 3.7 (1.24x) \\
+%     Old log prob runtime (s) & 23.7 (1.00x) & 4.9 (4.84x) \\
+%     Overall Throughput (tokens/s/GPU) & 33.5 (1.00x) & 178.0 (5.32x) \\ \bottomrule
+%     \end{tabular}} 
+% \end{table}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/comm_overhead_h200_detailed_v4.pdf}
+    \caption{Comparison with Ulysses-SP. Per-stage normalized step time with the speedup (Left). End-to-end throughput (Middle). Balance ratio calculated using the attention flops (Right).}
+    \label{fig:ulysses}
+\end{figure}
+
+\begin{table}[h]
+    \centering
+    \caption{Detailed step time breakdown of ablation study of FlexRL components on 128 H800 GPUs with MiMo-VL-7B-RL.}
+    \label{tab:ablation}
+    \resizebox{0.98\textwidth}{!}{%
+    \begin{tabular}{lcccccc}
+    \toprule
+    Method & Update Actor (s) & RefLogProb (s) & OldLogProb (s) & Data Loading (s) & Generation (s) & Step Time (s) \\ \midrule
+    veRL & 61.3 (1.00x) & 51.3 (1.00x) & 50.2 (1.00x) & 375.0 (1.00x) & 118.4 (1.00x) & 656.2 (1.00x) \\
+    + ShadowLoader & 24.3 (2.52x) & 5.0 (10.26x) & 25.3 (1.99x) & 3.9 (96.15x) & 64.1 (1.85x) & 122.6 (5.35x) \\
+    + FlexUlysses & 47.8 (1.28x) & 50.1 (1.02x) & 27.8 (1.81x) & 375.0 (1.00x) & 58.9 (2.01x) & 559.6 (1.17x) \\
+    \textbf{FlexRL (Both)} & \textbf{9.5 (6.45x)} & \textbf{3.7 (13.86x)} & \textbf{4.9 (10.24x)} & \textbf{3.2 (117.19x)} & \textbf{64.4 (1.84x)} & \textbf{85.7 (7.66x)} \\ \bottomrule
+    \end{tabular}}
+\end{table}
+
+% \textcolor{blue}{
+% \noindent\textbf{Accuracy Verification.} We verify FlexRL's convergence by training MiMo-VL-7B-RL on GRPO+NExTQA. Our training curves show that FlexRL maintains identical convergence as the veRL baseline while achieving 7.66$\times$ speedup. Detailed figures are in Appendix~\ref{appendix:hyperparameters}.
+% }
+
+% \subsection{Performance Breakdown}
+
+% We conduct a detailed performance breakdown to understand the impact of each optimization component in \SysName. We select the 7B model on the short video dataset for performance breakdown. We compare the following methods:
+
+% \begin{itemize}
+%     \item \textbf{Baseline (veRL)}: The original veRL system without our optimizations.
+%     \item \textbf{+FlexUlysses}: veRL with our FlexUlysses applied to the LLM backbone during both Rollout and Update phases.
+%     \item \textbf{+Vision Balancing}: veRL with balanced distribution of images/frames across GPUs for the vision tower.
+%     \item \textbf{+ShadowLoader}: veRL with our ShadowLoader for the Data Preparation phase.
+%     \item \textbf{\SysName (All Optimizations)}: veRL with all of our proposed optimizations integrated.
+% \end{itemize}
+
+% We further conduct experiments to show how our methods balance the workload. For 7B model with \textit{short videos}, we record the theoretical computation of the attention components of all sequences in each training step. Then, we calculate the balance ratio of each GPU by dividing the total computation of all sequences in the GPU by the average value of all GPUs. The result is shown in Figure~\ref{fig:balance_ratio}. Our result demonstrates that our method achieves good load balance through the training steps, while the bucketing algorithm leads to at most 7.5$\times$ imbalance.
+
+% \noindent\textbf{Communication overhead.}~We provide a detailed analysis of SeqAlltoAll overhead and its end-to-end trade-offs in Appendix~\ref{appendix:comm_overhead}.
+
+% \noindent\textbf{Eliminate Data .}~We further conduct experiments to show how our methods balance the workload. For 7B model with \textit{short videos}, we record the theoretical computation of the attention components of all sequences in each training step. Then, we calculate the balance ratio of each GPU by dividing the total computation of all sequences in the GPU by the average value of all GPUs. The result is shown in Figure~\ref{fig:balance_ratio}. Our result demonstrates that our method achieves good load balance through the training steps, while the bucketing algorithm leads to at most 7.5$\times$ imbalance.
+
+% \begin{figure}
+%     \centering
+%     \includegraphics[width=0.6\textwidth,trim={0 0 410 0},clip]{figures/balance_ratio.pdf}
+%     \caption{Balance ratio of the attention computation across GPUs (1.0 is perfect balance). FlexUlysses maintains near-uniform per-step attention workload, while length-based bucketing exhibits severe imbalance.}
+%     \label{fig:balance_ratio}
+% \end{figure}

@@ -1,0 +1,552 @@
+\subsection{The Challenge of MoE Parallelism}\label{sec:moe-parallelism-challenge}
+
+Traditional parallelism strategies were designed for dense Transformers. MoE models have fundamentally different computation patterns that require a new parallelism dimension, Expert Parallelism (EP), and create unique challenges when combining EP with existing strategies.
+
+\subsubsection{The Parallelism Paradox of MoE}\label{sec:parallelism-paradox}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/llm_comparison.png}
+    \caption{Dense Model vs MoE Model parameter/compute scaling.}
+    \label{fig:parallelism-paradox}
+\end{figure}
+
+\Figref{fig:parallelism-paradox} illustrates this paradox by plotting total parameters against \emph{forward} FLOPs per token for major LLMs. Dense models (circles) follow the $\approx$2N reference line, exhibiting a \emph{virtuous cycle} as they scale: increasing parameters requires more GPUs for memory, but more parameters also means more computation per token. Because computation grows with model size, communication takes a smaller share of each step, keeping MFU stable.
+
+MoE models (triangles) break this cycle. They fall significantly below the 2N line, achieving equivalent capability with far fewer FLOPs per token. Consider the fundamental asymmetry:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Total Params} & \textbf{Active Params} & \textbf{Ratio} \\
+\midrule
+Llama-70B (Dense) & 70B & 70B & 1:1 \\
+DeepSeek-V3 (MoE) & 685B & 37B & \textbf{18:1} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+{\footnotesize \textbf{Note:} DeepSeek-V3 comprises 671B Main Model weights and 14B Multi-Token Prediction (MTP) Module weights (685B total). The table shows the total model parameters including MTP.}
+
+DeepSeek-V3 has 18$\times$ more parameters than its active computation suggests, visible in \Figref{fig:parallelism-paradox} as the gap between DeepSeek-V3's position and where a dense model of equivalent parameters would lie. This creates a \emph{compounding effect}:
+
+\begin{enumerate}
+    \item \textbf{Memory grows fast}, forcing distribution across many GPUs: All $E$ experts' parameters, gradients, and optimizer states must reside in memory, and larger top-$k$ further increases activation memory through token replication.
+    \item \textbf{More communication}: Distributing experts via EP introduces all-to-all traffic whose volume scales with $K$ (each token is dispatched to $K$ experts across EP ranks).
+    \item \textbf{But compute stays low}: Per-token FLOPs scale only with $N_{\text{active}}$ ($\propto K$), not $N_{\text{total}}$ ($\propto E$), leaving insufficient computation to overlap with the growing communication.
+\end{enumerate}
+
+The consequence: \textbf{MoE training is fundamentally communication-bound} unless parallelism is designed specifically for this asymmetry. This is not a matter of degree; it is a \emph{qualitative difference} from dense models.
+
+\subsubsection{Traditional Parallelism Strategies}\label{sec:traditional-parallelism}
+
+Dense Transformer training typically combines four parallelism strategies:
+
+\textbf{Tensor Parallelism (TP)} shards weight matrices across GPUs along the hidden dimension \cite{shoeybi2020megatronlmtrainingmultibillionparameter}. Each GPU computes a partial result, then AllGather or ReduceScatter collectives combine results. TP works well when matrices are large enough to offset communication overhead.
+
+\textbf{Pipeline Parallelism (PP)} splits the model by layers across GPUs \cite{huang2019gpipe,narayanan2019pipedream,shoeybi2020megatronlmtrainingmultibillionparameter,qi2023zerobubblepipelineparallelism,qi2024pipelineparallelismcontrollablememory,zhang2022chimera,guan2025pipeoptimensuringeffective1f1b}. Micro-batches flow through the pipeline, with point-to-point communication between stages. PP introduces pipeline bubbles (idle time at boundaries) and P2P communication overhead, but scales better across nodes than TP.
+
+\textbf{Data Parallelism (DP)} replicates the model across GPUs, with each GPU processing different data batches \cite{shallue2019measuringeffectsdataparallelism,bai2022moderndistributeddataparallellargescale}. Gradients are synchronized via AllReduce. DP is simple but requires each GPU to hold the full model.
+
+\textbf{Context Parallelism (CP)} \cite{korthikanti2023sequence,liu2023ringattention,jacobs2023deepspeedulysses} partitions the input sequence across GPUs along the sequence dimension. Each GPU processes a contiguous chunk of the sequence, with communication required only for attention computation where tokens must attend across chunk boundaries. CP is essential for long-context training where activation memory scales quadratically with sequence length.
+
+\textbf{Why traditional parallelism fails for MoE:}
+
+\begin{itemize}
+    \item \textbf{TP on MoE experts}: Expert hidden dimensions are small; applying TP creates even smaller shards, reducing compute efficiency while increasing communication's share of total time. High TP can distribute attention efficiently but \emph{hurts} MoE.
+    \item \textbf{PP with many experts}: MoE models have massive parameter counts, requiring many pipeline stages if using PP alone. This creates excessive pipeline bubbles and reduces throughput.
+    \item \textbf{DP alone}: DP replicates the full model on each GPU. For a trillion parameter model, this is impossible because DP cannot partition parameters, only data.
+\end{itemize}
+
+\subsubsection{Expert Parallelism: The Fifth Dimension}\label{sec:expert-parallelism}
+
+Traditional parallelism partitions \emph{layers} (PP), \emph{weight matrices} (TP), \emph{sequence} (CP), or \emph{data} (DP). But MoE has a unique structure: \textbf{experts are independent sub-networks}. This enables a fifth parallelism dimension that partitions \emph{experts themselves} across GPUs.
+
+\textbf{Expert Parallelism (EP)} distributes experts across GPUs \cite{lepikhin2020gshard}. With EP degree equal to $E$, each GPU holds $E/\text{EP}$ experts. The forward pass proceeds as:
+
+\begin{enumerate}
+    \item \textbf{Route}: The router selects top-$k$ experts for each token.
+    \item \textbf{Dispatch}: all-to-all communication sends tokens to the GPUs holding their assigned experts.
+    \item \textbf{Compute}: Each GPU processes tokens using only its local experts.
+    \item \textbf{Combine}: all-to-all communication returns results to original GPUs.
+\end{enumerate}
+
+\textbf{EP's unique trade-off}:
+\begin{itemize}
+    \item \textbf{Communication}: all-to-all collectives. Volume scales with token count, not expert count.
+    \item \textbf{Compute}: Each GPU runs fewer experts, but each expert processes its \emph{full} hidden dimension.
+    \item \textbf{Memory}: Higher EP = fewer experts per GPU = lower memory pressure.
+\end{itemize}
+
+EP provides two key benefits (\figref{fig:expert-parallelism-overview}). First, grouping tokens from different GPUs to a single expert increases computation intensity, improving GEMM efficiency. Second, all-to-all communication volume remains constant as expert count increases; only the number of GPUs changes.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/plots/expert_parallelism_overview_draft.png}
+    \caption{Expert Parallelism (EP) distributes experts across GPUs. The all-to-all communication dispatches tokens to their assigned experts and combines results.}
+    \label{fig:expert-parallelism-overview}
+\end{figure}
+
+\textbf{But EP alone is not enough.} EP applies only to MoE layers; attention layers have no experts and still require TP, CP, or other strategies. Moreover, both layer types need Pipeline Parallelism to further partition model parameters for large-scale MoE training. This heterogeneity creates the dense-sparse mismatch discussed next.
+
+\subsubsection{The Challenges of Combining EP with Traditional Parallelism}\label{sec:combining-parallelism}
+
+A single Transformer block contains \textbf{two fundamentally different computation patterns} \cite{Singh_2023}, summarized in Table~\ref{tab:dense-sparse-comparison}:
+
+\begin{table}[ht]
+\centering
+\caption{Contrasting parallelism requirements of attention and MoE layers within a single Transformer block.}
+\label{tab:dense-sparse-comparison}
+\begin{tabular}{lp{0.4\textwidth}p{0.4\textwidth}}
+\toprule
+\textbf{Aspect} & \textbf{Attention (Dense)} & \textbf{MoE (Sparse)} \\
+\midrule
+Computation & Every token attends to all others & Each token routes to $K$ of $E$ experts \\
+TP & Large QKV matrices benefit from high TP & Small per-expert dimensions make high TP counterproductive \\
+CP & Long sequences benefit from high CP & No sequence dependency; CP is irrelevant \\
+EP & Not applicable (no experts) & Essential for distributing many experts \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{The Dense-Sparse Mismatch.} Traditional frameworks force \emph{one} parallelism configuration for \emph{both} layer types, but their optimal configurations conflict directly: high TP benefits attention but fragments expert shards; high CP helps long-context attention but provides no benefit to MoE layers; and high EP is essential for MoE but irrelevant to attention. Like the parameter-compute mismatch (Section~\ref{sec:challenges}), this stems from MoE's sparsity, but manifests at the parallelism configuration level: it is a \textbf{structural mismatch} between dense and sparse layers' needs, not a tuning problem.
+
+Prior MoE frameworks treat EP as a sub-dimension of DP \cite{lepikhin2020gshard,fedus2022switchtransformersscalingtrillion}:
+\[
+\text{World Size} = \text{TP} \times \text{CP} \times \text{PP} \times \text{DP}, \quad \text{where } \text{EP} \subseteq \text{DP}
+\]
+
+This constraint exists because frameworks assumed uniform parallelism: attention layers use (TP, CP, PP, DP), and MoE layers simply carve EP out of the DP group. This design creates three critical challenges:
+
+\textbf{Challenge 1: Multiplicative GPU Requirements.} Traditional frameworks require $\text{TP} \times \text{CP} \times \text{PP} \times \text{DP}$ GPUs at minimum. Since EP $\subseteq$ DP, requesting EP=8 forces DP $\geq$ 8. Combined with CP=8 for long sequences, the minimum becomes $1 \times 8 \times 1 \times 8 = 64$ GPUs---even if attention and MoE could theoretically share the same 8 GPUs. This inflates the entry barrier for MoE training.
+
+\textbf{Challenge 2: Forced Suboptimal Parallelism.} Since attention and MoE share the same TP configuration, practitioners must choose between two suboptimal configurations: use high TP (e.g., TP=8) to efficiently shard large attention matrices, which fragments small experts into inefficient shards; or use low TP (e.g., TP=1) to preserve expert computation efficiency, which leaves attention layers underparallelized. Neither option achieves optimal performance for both layer types.
+
+\textbf{Challenge 3: Cross-Node Communication.} With EP constrained within DP, high EP often forces all-to-all communication to cross node boundaries, where bandwidth is 5--10$\times$ lower than NVLink. Meanwhile, CP communication for attention may also span nodes. Without the ability to independently map EP and CP to high-bandwidth domains, communication overhead dominates training time.
+
+These challenges are not independent tuning problems. They stem from the fundamental assumption that all layers must share one parallelism configuration. \textbf{The question becomes}: How do we break these constraints while still allowing each layer type to use its optimal parallelism?
+
+%==============================================================================
+% 3.3 Megatron-Core's Solution: Parallel Folding
+%==============================================================================
+\subsection{Megatron-Core's Solution: Parallel Folding and Multi-Dimensional Framework}\label{sec:parallel-folding}
+
+\textbf{Parallel Folding} is Megatron-Core's answer to the dense-sparse mismatch. Rather than forcing attention and MoE layers to share the same parallelism configuration, Parallel Folding \textbf{decouples their parallelism mappings}, allowing each layer type to use its optimal topology \cite{liu2025moeparallelfoldingheterogeneous}. This section covers the key concepts and benefits; implementation details such as parallelism transition handling and token dispatch design are described in the companion paper \cite{liu2025moeparallelfoldingheterogeneous}.
+
+\subsubsection{Decoupled Parallelism Mappings}
+
+The core idea is simple: \emph{do not force attention and MoE to share parallelism}. Let each use its optimal configuration independently.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{moe-plots/Parallel-Folding-Paper/MoE_Parallel_Folding-mapping-switch.excalidraw.png}
+    \caption{Parallelism mappings: traditional constraints vs. MoE Parallel Folding decoupling.}
+    \label{fig:moe-parallel-folding}
+\end{figure}
+
+Parallel Folding introduces separate parallelism groups for attention and MoE layers:
+
+\begin{itemize}
+    \item \textbf{Attention layers} form groups over $\text{TP} \times \text{CP} \times \text{DP} \times \text{PP}$, optimized for sequence-level dense computation.
+    \item \textbf{MoE layers} form groups over $\text{ETP} \times \text{EP} \times \text{EDP} \times \text{PP}$, where ETP (Expert Tensor Parallelism) and EDP (Expert Data Parallelism) are MoE-specific dimensions.
+\end{itemize}
+
+The sole constraint: \textbf{Pipeline Parallelism (PP) must remain consistent} across both layouts to ensure correct gradient flow through the model.
+\subsubsection{Complete Multi-Dimensional Parallelism Stack}\label{sec:multi-dim-parallelism}
+
+With Parallel Folding as the foundation, Megatron-Core orchestrates five parallelism dimensions:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Dimension} & \textbf{Applies To} & \textbf{Purpose} \\
+\midrule
+TP (Tensor) & Attention & Shard large QKV/projection matrices \\
+CP (Context) & Attention & Distribute long sequences \\
+DP (Data) & Attention & Process different batches \\
+PP (Pipeline) & Both & Split model by layers (must be consistent) \\
+\midrule
+EP (Expert) & MoE & Distribute experts across GPUs \\
+ETP (Expert Tensor) & MoE & Shard within experts (rarely used) \\
+EDP (Expert Data) & MoE & Replicate experts for throughput \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key configuration principles}:
+\begin{itemize}
+    \item \textbf{Attention layers}: Optimize for large matrices (high TP) and long sequences (high CP).
+    \item \textbf{MoE layers}: Optimize for many small experts (high EP, typically ETP=1).
+    \item \textbf{PP}: Must remain consistent across both to ensure correct data flow.
+\end{itemize}
+
+Beyond the parallelism strategies described above (\figref{fig:parallel-folding-detailed}), Megatron-Core's Parallel Folding framework also integrates Distributed Optimizer and FSDP with EP support to further reduce memory footprint:
+
+\textbf{Distributed Optimizer + EP.} Only weights and gradients for local experts reside on each rank; optimizer states are sharded among replicas of the same expert (via EDP). This removes redundant optimizer memory for non-local experts and confines gradient synchronization to minimal groups.
+
+\textbf{FSDP + EP.} For even greater memory efficiency, Megatron-Core's custom FSDP (Megatron-FSDP) fully shards parameters, gradients, and optimizer states across data/expert groups via a dual DeviceMesh architecture, reducing memory footprint while overlapping AllGather and ReduceScatter with computation. It is compatible with TP/EP/CP and mixed precision (BF16, FP8, FP4). See \secref{sec:fsdp-ref} for the full design.
+
+\subsubsection{Benefits of Parallel Folding}
+
+As illustrated in \figref{fig:moe-parallel-folding}, MoE Parallel Folding eliminates the EP $\leq$ DP limitation by allowing EP to ``fold'' across arbitrary sub-groups of the attention parallelism configuration. This provides four key advantages:
+
+\begin{enumerate}
+    \item \textbf{Breaks the EP $\leq$ DP constraint}: EP can now exceed DP by folding across TP$\times$CP groups. Consider attention configured with TP=4, CP=2, DP=8, PP=4 (total 256 GPUs):
+    \begin{itemize}
+        \item Traditional: EP $\leq$ DP = 8, so maximum EP is 8.
+        \item With Parallel Folding: MoE uses ETP=1, EP=64, EDP=1 (same PP=4). EP ``folds'' across the TP$\times$CP$\times$DP groups, enabling 8$\times$ higher expert parallelism while attention layers maintain their optimal TP=4, CP=2 configuration.
+    \end{itemize}
+    
+    \item \textbf{Reduces minimum GPU requirements}: Traditional configurations with CP=8, EP=8 require at least 64 GPUs. With Folding, CP and EP share the same GPU group, requiring only 8 GPUs.
+    
+    \item \textbf{Enables independent optimization}: Attention can use high TP for large matrices while MoE uses ETP=1 for full expert width and better GEMM efficiency.
+    
+    \item \textbf{Keeps high-bandwidth communication in NVLink domain}: Both CP (for attention) and EP (for MoE) all-to-all communication can remain within the NVLink-connected GPU group, avoiding slower cross-node transfers.
+\end{enumerate}
+
+% fix typo
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/plots/parallel_folding_detailed_draft.png}
+    \caption{Parallel Folding: decoupled attention and MoE parallelism mappings.}
+    \label{fig:parallel-folding-detailed}
+\end{figure}
+
+\subsubsection{Summary}
+
+This section addressed the \emph{distribution challenge} for MoE training. The core problem is the \emph{dense-sparse mismatch}, rooted in MoE's sparsity: attention and MoE layers have conflicting optimal parallelism configurations, yet prior frameworks forced them to share one configuration. \textbf{MoE Parallel Folding} solves this by decoupling parallelism mappings, allowing attention to use high TP/CP while MoE uses high EP independently. Together with Distributed Optimizer and FSDP, Megatron-Core orchestrates all parallelism dimensions into a unified framework that scales MoE training to thousands of GPUs.
+
+However, scalable distribution alone does not guarantee training efficiency. The three fundamental barriers identified in Section~\ref{sec:challenges}, the Memory, Communication, and Compute Efficiency Walls, must still be addressed. The following section presents Megatron-Core's solutions to break through these walls.
+
+\section{Scaling MoE: Breaking the Memory, Communication, and Compute Efficiency Walls}\label{key-features-optimizations}
+
+Section~\ref{parallelism-strategies} established \emph{how} to distribute MoE training across thousands of GPUs. This section addresses \emph{how to make it efficient}. The challenges are significant: Section~\ref{sec:challenges} identified three fundamental barriers (the Memory Wall, Communication Wall, and Compute Efficiency Wall) that emerge from MoE's sparsity-driven parameter-compute mismatch. These walls are not merely inconveniences; without addressing them, training large-scale MoE models is either infeasible (memory) or prohibitively slow (communication, compute).
+
+\textbf{Why These Three Walls?} These barriers emerge from the fundamental resources of GPU-accelerated training: memory stores parameters and activations, interconnects transfer data between devices, and compute units execute operations. Every training system must acquire sufficient memory, move data where it is needed, and perform computations efficiently. Other potential bottlenecks, such as storage I/O for checkpointing or host-side data loading, exist but operate at timescales that allow them to be overlapped with training iterations. The three walls represent the hard constraints on every forward-backward pass.
+
+\textbf{The Walls Interact.} These challenges are not independent; they form a tightly coupled system where fixing one wall can expose or worsen another. Consider a concrete optimization trajectory: A team training a 1000B MoE model first encounters the memory wall: activations alone exceed GPU capacity. They enable activation recomputation (Section~\ref{sec:memory-wall}), trading memory for computation by regenerating activations during the backward pass. Memory constraints resolved, profiling reveals that all-to-all communication now dominates; the compute wall was hiding the communication wall. They implement communication-computation overlap (Section~\ref{sec:comm-wall}), pipelining all-to-all transfers with expert execution. But fine-grained experts complete faster than communication, limiting overlap effectiveness. They enable reduced-precision training (Section~\ref{sec:reduced-precision-training}) to reduce memory footprint, allowing larger batch sizes that provide more computation to hide communication. This works, but introduces quantization kernels that fragment the execution stream and increase kernel launch overhead. The system becomes host-bound: GPUs idle between kernel launches. They deploy CUDA Graphs (Section~\ref{sec:compute-wall}) to reduce launch overhead, but graphs require static tensor shapes, conflicting with dropless routing's dynamic expert assignments. Each solution ripples through the system, demanding awareness of all three walls simultaneously. Addressing walls in isolation leads to suboptimal solutions; effective optimization requires treating memory, communication, and compute as a unified system.
+
+Megatron-Core addresses these challenges through integrated system design. The remainder of this section presents solutions organized by the wall they primarily address:
+\begin{itemize}
+    \item \textbf{Section~\ref{sec:memory-wall}: Breaking the Memory Wall.} How do we fit training within GPU memory constraints? This section covers activation management, recomputation strategies, offloading, and distributed parameter storage.
+    \item \textbf{Section~\ref{sec:comm-wall}: Breaking the Communication Wall.} How do we minimize time lost to inter-device communication? This section covers optimized dispatchers, communication-computation overlap, and pipeline integration.
+    \item \textbf{Section~\ref{sec:compute-wall}: Breaking the Compute Efficiency Wall.} How do we keep GPUs saturated with work? This section covers kernel fusion, CUDA Graphs, and sync-free execution for dropless MoE.
+\end{itemize}
+
+Reduced-precision training in FP8/FP4, which provides benefits across all three walls simultaneously, is covered separately in Section~\ref{sec:reduced-precision-training}. Long-context MoE training, which changes the optimization balance when attention dominates computation, is addressed in Section~\ref{sec:long-context-training}.
+
+\subsection{Breaking the Memory Wall}\label{sec:memory-wall}
+
+Memory is the first hard constraint in MoE training: if the combined footprint of parameters, optimizer states, and activations exceeds GPU capacity, training cannot proceed. As model and expert counts grow, memory requirements grow quickly, making memory optimization essential for practical training. Understanding \emph{where} memory is consumed is essential for effective optimization.
+
+\subsubsection{Memory Anatomy: Sources of Memory Consumption}
+
+MoE models typically consume substantially more memory than equivalent dense models, owing to several distinct sources of overhead. Consider DeepSeek-V3 trained with BF16 precision using a $\text{PP}4 \times \text{VPP}4 \times \text{EP}64$ configuration across 256 GPUs. Table~\ref{tab:memory-breakdown} presents the per-GPU memory breakdown, revealing a total requirement of 199.5 GB, well beyond the 80 GB capacity of an H100 GPU without optimization.
+
+\begin{table}[ht]
+\centering
+\caption{Memory breakdown per GPU for DeepSeek-V3 with BF16 training ($\text{PP}4 \times \text{VPP}4 \times \text{EP}64$, 256 GPUs).}
+\label{tab:memory-breakdown}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Component} & \textbf{Memory per GPU} & \textbf{Optimization Techniques} \\
+\midrule
+Weights \& Gradients & 36.4 GB & PP, EP, or TP sharding \\
+Main Weights \& Optimizer States & 32.1 GB & Distributed optimizer, BF16 moments \\
+Activations & 131.0 GB & Low Precision, Recomputation, Offloading \\
+\midrule
+\textbf{Total} & \textbf{199.5 GB} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three components contribute to this footprint:
+
+\textbf{Weights and Gradients (36.4 GB).} All $E$ expert parameters must stay in memory even though only $K$ activate per token. DeepSeek-V3's 256 experts with top-8 routing illustrate this: 685B parameters but only 37B activated per token, an 18$\times$ gap.
+
+\textbf{Optimizer States (32.1 GB).} Adam stores momentum and variance per parameter, tripling parameter memory in FP32. Mixed-precision training with BF16 moments reduces this overhead but does not eliminate it.
+
+\textbf{Activations (131.0 GB).} The largest memory consumer, exceeding weights and optimizer states combined. MoE activations scale with layer depth, hidden dimension, and top-$k$, as well as batch size and sequence length. This makes activations the primary optimization target.
+
+\begin{notebox}
+Activations dominate memory consumption in large-scale MoE training, often exceeding the combined memory of weights, gradients, and optimizer states. This makes activation memory optimization the highest priority for enabling larger batch sizes or more flexible parallelism configurations.
+\end{notebox}
+
+Additional MoE-specific factors add to memory pressure: dynamic routing can create load imbalance where certain experts temporarily receive too many tokens, and tokens must often be padded to fit efficient computation kernels, consuming memory beyond the actual data. These are activation memory costs that can be reduced through the recomputation techniques discussed below. Load imbalance is further addressed by ECHO (Section~\ref{sec:echo}), which dynamically clones popular experts to balance token distribution across ranks.
+
+Model architecture cannot be changed to reduce memory, so optimization must target how data is stored and managed. Four complementary strategies address memory constraints:
+
+\begin{enumerate}
+    \item \textbf{Reduce storage precision.} Lower-precision formats (FP8/FP4 instead of BF16) reduce activation memory with minimal impact on accuracy. Memory-Efficient Permutation eliminates redundant intermediate tensors entirely.
+    \item \textbf{Trade computation for storage.} Activation recomputation \cite{chen2016training,korthikanti2022reducingactivationrecomputationlarge,beaumont2021optimal} discards intermediate results during the forward pass and regenerates them during backward, exchanging compute cycles for memory capacity.
+    \item \textbf{Offload to host memory.} When GPU memory is exhausted, activations can be transferred to CPU memory during forward pass and retrieved during backward, trading PCIe bandwidth for GPU memory \cite{ren2021zerooffload}.
+    \item \textbf{Distribute across devices.} Fully Sharded Data Parallel (FSDP) \cite{zhao2023pytorchfsdp,rajbhandari2020zero,rajbhandari2021zeroinf,rajbhandari2023zeropp} partitions parameters, gradients, and optimizer states across data-parallel ranks, enabling training of models that exceed single-device capacity. 
+\end{enumerate}
+
+The following subsections present these techniques in two groups. First, activation memory optimizations ordered by overhead: zero-overhead (Memory-Efficient Permutation), precision trade-offs (FP8/FP4 vs. BF16), computational trade-offs (recomputation), and bandwidth trade-offs (offloading). Then, optimizations targeting weights and optimizer states: precision-aware optimizer and distribution strategies (FSDP).
+
+\subsubsection{Memory-Efficient Permutation: Zero-Overhead Activation Reduction}\label{sec:mem-eff-permute}
+
+The most desirable memory optimizations are those with no computational overhead. Memory-Efficient Permutation achieves exactly this by eliminating redundant intermediate tensors through a simple algebraic rearrangement. The technique is zero-overhead because it merely changes \emph{when} router probabilities are applied, not \emph{whether} they are applied; the pre-activation buffers required for the backward pass would be stored anyway in conventional implementations.
+
+As described in Section~\ref{sec:moe-layer-architecture}, the router assigns each token to its top-$k$ experts with a learned routing weight, and the weighted expert outputs are combined to produce the final result.
+
+Consider a token $\mathbf{x}$ routed to its top-$k$ experts. Let $\mathcal{T}(\mathbf{x}) \subset \{1,\dots,E\}$ denote the selected expert set with routing weights $\{p_i\}_{i \in \mathcal{T}(\mathbf{x})}$. Each expert $E_i$ is a two-layer MLP with weight matrices $\mathbf{W}_1^{(i)}, \mathbf{W}_2^{(i)}$ and nonlinear activation $\phi$ (e.g., SwiGLU):
+\[
+E_i(\mathbf{x}) = \mathbf{W}_2^{(i)}\,\phi\!\bigl(\mathbf{W}_1^{(i)}\mathbf{x}\bigr).
+\]
+In the \textbf{standard formulation}, routing weights are applied \emph{after} expert computation:
+\begin{equation}\label{eq:moe-standard-combine}
+\mathbf{y} = \sum_{i \in \mathcal{T}(\mathbf{x})} p_i \cdot \mathbf{W}_2^{(i)}\,\phi\!\bigl(\mathbf{W}_1^{(i)}\mathbf{x}\bigr).
+\end{equation}
+\textbf{Memory-Efficient Permutation} absorbs $p_i$ into the activation, applying it \emph{before} the second linear layer:
+\begin{equation}\label{eq:moe-mem-eff-combine}
+\mathbf{y} = \sum_{i \in \mathcal{T}(\mathbf{x})} \mathbf{W}_2^{(i)}\,\bigl(p_i \cdot \phi\!\bigl(\mathbf{W}_1^{(i)}\mathbf{x}\bigr)\bigr).
+\end{equation}
+When the experts have no bias terms, $\mathbf{W}_2^{(i)}$ is a pure linear map and scalar multiplication commutes: $p_i \cdot \mathbf{W}_2^{(i)}\mathbf{h} = \mathbf{W}_2^{(i)}(p_i \cdot \mathbf{h})$ for any vector $\mathbf{h}$, so \eqref{eq:moe-standard-combine} and \eqref{eq:moe-mem-eff-combine} are mathematically equivalent.
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.6\linewidth]{figures/memory_efficient_permutation.png}
+        \caption{Memory-Efficient Permutation.}
+    \label{fig:mem-eff-permute}
+\end{figure}
+
+This rearrangement reduces peak memory by eliminating saved tensors needed for the router's backward pass. Let $\mathbf{z}_i = \mathbf{W}_1^{(i)}\mathbf{x}$ denote the pre-activation input. In the standard formulation, computing $\partial \mathcal{L}/\partial p_i$ requires retaining each expert output $E_i(\mathbf{x})$ throughout the backward pass. In the memory-efficient formulation, $p_i$ multiplies $\phi(\mathbf{z}_i)$ directly, so $\partial \mathcal{L}/\partial p_i$ only depends on $\phi(\mathbf{z}_i)$, which a fused backward kernel recomputes from $\mathbf{z}_i$ on the fly. Since $\mathbf{z}_i$ must already be saved for the SwiGLU activation's own backward pass regardless of whether Memory-Efficient Permutation is used, no additional buffers are introduced, yielding a net reduction in peak memory with zero computational overhead. \Figref{fig:mem-eff-permute} illustrates this transformation.
+
+For DeepSeek-V3 (Table~\ref{tab:memory-breakdown}), Memory-Efficient Permutation saves approximately 26.3 GB of activation memory per GPU, a significant reduction with zero computational cost.
+
+\subsubsection{Reduced-Precision Training: FP8/FP4 for Activation Memory Reduction}\label{sec:fp8-activation}
+
+Storing activations in FP8/FP4 instead of BF16 reduces their memory footprint with minimal impact on model quality.
+
+During the forward pass, the input to each linear layer must be retained to compute weight gradients in the backward pass. In Transformer models, these linear layer inputs make up most of the activation memory: attention projections (Q, K, V, output) and MLP layers (including expert MLPs in MoE) each save their inputs for gradient computation. By storing these input tensors in FP8/FP4 instead of BF16, each tensor's memory footprint is reduced by 50\%/75\%.
+
+For the DeepSeek-V3 configuration in Table~\ref{tab:memory-breakdown}, enabling FP8 training reduces approximately 16 GB of activation memory, representing roughly 12\% of the 131 GB activation budget. This corresponds to halving approximately 32 GB of linear layer inputs that are eligible for FP8 storage. The remaining activations (attention scores, normalization intermediates, routing tensors) either require higher precision for numerical stability or are not stored across the forward-backward boundary. This reduction is orthogonal to other activation optimizations such as recomputation and offloading, allowing them to be combined for cumulative savings.
+
+\textit{For details on reduced-precision training mechanisms, including recipes, quantization strategies, and MoE-specific optimizations, see Section~\ref{sec:reduced-precision-training}.}
+
+\subsubsection{Recomputation: Trading Compute for Memory}\label{sec:recomputation}
+
+Activation recomputation (or activation checkpointing) is a well-established technique that discards intermediate activations during forward pass and recomputes them during backward pass \cite{chen2016training}. However, trivial full-layer recomputation can add $\sim$33\% computational overhead, and for MoE layers it is even more costly because recomputing expert computation also re-triggers EP all-to-all communication. Megatron-Core introduces \textit{fine-grained} recomputation that targets only the most memory-intensive yet computationally cheap operations, achieving significant memory savings with minimal overhead \cite{korthikanti2022reducingactivationrecomputationlarge}.
+
+Two techniques compose to form this strategy (\figref{fig:selective-recomputation}):
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.5\linewidth]{figures/selective-recomputation.png}
+        \caption{Selective Recomputation.}
+    \label{fig:selective-recomputation}
+\end{figure}
+
+\textbf{Granular recomputation.} Rather than applying activation checkpointing to large, monolithic sections, users specify exactly which computations to recompute in the backward pass. For instance, one may recompute only the activation functions within expert MLPs, the LayerNorm modules, or the up-projection within Multi-Latent Attention (MLA). By recomputing individual operations or submodules, significant memory savings are achievable with only a modest increase in computational workload, as only the selected portions require recalculation (less than 5\% additional compute overhead).
+
+\textbf{Output-discarding recomputation.} Conventional activation checkpointing workflows pass the outputs of checkpointed modules to downstream layers, storing these outputs for potential use in backpropagation. However, since these outputs will be recomputed during the backward pass, this storage is redundant. To avoid this, Megatron-Core MoE promptly releases the outputs of checkpointed modules after they are consumed by subsequent layers. During the backward pass, the outputs are restored from recomputed results. This strategy ensures that memory is not unnecessarily reserved for activations that can be cheaply restored, reducing memory footprint without compromising gradient correctness or training dynamics.
+
+Table~\ref{tab:recomputation-savings} summarizes the memory reduction achieved by different recomputation targets for the DeepSeek-V3 configuration in Table~\ref{tab:memory-breakdown}.
+
+\begin{table}[ht]
+\centering
+\caption{Memory reduction per GPU from fine-grained recomputation for DeepSeek-V3 ($\text{PP}4 \times \text{VPP}4 \times \text{EP}64$, 256 GPUs).}
+\label{tab:recomputation-savings}
+\begin{tabular}{lr}
+\toprule
+\textbf{Recomputation Target} & \textbf{Memory Saved per GPU} \\
+\midrule
+MLA Up-Projection & 30.4 GB \\
+Activation Function (SwiGLU) & 3.8 GB \\
+LayerNorm & 8.2 GB \\
+\midrule
+\textbf{Total} & \textbf{42.4 GB} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Fine-grained Activation Offloading}\label{sec:offloading}
+
+% \footnote{This is collaborative work between NVIDIA and Rednote.} the footnote has been removed
+When GPU memory remains insufficient even after precision and recomputation optimizations, \textit{offloading} activations to CPU memory provides additional capacity. Unlike recomputation which trades compute cycles for memory, offloading trades PCIe bandwidth instead. The challenge is hiding transfer latency behind computation so that offloading appears ``free''.
+
+\paragraph{Motivation}
+Fine-grained MoE models have extreme parameter inflation: DeepSeek-V3 activates only 37B per token (18$\times$ ratio, Table~\ref{tab:memory-breakdown}); Kimi-K2 reaches 1T total with 32B active (31$\times$). This parameter-compute mismatch (Section~\ref{sec:challenges}) is especially acute for offloading because activation memory does not decrease with Expert Parallelism (EP) or Pipeline Parallelism (PP); these strategies reduce parameter memory, not activation memory.
+
+Transformer Engine provides layer-level offloading, but this coarse granularity limits effectiveness. Different modules within a layer have significantly different memory-to-compute ratios: LayerNorm activations are small and cheap to recompute, while \texttt{expert\_fc1} inputs are large but computationally expensive. Layer-level offloading cannot distinguish these cases. It either offloads everything (wasting bandwidth) or nothing (wasting memory).
+
+\paragraph{High-Level Idea: Overlap and Prefetch.}
+The GPU's Copy Engine and Compute Engine operate independently. When a module's computation time exceeds its activation transfer time, the D2H copy can run concurrently with subsequent computation at zero cost. \Figref{fig:activation-offloading-timeline} illustrates the stream overlap mechanism for both forward and backward passes.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/activation_offloading_timeline.drawio.png}
+    \caption{Fine-grained activation offloading: stream overlap for forward and backward passes.}
+    \label{fig:activation-offloading-timeline}
+\end{figure}
+
+\paragraph{Forward Pass.}
+During forward propagation, input activations are offloaded to CPU immediately after module computation, running in parallel with the next module's computation via a dedicated D2H stream. One exception: the last layer's activations are not offloaded because they are needed immediately during backward, so no computation is available to hide the transfer latency.
+
+\paragraph{Backward Pass.}
+During backward propagation, activation reloading follows a \textit{Layer-Staggered Reload} pattern: the system reloads the activation of the same module (e.g., \texttt{expert\_fc1}) from the \textit{next} layer while computing gradients for the current layer. The reload occurs \textit{after} backward completes for each module, so only one activation per module type resides in GPU memory at any time, avoiding the need to double activation storage. This is essential when a single module has very large activations where 2$\times$ memory footprint would cause unexpected memory peaks.
+
+\paragraph{PP and VPP Handling.}
+For PP/VPP scenarios, a \texttt{Chunk\-Offload\-Handler} manages the offloading/reloading logic for each (microbatch, VPP stage) combination, identical to the PP=1 case. The main challenge is managing data dependencies and execution order between virtual pipeline chunks. Handlers are enqueued into a deque with VPP stages in reverse order (FILO) and microbatches in normal order (FIFO). During backward, the popped handler automatically matches the VPP chunk execution order, correctly pairing offloaded activations with their corresponding backward passes.
+
+\paragraph{Key Technical Features.}
+\begin{itemize}[itemsep=2pt,topsep=4pt]
+    \item \textbf{Module-level granularity:} Users specify which modules to offload via \verb|--offload-modules|, enabling mixed strategies. Lightweight modules (LayerNorm, activations) use recomputation while expensive ones (attention, experts) use offloading.
+    \item \textbf{Asynchronous transfers:} Dedicated D2H/H2D CUDA streams run transfers in parallel with computation; CUDA events coordinate synchronization only when necessary.
+    \item \textbf{Recomputation integration:} Combines with fine-grained recomputation (\secref{sec:recomputation}). For \texttt{moe\_act}, both strategies apply: recompute the activation while offloading its input, releasing the entire \texttt{fc1}$\rightarrow$\texttt{act} chain.
+    \item \textbf{CUDA Graphs compatibility:} Uses external events rather than stream synchronization, allowing offloading modules to be hidden by computations outside the CUDA graph.
+    \item \textbf{Full-scenario compatibility:} Supports PP=1/PP$>$1/VPP$>$1, all precisions (BF16/FP8/MXFP8/NVFP4), 1F1B with all-to-all overlap, and MoE/MLA architectures.
+\end{itemize}
+
+\paragraph{Peak Memory Advantage over Full Recomputation.}
+Full recomputation stores each layer's \textit{input} on GPU while releasing intermediate activations; backward recomputes intermediates from these stored inputs. For an $L$-layer model, GPU peak memory is $L \times \text{layer\_input} + 1 \times \text{layer\_intermediate}$. In contrast, offloading moves layer inputs to CPU; during backward, each input is reloaded just before use and released immediately after. This reduces GPU peak memory up to $1 \times \text{layer\_input} + 1 \times \text{layer\_intermediate}$, independent of model depth. For deep models (e.g., 60+ layers), this represents a fundamental memory advantage that full recomputation cannot achieve.
+
+\paragraph{Performance.}
+Fine-grained offloading and recomputation work together as complementary strategies (\figref{fig:offloading-recomputation}): lightweight operations like LayerNorm use recomputation, while expensive modules like attention and experts use offloading. Asynchronous transfers overlap with computation to hide PCIe latency. Table~\ref{tab:offloading-results} shows results across multiple configurations. Fine-grained offloading reduces memory by 10--18\% with only 1.6--2\% throughput overhead. In the case of training Qwen3-235B, offloading enables reducing Tensor Parallelism degree, which \textit{improves} throughput by 15.0\% with nearly the same memory cost.
+
+\begin{table}[ht]
+\centering
+\caption{Memory and throughput impact of fine-grained activation offloading.}
+\label{tab:offloading-results}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model \& Config} & \textbf{Baseline} & \textbf{+Offload} & \textbf{Mem $\Delta$} & \textbf{Throughput $\Delta$} \\
+\midrule
+DeepSeek-V3 full & 169 GB & 151 GB & $-$10.7\% & $-$1.6\% \\
+{\small TP1PP8EP32VPP4, MXFP8} & 945 TF/s & 930 TF/s & & \\
+\midrule
+Qwen3-235B  & 172 GB & 175 GB & $+$1.7\% & $+$15.0\% \\
+{\small TP2$\rightarrow$TP1 + EP16$\rightarrow$EP64} & 800 TF/s & 920 TF/s & & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/offloading_recomputation.png}
+    \caption{Fine-grained offloading and recomputation: complementary memory optimization strategies.}
+    \label{fig:offloading-recomputation}
+\end{figure}
+
+\subsubsection{Weight and Optimizer Optimization: Low-Precision Storage and Offloading}\label{sec:precision-opt}
+
+The preceding optimizations target activation memory, which dominates the memory breakdown. However, Table~\ref{tab:memory-breakdown} shows that main weights and optimizer states consume 32.1 GB per GPU, representing 16\% of the total memory footprint. For models with hundreds of billions of parameters, this component becomes a significant optimization target. Megatron-Core provides two techniques: precision-aware optimization that reduces storage requirements, and CPU offloading that moves inactive state off-GPU.
+
+\paragraph{Precision-Aware Optimizer.}
+The Adam optimizer \cite{kingma2014adam} maintains two state tensors per parameter: first moment (\texttt{exp\_avg}) and second moment (\texttt{exp\_avg\_sq}). Traditional implementations store these in FP32, consuming 8 bytes per parameter, which poses a significant memory bottleneck for large-scale training. The key insight is that optimizer states can tolerate lower storage precision without affecting convergence, provided that the actual update computation remains in higher precision.
+
+The precision-aware optimizer decouples storage precision from computation precision \cite{dettmers2022optimizers8bit}. The first and second moments can be stored in BF16 (2 bytes each) or even FP8 (1 byte each), reducing per-parameter storage from 8 bytes to 4 bytes (BF16) or 2 bytes (FP8). During each optimizer step, these lower-precision states are dynamically cast to FP32 within TransformerEngine's FusedAdam kernel; the update is computed with full-precision arithmetic to maintain numerical stability.
+
+The implementation provides four configurable precision levels: main gradients, main parameters, first moment, and second moment precision. In typical configurations, main parameters and gradients remain in FP32 to ensure high-quality gradient updates, while moment estimates are stored in BF16 \cite{liu2024deepseek}. This achieves approximately 50\% reduction in optimizer state memory (roughly 10--12 GB savings from the 32.1 GB budget in Table~\ref{tab:memory-breakdown}) with negligible impact on training dynamics.
+
+When combined with the distributed optimizer, which shards optimizer states across data-parallel ranks of size $d$, the theoretical memory requirement per rank is further reduced. In DeepSeek-V3 training with BF16 moments, the memory consumption per parameter per DP rank decreases from $6+12/d$ bytes to $6+8/d$ bytes.
+
+\paragraph{State Offloading.}
+During forward and backward passes, optimizer states occupy GPU memory but remain inactive; offloading reclaims this memory for other operations. Optimizer state offloading keeps the optimizer step on GPU but transfers optimizer states (\texttt{exp\_avg}, \texttt{exp\_avg\_sq}) and master weights to CPU after \texttt{optimizer.step()} and reloads them before the next step. This approach uses GPU compute while reclaiming memory during forward and backward passes.
+
+State offloading is particularly effective on systems with high-bandwidth interconnects. On GB200 with NVLink-C2C, asynchronous transfers overlap with computation, and pinned memory enables maximum bandwidth utilization. For DeepSeek-V3, state offloading saves 15--20 GB of GPU memory (47--62\% of the 32.1 GB optimizer and weight budget) with only 0.1--0.2 seconds per iteration overhead.
+
+These two techniques offer trade-offs that work well together. The precision-aware optimizer incurs no performance overhead since the FP32 cast occurs within the fused Adam kernel; it reduces optimizer state memory by up to 50\%. CPU offloading saves more memory (all the optimizer state and master weights) but introduces modest transfer overhead. Importantly, the techniques compose well: using precision-aware storage with BF16 moments reduces the state size that must be offloaded, thereby decreasing transfer time and making offloading more practical even on systems without the highest-bandwidth interconnects.
+
+\subsubsection{FSDP for MoE}\label{sec:fsdp-ref}
+
+Fully Sharded Data Parallelism (FSDP) \cite{zhao2023pytorchfsdp,rajbhandari2020zero} shards model parameters, gradients, and optimizer states across data-parallel ranks so that each GPU holds only a local shard. Expert parameters often dominate memory in MoE models, making FSDP a natural complement to Expert Parallelism. However, the two must compose correctly.
+
+\paragraph{Why FSDP for MoE?}
+
+Megatron-FSDP composes seamlessly with multiple parallel strategies, including Expert Parallelism (EP), Tensor Parallelism (TP), and Context Parallelism (CP). For large-scale MoE models, combining FSDP with EP turns the general advantages of FSDP into concrete benefits for expert-heavy workloads.
+
+\begin{itemize}[itemsep=2pt]
+  \item \textbf{Reduced Memory and Communication}: EP assigns each GPU a subset of experts, and FSDP shards those local experts across the expert data-parallel (EDP) group rather than the full DP group. Per-GPU memory and collective volume both scale with EDP size instead of total DP size, so MoE models can support more experts or larger batches under the same hardware budget.
+
+  \item \textbf{PP-free Flexibility}: FSDP+EP avoids several engineering pain points of pipeline parallelism, including uneven PP/VPP stage balancing, placement of output and MTP layers in DeepSeek-style models, and partitioning vision encoders in multimodal settings. Configuration reduces to choosing EP size and FSDP sharding degree, without complex pipeline-stage design.
+
+  \item \textbf{Broad Model Compatibility}: Megatron-FSDP supports two model implementation paths: models built with Megatron-Core's own modules and PyTorch-native models composed from standard \texttt{torch.nn} modules. Both paths receive the same FSDP+EP sharding, communication optimizations, and checkpointing support. For interoperability with the HuggingFace ecosystem, Megatron-Bridge handles online weight conversion between HuggingFace models and Megatron FSDP, so users can load a pretrained HuggingFace checkpoint, train with FSDP+EP, and export weights back without manual format conversion.
+\end{itemize}
+
+\paragraph{FSDP+EP: Dual DeviceMesh Design}
+
+The core design challenge is that dense and expert layers need different sharding scopes. Dense modules (attention, normalization) benefit from FSDP sharding over the full DP group. EP partitions expert modules first, so each GPU holds only its assigned experts. FSDP should therefore shard within each expert's data-parallel (EDP) group, not globally.
+
+Megatron-FSDP resolves this through a \emph{dual DeviceMesh} architecture. A primary DeviceMesh governs DP-Shard, DP-Outer, TP, and CP for dense modules. An auxiliary Expert DeviceMesh manages EP modules with FSDP scoped to the EDP dimension. Each transformer layer routes its sub-modules to the appropriate mesh automatically. Attention and normalization use the primary mesh, while MoE expert FFN layers use the Expert DeviceMesh. As a result, AllGather and ReduceScatter for expert parameters stay within small EDP groups instead of spanning all DP ranks.
+
+% \begin{figure}[ht]
+%     \centering
+%     \includegraphics[width=0.95\textwidth]{figures/ai_gen/ai_gen_fsdp_ep_dual_devicemesh.png}
+%     \caption{Dual DeviceMesh for FSDP+EP: primary mesh for dense layers, expert mesh for MoE layers.}
+%     \label{fig:fsdp-ep-mesh}
+% \end{figure}
+
+For large-scale deployments, this design extends to \emph{Hybrid Sharded Data Parallelism} (HSDP), which adds an outer DP replication dimension. HSDP fully shards parameters within a subset of ranks and replicates across subsets, bounding AllGather to the intra-group size. The dual DeviceMesh keeps separate outer-DP groups for expert and non-expert parameters, exploiting the bandwidth gap between NVLink (intra-node) and the scale-out interconnect (inter-node).
+
+\paragraph{Zero-Copy Communication}
+
+The dual DeviceMesh determines which ranks participate in each FSDP collective, but collectives themselves still carry overhead from buffer management and data copying. Megatron-FSDP eliminates this overhead through two optimizations.
+
+\textbf{1. Non-uniform sharding:} Standard FSDP2 shards each parameter independently along its primary dimension, producing uniform per-parameter shards (Figure~\ref{fig:fsdp2-sharding}). Megatron-FSDP instead flattens and concatenates all parameters within a module, then applies non-uniform sharding across devices (Figure~\ref{fig:mfsdp-sharding}). Shard boundaries then align with communication buffer layouts, and collectives read directly from flattened storage without redundant copying. In Llama3 405B training, this reduces communication overhead by roughly 10\%.
+
+\begin{figure}[ht]
+  \centering
+  \begin{subfigure}[b]{0.45\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/fsdp2_per_parameter_uniform_sharding.png}
+    \caption{FSDP2 per-parameter uniform sharding.}
+    \label{fig:fsdp2-sharding}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.45\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/mfsdp_per_module_non_uniform_sharding.png}
+    \caption{Megatron-FSDP per-module non-uniform sharding.}
+    \label{fig:mfsdp-sharding}
+  \end{subfigure}
+  \caption{Comparison of sharding strategies: (a)~FSDP2 shards each parameter uniformly; (b)~Megatron-FSDP flattens per-module and shards non-uniformly, aligning with communication buffers.}
+  \label{fig:sharding-comparison}
+\end{figure}
+
+\textbf{2. Persistent double buffers with NCCL User Buffer Registration:} Baseline FSDP frequently allocates and frees communication buffers, and NCCL copies data between user buffers and its internal staging area on every collective. Megatron-FSDP pre-allocates two persistent buffers at training start and cycles between them (Figure~\ref{fig:double-buffer}), eliminating allocation churn. Megatron-FSDP then registers these buffers with NCCL via User Buffer Registration (UBR), so NCCL reads and writes the pre-registered memory directly without intermediate copies. The combined effect is true zero-copy communication. On NVLink systems, the SM footprint of communication kernels drops from 8--32 SMs to 1--4 SMs. On SHARP-enabled InfiniBand, network switches handle reductions and free GPU SMs entirely.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figures/persistent_double_buffers.png}
+  \caption{Persistent double-buffer design: two pre-allocated buffers are cycled across FSDP collectives, eliminating allocation overhead and enabling NCCL User Buffer Registration.}
+  \label{fig:double-buffer}
+\end{figure}
+
+\paragraph{Computation--Communication Overlap}
+
+Even with zero-copy collectives, AllGather and ReduceScatter still occupy the network while GPUs wait for parameters or gradient synchronization. Megatron-FSDP pipelines these collectives with computation using dedicated CUDA streams: AllGather for the next FSDP unit is issued while the current unit's forward or backward pass is still executing, and ReduceScatter for gradients runs concurrently with the backward pass of subsequent layers. Increasing the micro-batch size extends the computation window available for hiding communication, though at the cost of higher memory usage. Users can tune this trade-off through the \texttt{overlap\_param\_gather} and \texttt{overlap\_grad\_reduce} flags.
+
+% \paragraph{DTensor-Based Checkpointing}
+
+% Megatron-FSDP represents all model parameters as PyTorch DTensor objects, each carrying a DeviceMesh and Placement that encode its sharding layout. Dense parameters reference the primary DeviceMesh and expert parameters reference the Expert DeviceMesh, so the dual-mesh separation is preserved at the checkpoint level. Checkpointing uses PyTorch's Distributed Checkpoint (DCP) API end-to-end, with no intermediate format conversions. Because DTensor can also express traditional 3D-parallel (TP+PP+DP) layouts, Megatron-FSDP ships conversion tools that translate existing 3D-parallel checkpoints into DTensor-based formats with no manual resharding.
+
+% Summary of memory optimizations
+\subsubsection{Summary}
+Table~\ref{tab:memory-opt-summary} summarizes the memory optimization techniques described in this section and their primary targets.
+
+\begin{table}[ht]
+\centering
+\caption{Summary of memory optimization techniques.}
+\label{tab:memory-opt-summary}
+\begin{tabular}{lll}
+\toprule
+\textbf{Technique} & \textbf{Memory Target} & \textbf{Trade-off} \\
+\midrule
+Reduced-Precision Training & Activations & Numerical Precision and CPU Overhead \\
+Memory-Efficient Permutation & Activations & - \\
+Fine-grained Recomputation & Activations & Compute Overhead \\
+Fine-grained Offloading & Activations & CPU Overhead and Non-Overlapped Copy \\
+Precision-aware Optimizer & Optimizer States & Numerical Precision \\
+FSDP (with EP) & Params + Optimizer & Communication Overhead \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+These memory optimizations complement each other: Memory-Efficient Permutation eliminates redundant storage with zero overhead; FP8/FP4 activations reduce precision with minimal quality impact; fine-grained recomputation offers favorable compute-memory trade-offs for specific modules; activation offloading provides additional headroom when other techniques are insufficient; low-precision storage and state offloading reduce weight and optimizer memory; and FSDP enables scaling beyond single-device capacity. Together, they reduce memory from a blocking barrier to a manageable constraint.
+
+Memory optimization is not a one-time gate that, once passed, can be forgotten. For large-scale MoE models, memory is a persistently scarce resource throughout the entire optimization lifecycle. Beyond enabling training to proceed at all, memory headroom unlocks other optimizations: larger batch sizes provide more computation to hide communication latency (Section~\ref{sec:comm-overlap}), CUDA Graphs require additional static buffers (Section~\ref{sec:cuda-graphs}), and EP communication overlap must hold activations from multiple microbatches simultaneously. Many optimizations described in the following sections consume memory, and the techniques above are what make that consumption feasible.
+

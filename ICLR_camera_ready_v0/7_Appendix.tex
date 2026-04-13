@@ -1,0 +1,304 @@
+\newpage
+\appendix
+\section{Sequence Placement Algorithm}\label{appendix:placement}
+
+\noindent\textbf{Problem formulation.} We formalize planning over $D$ devices for a global batch of $N$ sequences. Let each sequence $i \in \{1,\dots,N\}$ have length $h_i$. We choose a sharding degree $p_i \in \{1,2,4,\dots,p_{\max}\}$ and an assignment $y_{i,d} \in \{0,1\}$ indicating whether device $d$ holds a shard of sequence $i$, such that $\sum_{d=1}^D y_{i,d} = p_i$. For executability, we restrict sharded sequences ($p_i>1$) to a hierarchical family of admissible device groups: for each degree $p$, the groups form a partition of GPUs (disjoint and covering), and partitions are nested across degrees.
+
+\noindent\textbf{Cost model.} On each device $d$, we define (i) \textbf{memory load} $M_d = \sum_{i=1}^N (h_i / p_i)\, y_{i,d}$ with a hard threshold $M_d \le M_{\text{th}}=\alpha M^\star$ (we use $\alpha=1.1$), where $M^\star$ is the average per-device token count; and (ii) \textbf{compute load} $C_d \propto \sum_{i=1}^N (h_i^2 / p_i)\, y_{i,d}$ as an attention-cost proxy. Sharding also introduces communication overhead; following the standard SeqAlltoAll model, the per-device traffic volume scales as $\mathrm{vol}(h,p)\propto h\cdot(p-1)/p^2$, optionally weighted by intra-/inter-node bandwidth. In Algorithm~\ref{alg:placement}, we use $\mathrm{SplitCost}(h,p)$ as a practical proxy for this overhead.
+
+\noindent\textbf{Objective.} We solve a lexicographic optimization:
+\begin{equation}
+    \min_{\{p_i, y_{i,d}\}} \left( \max_{d} C_d,\; \sum_{i=1}^N \mathrm{Comm}(h_i, p_i) \right),
+\end{equation}
+where we primarily minimize the maximum compute imbalance and use the communication cost to break ties.
+
+\noindent\textbf{FlexUlysses 3-Stage Scheduling Heuristic.} The detailed sequence placement algorithm is formalized in Algorithm~\ref{alg:placement}. Our algorithm incorporates a threshold multiplier ($1.1\times$) for memory constraint $M_{\text{th}}$ and searches over power-of-two candidate degrees.
+
+\begin{algorithm}
+    \caption{FlexUlysses Placement Algorithm}
+    \label{alg:placement}
+    \begin{algorithmic}[1]
+    \Require sequence heights $\mathcal{H}=\{h_i\}_{i=1}^N$, number of devices $D$
+    \Ensure placement $\mathcal{Y}=\{(i,d,\hat h_{i,d},p_i)\}$ and per-item split degree $\mathcal{P}=\{p_i\}$
+
+    \State $M^\star \gets \frac{1}{D}\sum_{i=1}^N h_i$, \quad $M_{\mathrm{th}}\gets \alpha M^\star$ \Comment{$\alpha=1.1$}
+    \State $p_{\max}\gets 2^{\lfloor \log_2 D \rfloor}$,\quad $\mathcal{P}_{\mathrm{cand}}\gets\{2^k:0\le k\le \log_2 p_{\max}\}$
+    \State $(\mathcal{Y}, \mathbf{m}) \gets \Call{BaselineSplitPlace}{\mathcal{H},D,M^\star,M_{\mathrm{th}},\mathcal{P}_{\mathrm{cand}}}$
+    \State $\mathbf{s}\gets$ item states induced by $\mathcal{Y}$ \Comment{$\mathbf{s}[i].p \!=\!$ current split degree,\; $\mathbf{s}[i].G \!=\!$ device group}
+    \State $\mathcal{L}\gets \{2^k:1\le k\le \log_2 p_{\max}\}$ in decreasing order
+    \ForAll{$p \in \mathcal{L}$}
+    \While{$\exists$ merge candidate at split level $p$}
+        \State $\mathcal{C}_p \gets \Call{FindMergeCandidates}{\mathcal{Y},\mathbf{s},p,M_{\mathrm{th}},m}$ \Comment{$m=\texttt{DEFAULT\_M\_CANDIDATES}$}
+        \If{$\mathcal{C}_p=\emptyset$} \State \textbf{break} \EndIf
+        \State $c^\star \gets \arg\min_{c\in\mathcal{C}_p}\Delta\mathrm{Cost}(c)$
+        \State $\Call{ExecuteMerge}{\mathcal{Y},\mathbf{s},c^\star}$
+    \EndWhile
+    \EndFor
+    \State $\Call{ShortItemReorder}{\mathcal{Y},\mathbf{s},\mathcal{H},M_{\mathrm{th}}}$
+    \State \Return $\mathcal{Y}, \mathcal{P}$
+    \end{algorithmic}
+\end{algorithm}
+
+\vspace{0.5em}
+\noindent\textbf{Split cost.}
+\[
+\mathrm{SplitCost}(h,p)=
+\begin{cases}
+0, & p\le 1\\
+\frac{h(p-1)}{p^2}, & 2\le p\le \tau\\
+\gamma\cdot\frac{h(p-1)}{p^2}, & p>\tau
+\end{cases}
+\quad\text{with }\tau=8,\ \gamma=16.
+\]
+\[
+\mathrm{TotalCost}(\mathcal{P})=\sum_{i=1}^N \mathrm{SplitCost}(h_i,p_i).
+\]
+\begin{algorithm}
+\caption{FlexUlysses Sub-procedures}
+\label{alg:subprocedures}
+\begin{algorithmic}[1]
+\Procedure{BaselineSplitPlace}{$\{h_i\}_{i=1}^N, D, M^\star, M_{\mathrm{th}}, \mathcal{P}_{\mathrm{cand}}$}
+\State $\mathbf{m}\gets \mathbf{0}$, \quad $\mathbf{a}\gets 1.1 M^\star\cdot \mathbf{1}$ \Comment{available memory proxy}
+\State sort items by $h_i$ descending
+\For{$i=1$ \textbf{to} $N$}
+  \State $p \gets \Call{GetSPSize}{h_i,\mathcal{P}_{\mathrm{cand}}}$ \Comment{power-of-two}
+  \While{$p \le p_{\max}$ \textbf{and} $\Call{ValidGroupExists}{p,i,\mathbf{m},M_{\mathrm{th}}}=\textbf{false}$}
+    \State $p \gets 2p$
+  \EndWhile
+  \If{$\Call{ValidGroupExists}{p,i,\mathbf{m},M_{\mathrm{th}}}=\textbf{false}$} \State $p\gets p_{\max}$ \EndIf
+  \State $G \gets \arg\max_{G:|G|=p,\ \forall d\in G: m_d+\frac{h_i}{p}\le M_{\mathrm{th}}}\ \sum_{d\in G} a_d$
+  \ForAll{$d\in G$}
+    \State add tuple $(i,d,\hat h_{i,d}\!=\!\frac{h_i}{p},p)$ to $\mathcal{Y}$
+    \State $m_d \gets m_d + \frac{h_i}{p}$
+    \State $a_d \gets a_d - \frac{h_i}{p}$ \Comment{proxy update}
+  \EndFor
+\EndFor
+\State \Return $\mathcal{Y},\mathbf{m}$
+\EndProcedure
+
+\vspace{0.3em}
+\Statex
+\Procedure{FindMergeCandidates}{$\mathcal{Y}, \mathbf{s}, p, M_{\mathrm{th}}, m$}
+\State partition devices into consecutive groups $\mathcal{G}_p=\{G\subseteq [D]: |G|=p\}$
+\State $\mathcal{C}_p\gets \emptyset$
+\ForAll{$G\in\mathcal{G}_p$}
+  \State $I_G \gets \{i:\mathbf{s}[i].p=p \wedge \mathbf{s}[i].G=G\}$
+  \If{$|I_G|<2$} \State \textbf{continue} \EndIf
+  \For{$m' = 2$ \textbf{to} $m$}
+    \State choose a multiset $S\subseteq I_G$ with $|S|=m'$ (greedy by increasing $h_i$)
+    \State $(S_1,S_2)\gets \Call{TwoWayPack}{S}$ \Comment{subject to balance constraints}
+    \If{$S_1\neq\emptyset \wedge S_2\neq\emptyset \wedge \Call{MergeFeasible}{G,S_1,S_2,p,M_{\mathrm{th}}}$}
+      \State $\mathcal{C}_p \gets \mathcal{C}_p \cup \{c=(G,S_1,S_2,p)\}$
+    \EndIf
+  \EndFor
+\EndFor
+\State \Return $\mathcal{C}_p$
+\EndProcedure
+
+\vspace{0.3em}
+\Statex
+\Procedure{ExecuteMerge}{$\mathcal{Y},\mathbf{s},c=(G,S_1,S_2,p)$}
+  \State $p' \gets p/2$,\quad split $G$ into halves $G^{(1)},G^{(2)}$ with $|G^{(1)}|=|G^{(2)}|=p'$
+  \State remove all shards of items in $S_1\cup S_2$ from devices in $G$
+  \ForAll{$d\in G^{(1)}$} \ForAll{$i\in S_1$} add $(i,d,h_i/p',p')$ to $\mathcal{Y}$ \EndFor \EndFor
+  \ForAll{$d\in G^{(2)}$} \ForAll{$i\in S_2$} add $(i,d,h_i/p',p')$ to $\mathcal{Y}$ \EndFor \EndFor
+  \ForAll{$i\in S_1$} $\mathbf{s}[i].p\gets p'$, $\mathbf{s}[i].G\gets G^{(1)}$ \EndFor
+  \ForAll{$i\in S_2$} $\mathbf{s}[i].p\gets p'$, $\mathbf{s}[i].G\gets G^{(2)}$ \EndFor
+\EndProcedure
+
+\vspace{0.3em}
+\Statex
+\Procedure{ShortItemReorder}{$\mathcal{Y}, \mathbf{s}, \{h_i\}, M_{\mathrm{th}}$}
+\State $S \gets \{i:\mathbf{s}[i].p\le 2\}$ sorted by decreasing $h_i$
+\ForAll{$i\in S$}
+  \State remove all tuples in $\mathcal{Y}$ with item $i$
+  \State $\mathbf{s}[i].p\gets 1$, $\mathbf{s}[i].G\gets \emptyset$
+\EndFor
+\ForAll{$i\in S$}
+  \State $d^\star \gets \arg\min_{d: m_d+h_i\le M_{\mathrm{th}}}\ \Big(\sum_{(j,d,\cdot,\cdot)\in\mathcal{Y}} h_j\cdot h_j\Big)$
+  \If{no feasible $d^\star$} \State $d^\star \gets \arg\min_d (m_d+h_i)$ \EndIf
+  \State add $(i,d^\star,h_i,1)$ to $\mathcal{Y}$; update $m_{d^\star}\gets m_{d^\star}+h_i$
+\EndFor
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\section{Detailed End-to-End Runtime Breakdown}\label{appendix:e2e_breakdown}
+
+\noindent\textbf{End-to-End Results.}~
+
+\begin{table*}[h]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{l l r l l r r r r r r r r r r}
+\toprule
+CR & Model & GPUs & DS & Method & GBS & Frames & Throughput & DataLoading(s) & Rollout(s) & Old(s) & Ref(s) & Step(s) & Update(s) \\
+\midrule
+CR-01 & 7B & 32 & Image-Heavy & ours & 64 & 256 & 233.21 & 15.045 & 31.703 & 6.354 & 3.336 & 46.404 & 4.952 \\
+CR-01 & 7B & 32 & Image-Heavy & ulysses\_sp & 64 & 256 & 92.50 & 54.873 & 45.607 & 20.866 & 20.337 & 114.868 & 28.002 \\
+CR-01 & 7B & 32 & Image-Heavy & verl\_bucketing & 64 & 256 & 53.18 & 55.572 & 46.447 & 50.763 & 49.881 & 200.155 & 53.006 \\
+CR-02 & 7B & 32 & Video-Heavy & ours & 64 & 128 & 313.99 & 11.838 & 29.641 & 18.318 & 8.108 & 63.934 & 7.777 \\
+CR-02 & 7B & 32 & Video-Heavy & ulysses\_sp & 64 & 128 & 137.15 & 174.811 & 71.966 & 28.197 & 27.751 & 161.325 & 33.326 \\
+CR-02 & 7B & 32 & Video-Heavy & verl\_bucketing & 64 & 128 & 58.65 & 179.457 & 71.829 & 97.575 & 95.036 & 363.035 & 98.510 \\
+CR-03 & 7B & 32 & Only-Video & ours & 64 & 64 & 525.93 & 6.732 & 19.384 & 3.979 & 3.908 & 32.307 & 4.969 \\
+CR-03 & 7B & 32 & Only-Video & ulysses\_sp & 64 & 64 & 207.03 & 179.082 & 51.967 & 8.901 & 8.705 & 82.010 & 12.370 \\
+CR-03 & 7B & 32 & Only-Video & verl\_bucketing & 64 & 64 & 63.96 & 181.610 & 52.853 & 70.287 & 69.811 & 265.406 & 72.386 \\
+CR-04 & 32B & 64 & Image-Heavy & ours & 128 & 256 & 101.96 & 17.147 & 61.914 & 15.757 & 13.660 & 104.506 & 13.053 \\
+CR-04 & 32B & 64 & Image-Heavy & verl\_bucketing & 128 & 128 & 35.86 & 91.377 & 68.888 & 42.439 & 42.309 & 201.830 & 48.099 \\
+CR-04 & 32B & 64 & Image-Heavy & verl\_bucketing & 128 & 256 & 33.29 & 95.529 & 89.113 & 59.432 & 58.244 & 272.536 & 65.640 \\
+CR-05 & 32B & 64 & Video-Heavy & ours & 128 & 64 & 189.79 & 6.184 & 41.596 & 7.063 & 6.606 & 68.579 & 13.197 \\
+CR-05 & 32B & 64 & Video-Heavy & ulysses\_sp & 128 & 64 & 67.29 & 230.772 & 91.813 & 32.929 & 32.871 & 199.202 & 41.476 \\
+CR-05 & 32B & 64 & Video-Heavy & verl\_bucketing & 128 & 64 & 43.81 & 236.807 & 94.480 & 68.385 & 67.501 & 305.111 & 74.634 \\
+CR-06 & 32B & 64 & Only-Video & ours & 128 & 96 & 221.07 & 9.856 & 63.303 & 17.763 & 9.567 & 113.518 & 22.712 \\
+CR-06 & 32B & 64 & Only-Video & ulysses\_sp & 128 & 96 & 78.85 & 496.666 & 156.860 & 50.508 & 49.079 & 318.196 & 61.579 \\
+CR-06 & 32B & 64 & Only-Video & verl\_bucketing & 128 & 64 & 47.21 & 355.949 & 112.491 & 79.096 & 78.757 & 357.820 & 87.350 \\
+CR-10 & 7B & 64 & Image-Heavy & ours & 128 & 128 & 183.06 & 10.548 & 19.875 & 9.610 & 6.340 & 39.273 & 3.360 \\
+CR-10 & 7B & 64 & Image-Heavy & ulysses\_sp & 128 & 128 & 61.09 & 97.044 & 50.916 & 24.396 & 24.136 & 126.604 & 27.065 \\
+CR-11 & 7B & 64 & Video-Heavy & ours & 128 & 64 & 339.47 & 6.267 & 21.796 & 7.238 & 4.892 & 38.999 & 4.959 \\
+CR-11 & 7B & 64 & Video-Heavy & ulysses\_sp & 128 & 128 & 74.93 & 369.454 & 123.124 & 58.135 & 58.773 & 303.776 & 63.573 \\
+CR-11 & 7B & 64 & Video-Heavy & ulysses\_sp & 128 & 64 & 82.45 & 231.429 & 71.792 & 29.816 & 29.491 & 163.260 & 32.051 \\
+CR-12 & 7B & 64 & Only-Video & ours & 128 & 64 & 443.24 & 6.761 & 23.774 & 4.438 & 4.329 & 38.309 & 5.635 \\
+CR-12 & 7B & 64 & Only-Video & ulysses\_sp & 128 & 64 & 89.94 & 356.238 & 91.013 & 31.649 & 31.392 & 188.718 & 34.536 \\
+CR-12 & 7B & 64 & Only-Video & verl\_bucketing & 128 & 64 & 52.34 & 349.610 & 92.122 & 77.244 & 75.763 & 324.317 & 79.057 \\
+CR-13 & 7B & 128 & Image-Heavy & ours & 256 & 128 & 158.94 & 10.956 & 24.982 & 11.185 & 6.643 & 47.537 & 4.541 \\
+CR-13 & 7B & 128 & Image-Heavy & ulysses\_sp & 256 & 128 & 33.26 & 182.141 & 74.846 & 49.702 & 48.861 & 225.579 & 51.983 \\
+CR-13 & 7B & 128 & Image-Heavy & verl\_bucketing & 256 & 128 & 21.63 & 186.269 & 76.725 & 91.113 & 88.703 & 347.586 & 90.853 \\
+CR-15 & 7B & 128 & Only-Video & ours & 256 & 64 & 405.44 & 6.973 & 24.783 & 5.229 & 4.924 & 41.885 & 6.692 \\
+CR-15 & 7B & 128 & Only-Video & ulysses\_sp & 256 & 64 & 50.67 & 694.390 & 149.507 & 61.255 & 60.590 & 335.006 & 63.407 \\
+\bottomrule
+\end{tabular}}
+\caption{Detailed E2E experiment results.}
+\label{tab:cartesian_cr}
+\end{table*}
+
+% \section{Hyperparameters and Training Details}\label{appendix:hyperparameters}
+% \textcolor{red}{
+% \noindent\textbf{Convergence and Accuracy.}
+% We evaluate FlexRL on MiMo-VL-7B-RL with GRPO on the NExTQA dataset. Using 128 H800 GPUs, we verify convergence using the mean reward and critic score metrics. FlexRL maintains comparable convergence behavior to the veRL baseline while significantly improving training efficiency. Figure~\ref{fig:convergence} presents the training curves.
+% \begin{figure}[h]
+%     \centering
+%     % \includegraphics[width=0.8\textwidth]{figures/convergence.pdf}
+%     \caption{Training curves of key metrics (mean reward, critic score) comparing FlexRL and the veRL baseline on GRPO+NExTQA.}
+%     \label{fig:convergence}
+% \end{figure}
+% }
+
+\noindent\textbf{Sequence Packing Micro-Benchmark.}
+To clarify how the runtime of global-attention-style packing depends on the sequence-length distribution, we micro-benchmark FlashAttention variable-length attention (\texttt{flash\_attn\_var\_len}) on a single H800 GPU. We run GQA with $q$ heads = 64, $kv$ heads = 8, and head dim = 128. We keep the total number of tokens fixed at 64K and vary how they are partitioned across sequences (Table~\ref{tab:flashattn_varlen_runtime}).
+\begin{table}[h]
+    \centering
+    \caption{\texttt{flash\_attn\_var\_len} runtime (ms) under different sequence-length distributions with the same total tokens (64K).}
+    \label{tab:flashattn_varlen_runtime}
+    \resizebox{0.75\linewidth}{!}{%
+    \begin{tabular}{lcccccc}
+    \toprule
+    Input sequences & $1\times$64K & $4\times$16K & $8\times$8K & $16\times$4K & $32\times$2K & $64\times$1K \\ \midrule
+    Runtime (ms) & 182.9 & 46.6 & 24.0 & 12.7 & 7.0 & 4.3 \\ \bottomrule
+    \end{tabular}}
+\end{table}
+
+\section{Additional Communication Overhead Results}\label{appendix:comm_overhead}
+\noindent\textbf{SeqAlltoAll Micro-Benchmark.}
+We micro-benchmark FlashAttention2 GQA SeqAlltoAll communication time on two clusters with different bandwidth characteristics: H200 (900GB/s intra-node, 3200Gb/s inter-node) and H800 (400GB/s intra-node, 1600Gb/s inter-node). We use GQA with head\_q=32, head\_kv=8, and head\_dim=128, and report the average AlltoAll latency (ms) under different sharding degrees (sp\_size) and sequence lengths (seq\_len). Table~\ref{tab:comm_microbenchmark} shows a representative case with \texttt{seq\_len}=262144 tokens, while Table~\ref{tab:comm_microbenchmark_full} reports the full sweep.
+\begin{table}[h]
+    \centering
+    \caption{SeqAlltoAll micro-benchmark communication latency (ms) in FlashAttention2 GQA.}
+    \label{tab:comm_microbenchmark}
+    \resizebox{0.7\textwidth}{!}{%
+    \begin{tabular}{ccccccc}
+    \toprule
+    & \multicolumn{3}{c}{\textbf{H200 Cluster}} & \multicolumn{3}{c}{\textbf{H800 Cluster}} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-7}
+    \textbf{sp\_size} & \textbf{seq\_len} & \textbf{comm\_avg\_ms} & & \textbf{sp\_size} & \textbf{seq\_len} & \textbf{comm\_avg\_ms} \\ \midrule
+    2 & 262144 & 23.401 & & 2 & 262144 & 18.245 \\
+    4 & 262144 & 16.107 & & 4 & 262144 & 16.480 \\
+    8 & 262144 & 8.513  & & 8 & 262144 & 12.543 \\
+    16 & 262144 & 14.639 & & 16 & 262144 & 19.644 \\
+    32 & 262144 & 11.030 & & 32 & 262144 & 16.558 \\ \bottomrule
+    \end{tabular}}
+\end{table}
+
+\begin{table*}[h]
+    \centering
+    \caption{Full SeqAlltoAll micro-benchmark communication time (ms) on H200 and H800 clusters.}
+    \label{tab:comm_microbenchmark_full}
+    \resizebox{0.50\textwidth}{!}{%
+    \begin{tabular}{ccc|ccc}
+    \toprule
+    \multicolumn{3}{c|}{\textbf{H200 Cluster}} & \multicolumn{3}{c}{\textbf{H800 Cluster}} \\ \midrule
+    sp\_size & seq\_len & comm\_avg\_ms & sp\_size & seq\_len & comm\_avg\_ms \\ \midrule
+    2  & 131072  & 9.970  & 2  & 131072  & 11.079 \\
+    2  & 262144  & 23.401 & 2  & 262144  & 18.245 \\
+    2  & 524288  & 52.472 & 2  & 524288  & 60.709 \\
+    4  & 131072  & 6.547  & 4  & 131072  & 6.943  \\
+    4  & 262144  & 16.107 & 4  & 262144  & 16.480 \\
+    4  & 524288  & 47.361 & 4  & 524288  & 44.372 \\
+    8  & 131072  & 3.501  & 8  & 131072  & 6.360  \\
+    8  & 262144  & 8.513  & 8  & 262144  & 12.543 \\
+    8  & 524288  & 22.462 & 8  & 524288  & 28.686 \\
+    8  & 1048576 & 64.878 & 8  & 1048576 & 119.293 \\
+    16 & 131072  & 7.871  & 16 & 131072  & 12.333 \\
+    16 & 262144  & 14.639 & 16 & 262144  & 19.644 \\
+    16 & 524288  & 36.554 & 16 & 524288  & 41.430 \\
+    16 & 1048576 & 68.558 & 16 & 1048576 & 104.011 \\
+    32 & 131072  & 6.355  & 32 & 131072  & 17.219 \\
+    32 & 262144  & 11.030 & 32 & 262144  & 16.558 \\
+    32 & 524288  & 24.150 & 32 & 524288  & 31.089 \\
+    32 & 1048576 & 48.356 & 32 & 1048576 & 69.296 \\ \bottomrule
+    \end{tabular}}
+\end{table*}
+
+% \subsection{Comparison against LongRL}
+
+% We compare FlexRL to LongRL on 128 H800 GPUs (16$\times$8) with MiMo-VL-7B-RL under the same GRPO configuration (Table~\ref{tab:longrl}). We train on a multimodal mixture (Geo3K + NExTQA + LongVILA-Reason, sampling weight 5:2:1) with global batch size 512 ($\sim$2M tokens), max frames 256, and max response length 256. We use TP=4 for rollout and FSDP=32 for model forward/update; LongRL uses MMSP(size=8)+FSDP, while FlexRL uses FlexUlysses with sharding degrees 1--4. FlexRL achieves a 5.32$\times$ overall speedup by eliminating I/O bottlenecks via ShadowLoader and better balancing compute load via FlexUlysses compared to LongRL's MMSP strategy.
+% \begin{table}[h]
+%     \centering
+%     \caption{Comparison with LongRL baseline under the same GRPO configuration.}
+%     \label{tab:longrl}
+%     \resizebox{0.7\textwidth}{!}{%
+%     \begin{tabular}{lcc}
+%     \toprule
+%     Metric & LongRL & FlexRL \\ \midrule
+%     Data Loading Latency (s) & 356.7 (1.00x) & 3.2 (117.19x) \\
+%     Update actor runtime (s) & 18.1 (1.00x) & 9.5 (1.91x) \\
+%     Ref log prob runtime (s) & 4.6 (1.00x) & 3.7 (1.24x) \\
+%     Old log prob runtime (s) & 23.7 (1.00x) & 4.9 (4.84x) \\
+%     Overall Throughput (tokens/s/GPU) & 33.5 (1.00x) & 178.0 (5.32x) \\ \bottomrule
+%     \end{tabular}}
+% \end{table}
+
+% \noindent\textbf{End-to-End Trade-off Between Load Balance and Communication.}
+% We evaluate how vanilla sequence parallelism trades load balance for communication overhead, and how FlexUlysses mitigates this trade-off. We run GRPO training with MiMo-VL-7B-RL on a multimodal mixture (Geo3K + NExTQA + LongVILA-Reason; sampling weight 5:2:1) with \texttt{global\_batch\_size}=32, \texttt{max\_frame\_number}=128, and \texttt{max\_response\_length}=256. We use TP=2 for rollout and FSDP=8 for model forward and update\_policy. To isolate communication effects, we enable ShadowLoader for all methods. Table~\ref{tab:comm_overhead} (Sec.~\ref{sec:evaluation}) summarizes the end-to-end trade-off on 8 GPUs.
+% \begin{table}[h]
+%     \centering
+%     \caption{Detailed end-to-end trade-off results on H200 (8 GPUs).}
+%     \label{tab:comm_overhead_h200_detailed}
+%     \resizebox{0.99\linewidth}{!}{%
+%     \begin{tabular}{lccccc}
+%     \toprule
+%     Method & Update Actor (s) & Ref Log Prob (s) & Old Log Prob (s) & Throughput (tokens/s/GPU) & Balance Ratio ($\to$1.0) \\ \midrule
+%     veRL (Baseline) & 5.90 (1.00x) & 1.89 (1.00x) & 1.89 (1.00x) & 155 (1.00x) & 6.70 \\
+%     +Ulysses (SP=2) & 4.43 (1.33x) & 1.88 (1.01x) & 2.49 (0.76x) & 162 (1.05x) & 3.82 \\
+%     +Ulysses (SP=4) & 4.33 (1.36x) & 1.94 (0.97x) & 3.19 (0.59x) & 173 (1.12x) & 1.12 \\
+%     +Ulysses (SP=8) & 5.81 (1.02x) & 1.25 (1.51x) & 1.97 (0.96x) & 175 (1.13x) & 1.00 \\
+%     \textbf{FlexRL (w/ FlexUlysses)} & \textbf{3.52 (1.68x)} & \textbf{1.10 (1.72x)} & \textbf{1.70 (1.11x)} & \textbf{232 (1.50x)} & \textbf{1.00} \\ \bottomrule
+%     \end{tabular}}
+% \end{table}
+
+% \begin{table}[h]
+%     \centering
+%     \caption{Detailed end-to-end trade-off results on H800 (8 GPUs).}
+%     \label{tab:comm_overhead_h800_detailed}
+%     \resizebox{0.99\linewidth}{!}{%
+%     \begin{tabular}{lccccc}
+%     \toprule
+%     Method & Update Actor (s) & Ref Log Prob (s) & Old Log Prob (s) & Throughput (tokens/s/GPU) & Balance Ratio ($\to$1.0) \\ \midrule
+%     veRL (Baseline) & 6.24 (1.00x) & 1.59 (1.00x) & 1.60 (1.00x) & 103 (1.00x) & 6.70 \\
+%     +Ulysses (SP=2) & 5.13 (1.22x) & 1.17 (1.36x) & 1.16 (1.38x) & 123 (1.19x) & 3.82 \\
+%     +Ulysses (SP=4) & 4.41 (1.41x) & 1.05 (1.51x) & 1.80 (0.89x) & 153 (1.49x) & 1.12 \\
+%     +Ulysses (SP=8) & 5.81 (1.07x) & 1.45 (1.10x) & 2.46 (0.65x) & 141 (1.37x) & 1.00 \\
+%     \textbf{FlexRL (w/ FlexUlysses)} & \textbf{3.90 (1.60x)} & \textbf{0.90 (1.77x)} & \textbf{2.01 (0.80x)} & \textbf{172 (1.67x)} & \textbf{1.00} \\ \bottomrule
+%     \end{tabular}}
+% \end{table}

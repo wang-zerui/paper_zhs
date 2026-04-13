@@ -1,0 +1,195 @@
+\section{强化学习中的威震天核心 MoE}\label{sec:rl}
+强化学习（RL）后训练已成为继 OpenAI o1 和 DeepSeek-R1 之后的关键范式~\cite{deepseekai2025deepseekr1}。许多领先的 RL 训练模型都是 MoE 架构（DeepSeek-R1、Kimi-K2 等），而 RL 工作负载带来的挑战放大了本报告中讨论的 MoE 特定问题：高度可变的序列长度对内存墙造成压力，交错的推理和训练阶段需要快速内存卸载，推理和训练引擎之间的路由差异威胁着稳定性。为了大规模实现高训练吞吐量，强化学习框架在 Ray 工作线程内部运行 Megatron-Core 作为分布式训练后端，并使用 Megatron-Bridge 进行双向 Hugging Face 到 Megatron 检查点转换。
+
+\subsection{强化学习训练后面临的挑战}
+强化学习后训练与预训练的不同之处在于对训练引擎提出了新的要求：
+
+\begin{enumerate}
+    \item \textbf{可变长度序列。} 预训练通常对固定长度的序列（例如 4K 令牌）进行操作。相比之下，强化学习工作负载会产生高度可变的序列长度：最大值可能达到 128K 甚至 1M 个令牌，而小批量内的平均值通常是最大值的二分之一到四分之一。这种长尾分布使得很难平衡计算效率和峰值内存消耗。
+    \item \textbf{内存卸载。} 强化学习框架通常将训练引擎和推理引擎放在同一个 GPU 上，在另一个引擎处于活动状态时卸载一个引擎的状态。这要求两个引擎快速、完整地释放和恢复其全部内存占用——当必须管理优化器状态、激活和 KV 缓存时，这是一个不平凡的要求。
+    \item \textbf{在线重量导出。} 每个训练步骤后必须使用最新参数更新推理引擎。这要求训练引擎以推理引擎可以加载的格式快速导出权重，跨不同的模型架构。
+    \item \textbf{训练稳定性。} 标准强化学习算法假设采样的响应来自当前的策略分布。然而，在实践中，推理和训练引擎使用不同的优化内核，即使参数相同，也会产生略有不同的令牌概率，从而有效地引入了离策略偏差。对于 MoE 模型，这个问题更加复杂：来自同一序列的令牌可能会被路由到推理和训练引擎中的不同专家，从而放大了差异。
+\end{enumerate}
+\subsection{威震天桥}
+典型的 RL 工作流程从预训练的 Hugging Face 模型开始，并在 RL 框架中对其进行微调。在规模上，这些框架通常在 Ray 工作线程中运行 Megatron-Core 进行分布式训练，而部署通常使用需要 Hugging Face 格式检查点的推理堆栈。这就产生了两个集成需求：将模型定义映射到 Megatron-Core 模块，以及在 Hugging Face 和 Megatron 格式之间高效转换检查点。 Megatron-Bridge 解决了检查点互操作性层问题，支持快速 HF 到 Megatron 的初始化、训练和导出转换。该模式在多个 RL 框架中使用，包括 veRL~\cite{sheng2024hybridflow}、史莱姆~\cite{slime_github}，和 NeMo~RL。
+
+\subsection{Megatron-强化学习核心优化}
+\textbf{打包序列支持。} 正如章节中所讨论的~\ref{subsec:packed_sequence_support}，我们可以打包序列以从一批可变序列长度中删除填充。基于打包序列支持，在 RL 框架方面，我们建议使用打包感知的动态批次大小，这可确保每个批次具有相似的有效令牌总数。此外，我们引入了一种额外的负载平衡策略，该策略明确考虑了变压器块的异构计算成本。因为注意力模块与序列长度成二次方缩放（\(O(L^{2})\)）而前馈网络（FFN）线性扩展（\(O(L)\)），在令牌计数方面非常平衡的批次在挂钟时间上仍然可能高度不平衡。为了缓解这个问题，我们首先为批次中的每个样本计算其序列长度的平方，并在小批次中求和。然后，我们根据这个“注意力成本”指标对微批次进行排序，并以从小到大到小的模式安排它们（即先递增顺序，然后递减顺序）。
+这种蛇形排列有两个好处。 (i) 对于数据并行性、管道并行性和专家并行性，它减少了同步泡沫，因为连续的微批次具有相当的注意力工作负载。 (ii) 在管道并行性中，传统上未充分利用阶段的预热和冷却阶段观察到更短的空闲期，因为较轻的微批次在时间表中提前和推迟到达。
+
+\textbf{动态上下文并行性。} 正如章节中所讨论的~\ref{subsec:dynamic-cp}，传统的训练设置必须选择固定的上下文并行（CP）程度，以保证工作负载中的最长序列不会触发内存不足（OOM）故障。这种保守的选择迫使大多数较短的序列（其内存占用要小得多）以不必要的大CP度运行，从而浪费跨设备带宽并降低总体吞吐量。
+动态 CP 通过在每个微批次的基础上自适应地选择 CP 程度，消除了这种一刀切的限制。在运行时，我们按长度对传入序列进行分桶，选择使每个桶保持在设备内存预算内的最小 CP 度，并相应地分派微批次。长序列接收较高的 CP 程度以保持内存安全，而短序列则以较低的 CP 程度执行，从而最大限度地提高算术强度并减少通信量。
+
+\textbf{CPU 优化器卸载。} 为了进一步缓解 GPU 内存压力，我们在前向和后向传递过程中将优化器状态卸载到主机 DRAM，仅在参数更新步骤时将它们加载回 GPU。由于优化器张量可以占用模型参数大小的数倍，因此暂时驱逐它们可以释放大量高带宽 GPU 内存，这些内存可以用于缓存激活或容纳更长的序列。
+
+\textbf{FP16 培训支持。} 尽管 bfloat16 (BF16) 被广泛用于预训练大型语言模型，但一些研究发现，在强化学习训练期间，半精度浮点 (FP16) 在某些超参数选择下可以提供更高的数值稳定性。因此，Megatron-Core MoE 实施提供了功能齐全的 FP16 路径，包括损耗缩放和混合精度优化器内核，使从业者能够选择最符合其稳定性要求的精度模式，而无需牺牲吞吐量。
+
+\textbf{路由器重播。} 最近的作品~\cite{fan2025routerreplay} 结果表明，捕获 MoE 路由器在推理过程中生成的路由决策并在后续训练阶段重播它们可以提高收敛一致性。得益于社区贡献的补丁，Megatron-Core MoE 现在支持此功能：推理引擎记录每个令牌的专家分配，并且训练堆栈可以摄取并强制执行相同的路由模式。这种机制将路由可变性与权重更新解耦，从而产生更稳定的优化轨迹，特别是在策略数据分布变化频繁的 RL 设置中。
+
+
+\section{结论}
+该报告介绍了 Megatron-Core MoE，这是一个用于训练大规模专家混合模型的开源堆栈。 MoE 稀疏性带来了两个基本挑战：表现为三堵墙（内存、通信和计算效率）的参数计算不匹配，以及需要注意力层和 MoE 层解耦并行性的密集稀疏不匹配。通过结合应对这些挑战的集成解决方案，Megatron-Core MoE 可实现高效的万亿参数规模训练。
+
+主要技术贡献包括：
+\begin{itemize}
+    \item \textbf{多维并行性和平行折叠。} 专家并行与张量、管道、上下文和数据并行无缝集成。 MoE 并行折叠将注意力和 MoE 层配置解耦，打破了限制 $\text{EP} \leq \text{DP}$ 约束并实现针对模型架构和硬件拓扑定制的灵活并行映射。
+
+    \item \textbf{内存优化。} 细粒度激活重新计算、内存高效排列、具有 BF16 矩的精确感知优化器以及 CPU 激活卸载将 DeepSeek-V3 的每个 GPU 内存占用量从 199.5 GB 减少到 80 GB 以下，使得在当前硬件上进行万亿参数训练变得可行。
+
+    \item \textbf{沟通优化。} 高性能令牌调度程序（DeepEP 和 HybridEP）和通信计算重叠将所有对所有的瓶颈转变为隐藏在专家计算后面的后台操作。
+
+    \item \textbf{计算效率。} 分组 GEMM 内核可批量进行专家计算，以实现更好的硬件利用率，内核融合可整合路由和排列操作，CUDA 图形可减少启动开销，无同步执行可消除主机设备同步，从而实现无缝 MoE。
+
+    \item \textbf{FP8 培训。} 具有选择性精度的完整 FP8 支持，保护数字敏感组件（路由器、嵌入、优化器状态），同时积极量化批量计算，同时提供跨越所有三堵墙的优势。
+
+    \item \textbf{长情境训练。} 上下文并行性和张量并行性缩放可维持每个设备的恒定子序列长度，从而能够在注意力计算占主导地位的情况下进行 16K 至 64K+ 令牌序列的训练。
+
+    \item \textbf{生产特点。} 负载平衡策略和令牌丢弃确保稳定的训练，分布式检查点支持与并行性无关的重新分片，升级循环从密集检查点初始化 MoE 模型，多令牌预测集成支持高级训练目标。
+
+    \item \textbf{强化学习支持。} Megatron Core 和 Megatron-Bridge 提供与流行的 RL 框架的无缝集成，同时打包序列支持、动态上下文并行性和路由器重播解决了 RL 训练后工作负载的独特挑战。
+\end{itemize}
+
+这些优化使 Megatron-Core MoE 能够实现强大的训练吞吐量：DeepSeek-V3（685B 参数，256 位专家）在 256 GB300/GB200 上以每个 GPU 1,233/1,048 TFLOPS 的速度进行训练，在 1,024 个 H100 上以每个 GPU 368 TFLOPS 的速度进行训练； Qwen3-235B 在 GB300/GB200 上实现 974/919 TFLOPS，在 H100 上实现 320 TFLOPS。 GB300 和 GB200 平台提供大约 3$\times$ 与 H100 相比，令牌吞吐量更高，展示了该框架利用下一代硬件的能力。
+
+通过开源这些功能，Megatron-Core MoE 为研究人员和从业人员提供了用于 MoE 大规模实验和部署的生产级工具。模块化架构支持快速原型设计，而完整的优化堆栈支持从研究原型到万亿参数生产模型的培训。
+
+
+\section*{贡献和致谢}
+\label{sec:contributions}
+
+% {\color{red}\textbf{Note:} This list of contributors has not been finalized. If there are any issues or omissions, please feel free to contact Zijie.}
+
+\paragraph{核心贡献者。}
+严子杰\textsuperscript{*\S},白红晓\textsuperscript{*}, 鑫耀\textsuperscript{*}, 刘丹尼斯\textsuperscript{*}, 刘同, 刘宏斌, 李平田, 吴宇森, 范世清, 李涛, 张罗宾, 王宇中, 徐世芳, 张杰克, 陈旭文, 李昆仑, 白岩, 邓高, 郑楠, Vijay Anand Korthikanti, Abhinav Khattar, Ethan He, Soham Govande.\\
+{\small \textsuperscript{*}同等贡献。 \textsuperscript{\S}项目负责人。}
+
+\paragraph{贡献者。}
+Sangkug Lym、朱中波、马泰来、张奇、袁浩辰、任晓伟、付德宇、张顺康、邵江、Ray Wang、Vasudevan Rengasamy、Rachit Garg、Santosh Bhavani。
+
+\paragraph{领导。}
+杨俊\textsuperscript{\dag}, 姚家杰\textsuperscript{\dag}, 李西鹏, Chandler Zhou, David Wu, Yingcan Wei, Ashwath Aithal, Michael Andersch, Mohammad Shoeybi.\\
+{\small \textsuperscript{\dag}通讯作者。}
+
+\vspace{0.5em}
+\noindent\textit{我们还感谢未单独列出的其他同事以及开源社区的共同开发功能、宝贵反馈和持续参与的贡献。}
+
+\bibliographystyle{ieeetr}
+\bibliography{references}
+
+\newpage
+\appendix
+
+\section{符号参考}\label{sec:notation}
+
+表~\ref{tab:notation} 总结了本报告中使用的符号。
+
+\begin{table}[ht]
+\centering
+\caption{本报告中使用的符号和缩写。}
+\label{tab:notation}
+\begin{tabular}{cl}
+\toprule
+\textbf{象征} & \textbf{描述} \\
+\midrule
+\multicolumn{2}{l}{\emph{型号参数}} \\
+$E$ & 教育部层专家数量 \\
+$K$ & 顶部-$k$ 路由宽度（每个令牌激活的专家； $K \ll E$) \\
+$h$ & 隐藏维度 \\
+$N$ & 模型总参数 \\
+$N_{\text{active}}$ & 每个令牌激活的参数（按比例缩放 $K$) \\
+$N_{\text{total}}$ & 总参数包括所有专家（比例为 $E$) \\
+\midrule
+\multicolumn{2}{l}{\emph{培训维度}} \\
+$T$ & 每个 GPU 的本地令牌计数 \\
+$B$ & 批次大小（每批次代币） \\
+$s$ & 序列长度 \\
+$L$ & MoE层数 \\
+\midrule
+\multicolumn{2}{l}{\emph{并行性}} \\
+TP & 张量并行度 \\
+聚丙烯 & 流水线并行度 \\
+CP & 上下文并行度 \\
+DP & 数据并行度 \\
+EP & 专家并行度 \\
+ETP & 专家张量并行度（MoE 特定） \\
+电子数据处理 & 专家数据并行度（MoE 特定） \\
+VPP & 虚拟管道并行性（交错的管道阶段） \\
+\midrule
+\multicolumn{2}{l}{\emph{批量配置}} \\
+MBS & 微批量大小 \\
+GBS & 全局批量大小 \\
+遗传算法 & 梯度累积步骤 \\
+\midrule
+\multicolumn{2}{l}{\emph{精确格式}} \\
+BF16 & BFloat16（16位脑浮点） \\
+%FP8-CS & FP8 with current-scaling quantization \\
+FP8-BLK & 具有逐块缩放量化功能的 FP8 (Hopper) \\
+MXFP8 & 具有原生张量支持的微缩放 FP8 (Blackwell) \\
+\midrule
+\multicolumn{2}{l}{\emph{指标和缩写}} \\
+微量元素单位 & 模型 FLOP 利用率 \\
+GEMM & 通用矩阵乘法 \\
+SDPA & 缩放点积注意力 \\
+MLA & 多重潜在注意力 \\
+MTP & 多标记预测 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{详细的基准配置}\label{sec:showcase_settings}
+
+本节列出了用于重现表中报告的性能数据的并行度配置和详细设置~\ref{tab:moe_throughput_unified}。每个配置都由其系统、GPU 数量和精度格式来标识，相应的超参数字符串总结了并行布局和批量配置。 
+
+\subsection{配置详情} 
+表~\ref{tab:appendix_showcase_configs} 表中列出了吞吐量结果对应的基准配置~\ref{tab:moe_throughput_unified}。这些设置是在撰写本文时根据经验调整找到的最佳配置，可能不是全局最优的。
+
+\begin{table}[t]
+\centering
+\small
+\caption{表中报告的基准条目的并行性和训练配置详细信息~\ref{tab:moe_throughput_unified}.}
+\label{tab:appendix_showcase_configs}
+\begin{tabular}{lll}
+\toprule
+模型 & 配置 & 超参数 \\
+\midrule
+DeepSeek-V3 & GB300、256 个 GPU、4k seqlen、MXFP8、1233 TF      & \texttt{TP1 PP4 CP1 EP64 VPP4 MBS1 GBS8192} \\
+DeepSeek-V3 & GB200、256 个 GPU、4k seqlen、MXFP8、1048 TF      & \texttt{TP1 PP4 CP1 EP64 VPP4 MBS1 GBS8192} \\
+DeepSeek-V3 & GB200、256 个 GPU、4k seqlen、BF16、857 TF        & \texttt{TP1 PP8 CP1 EP32 VPP4 MBS1 GBS4096} \\
+DeepSeek-V3 & H100, 1{,}024 个 GPU、4k seqlen、FP8-BLK、368 TF  & \texttt{TP2 PP4 CP1 EP64 VPP4 MBS1 GBS8192} \\
+\midrule
+Qwen3-235B & GB300、256 个 GPU、4k seqlen、MXFP8、974 TF        & \texttt{TP1 PP4 CP1 EP64 VPP\phantom{0}6 MBS2 GBS3072} \\
+Qwen3-235B & GB200、256 个 GPU、4k seqlen、MXFP8、919 TF        & \texttt{TP1 PP4 CP1 EP64 VPP\phantom{0}6 MBS3 GBS3072} \\
+Qwen3-235B & GB200、256 个 GPU、4k seqlen、BF16、750 TF         & \texttt{TP1 PP4 CP1 EP32 VPP12 MBS1 GBS8192} \\
+Qwen3-235B & H100、256 个 GPU、4k seqlen、BF16、320 TF          & \texttt{TP2 PP8 CP1 EP32 VPP\phantom{0}4 MBS1 GBS2048} \\
+\midrule
+Qwen3-235B & GB300、128 个 GPU、128k seqlen、MXFP8、1{,}150 TF    & \texttt{TP4 PP4 CP4 EP32 VPP12 MBS1 GBS1024} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{关键优化} 
+本节总结了我们的基准测试运行中使用的对性能最关键的优化功能的配置。尽管完整的优化空间更大，但这些功能始终对吞吐量具有一阶影响，并且跨工作负载和平台的配置不同。
+
+\textbf{DeepSeek-V3}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item \textbf{调度员：} GB300/GB200 上的 HybridEP； H100 上的 DeepEP。
+    \item \textbf{重新计算：} GB300 上没有； \texttt{mlp} GB200； \texttt{up\_proj, mlp} 在 H100 上。
+    \item \textbf{1F1B重叠：} GB300 和 H100 为 ON； GB200 为关闭。
+    \item \textbf{CUDA 图表：} \texttt{attn, moe\_router, moe\_preprocess} GB300/GB200； H100 上关闭。
+\end{itemize}
+选择这些设置是为了平衡内存空间、通信开销和内核效率，以实现每个平台上的最大持续吞吐量。
+
+\textbf{Qwen3-235B}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item \textbf{调度员：} GB300/GB200 上的 HybridEP； H100 上的 DeepEP。
+    \item \textbf{重新计算：} \texttt{moe\_act, layernorm} GB200 和 H100 上。
+    \item \textbf{1F1B重叠：} GB300 为关闭； GB200 和 H100 为 ON。
+    \item \textbf{CUDA 图表：} \texttt{attn, moe\_router, moe\_preprocess}.
+\end{itemize}
+由此产生的配置模式反映了在特定于模型和硬件的约束下吞吐量优先的调整策略。
+
+\subsection{再现性} 
+基准数字见表~\ref{tab:moe_throughput_unified} 可以通过两个支持的工作流程进行复制。首先，用户可以运行端到端训练 \textbf{威震天桥}~\footnote{\url{https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/scripts/performance}}，它为模型、并行性和优化配置提供了更高级别的接口。其次，用户可以直接使用 \textbf{威震天核心 (MCore)} 在中使用特定于模型的脚本 \textbf{威震天-教育部-ModelZoo}~\footnote{\url{https://github.com/yanring/Megatron-MoE-ModelZoo/tree/main/best_practice/readme.md}}，它公开了用于性能调整的全套低级启动标志。两个工作流程都是从Table开始~\ref{tab:appendix_showcase_configs} 并仅调整一些特定于集群的运行时设置（例如，主机文件、环境模块和作业调度程序选项）。
+
+\end{document}

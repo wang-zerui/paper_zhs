@@ -1,0 +1,195 @@
+\section{Megatron-Core MoE in Reinforcement Learning}\label{sec:rl}
+Reinforcement learning (RL) post-training has become a critical paradigm following OpenAI o1 and DeepSeek-R1~\cite{deepseekai2025deepseekr1}. Many leading RL-trained models are MoE architectures (DeepSeek-R1, Kimi-K2, etc.), and RL workloads introduce challenges that amplify the MoE-specific issues discussed throughout this report: highly variable sequence lengths stress the Memory Wall, interleaved inference and training phases demand rapid memory offloading, and routing discrepancies between inference and training engines threaten stability. To achieve high training throughput at scale, RL frameworks run Megatron-Core inside Ray workers as the distributed training backend, and use Megatron-Bridge for bidirectional Hugging Face to Megatron checkpoint conversion.
+
+\subsection{Challenges for RL Post-Training}
+RL post-training differs from pre-training in ways that impose new requirements on the training engine:
+
+\begin{enumerate}
+    \item \textbf{Variable-length sequences.} Pre-training typically operates on fixed-length sequences (e.g., 4K tokens). RL workloads, by contrast, produce highly variable sequence lengths: the maximum may reach 128K or even 1M tokens, while the mean within a mini-batch is often one-half to one-quarter of the maximum. This long-tailed distribution makes it difficult to balance compute efficiency against peak memory consumption.
+    \item \textbf{Memory offloading.} RL frameworks typically co-locate a training engine and an inference engine on the same GPUs, offloading one engine's state while the other is active. This requires both engines to release and restore their full memory footprint quickly and completely---a non-trivial requirement when optimizer states, activations, and KV caches must all be managed.
+    \item \textbf{Online weight export.} The inference engine must be updated with the latest parameters after each training step. This requires the training engine to export weights rapidly in a format the inference engine can load, across diverse model architectures.
+    \item \textbf{Training stability.} Standard RL algorithms assume that sampled responses come from the current policy distribution. In practice, however, the inference and training engines use different optimized kernels, producing slightly different token probabilities even with identical parameters---effectively introducing off-policy bias. For MoE models, this problem is compounded: tokens from the same sequence may be routed to different experts in the inference and training engines, amplifying the discrepancy.
+\end{enumerate}
+\subsection{Megatron-Bridge}
+A typical RL workflow starts from a pretrained Hugging Face model and fine-tunes it in an RL framework. At scale, these frameworks often run Megatron-Core inside Ray workers for distributed training, while rollout commonly uses an inference stack that expects Hugging Face-format checkpoints. This creates two integration needs: mapping model definitions to Megatron-Core modules, and converting checkpoints between Hugging Face and Megatron formats efficiently. Megatron-Bridge addresses the checkpoint interoperability layer, enabling fast HF-to-Megatron conversion for initialization, training, and export. This pattern is used across multiple RL frameworks, including veRL~\cite{sheng2024hybridflow}, Slime~\cite{slime_github}, and NeMo~RL.
+
+\subsection{Megatron-Core Optimization for Reinforcement Learning}
+\textbf{Packed Sequence Support.} As discussed in Section~\ref{subsec:packed_sequence_support}, we can pack sequences to remove the padding from a batch of variable sequence lengths. Building on packed sequence support, on the RL framework side, we recommend using a packing-aware dynamic batch size, which ensures that every batch has a similar total number of effective tokens. Moreover, we introduce an additional load–balancing strategy that explicitly accounts for the heterogeneous computational cost of the transformer blocks. Because the attention module scales quadratically with sequence length (\(O(L^{2})\)) whereas the feed-forward network (FFN) scales linearly (\(O(L)\)), a batch that is well balanced in terms of token count can still be highly unbalanced in wall-clock time. To mitigate this issue, we first compute, for every sample in the batch, the square of its sequence length and take the sum within the mini-batch. We then sort micro-batches according to this ``attention cost’’ metric and schedule them in a small-to-large-to-small pattern (i.e., increasing order followed by decreasing order).
+This serpentine ordering delivers two benefits. (i) For data parallelism, pipeline parallelism, and expert parallelism, it reduces synchronization bubbles because consecutive micro-batches have comparable attention workloads. (ii) Within pipeline parallelism, the warm-up and cool-down phases, where stages are traditionally under-utilized, observe shorter idle periods, as lighter micro-batches arrive earlier and later in the schedule.
+
+\textbf{Dynamic Context Parallelism.} As discussed in Section~\ref{subsec:dynamic-cp}, conventional training setups must pick a fixed context-parallel (CP) degree that guarantees the longest sequence in the workload will not trigger out-of-memory (OOM) failures. This conservative choice forces the majority of shorter sequences, whose memory footprints are far smaller, to run with an unnecessarily large CP degree, thereby wasting cross-device bandwidth and reducing overall throughput.
+Dynamic CP removes this one-size-fits-all restriction by selecting the CP degree adaptively on a per-micro-batch basis. At runtime we bucket incoming sequences by length, choose the minimal CP degree that keeps each bucket within the device memory budget, and dispatch micro-batches accordingly. Long sequences receive a higher CP degree to stay memory-safe, whereas short sequences are executed with a lower CP degree that maximizes arithmetic intensity and reduces communication volume.
+
+\textbf{CPU Optimizer Offloading.} To further relieve GPU memory pressure, we offload the optimizer states to host DRAM during the forward and backward passes, loading them back onto the GPU only for the parameter-update step. Because optimizer tensors can occupy multiple times the size of model parameters, temporarily evicting them frees a substantial amount of high-bandwidth GPU memory that can instead be used to cache activations or accommodate longer sequences.
+
+\textbf{FP16 Training Support.} Although bfloat16 (BF16) is widely adopted for pre-training large language models, several studies have observed that, during reinforcement-learning training, half-precision floating-point (FP16) can deliver greater numerical stability under certain hyper-parameter choices. Megatron-Core MoE implementation therefore offers a fully-featured FP16 path, including loss scaling and mixed-precision optimizer kernels, enabling practitioners to select the precision mode that best aligns with their stability requirements without sacrificing throughput.
+
+\textbf{Router Replay.} Recent work~\cite{fan2025routerreplay} shows that capturing the routing decisions produced by the MoE router during inference and replaying them in subsequent training phases can improve convergence consistency. Thanks to a community-contributed patch, Megatron-Core MoE now supports this feature: the inference engine logs each token's expert assignment, and the training stack can ingest and enforce the same routing pattern. This mechanism decouples routing variability from weight updates, leading to more stable optimization trajectories, especially in RL settings where on-policy data distribution shifts are frequent.
+
+
+\section{Conclusion}
+This report presented Megatron-Core MoE, an open-source stack for training large-scale Mixture-of-Experts models. MoE sparsity introduces two fundamental challenges: a parameter-compute mismatch that manifests as the Three Walls (Memory, Communication, and Compute Efficiency), and a dense-sparse mismatch that requires decoupled parallelism for attention and MoE layers. By combining integrated solutions across these challenges, Megatron-Core MoE enables efficient trillion-parameter-scale training.
+
+The key technical contributions include:
+\begin{itemize}
+    \item \textbf{Multi-Dimensional Parallelism and Parallel Folding.} Expert Parallelism integrates seamlessly with tensor, pipeline, context, and data parallelism. MoE Parallel Folding decouples attention and MoE layer configurations, breaking the restrictive $\text{EP} \leq \text{DP}$ constraint and enabling flexible parallelism mapping tailored to model architecture and hardware topology.
+
+    \item \textbf{Memory Optimization.} Fine-grained activation recomputation, memory-efficient permutation, precision-aware optimizers with BF16 moments, and CPU activation offloading reduce memory footprint from 199.5 GB to under 80 GB per GPU for DeepSeek-V3, making trillion-parameter training feasible on current hardware.
+
+    \item \textbf{Communication Optimization.} High-performance token dispatchers (DeepEP and HybridEP), and communication-computation overlap transform all-to-all from a bottleneck into a background operation hidden behind expert computation.
+
+    \item \textbf{Compute Efficiency.} Grouped GEMM kernels batch expert computations for better hardware utilization, kernel fusion consolidates routing and permutation operations, CUDA Graphs reduce launch overhead, and sync-free execution eliminates host-device synchronization for dropless MoE.
+
+    \item \textbf{FP8 Training.} Full FP8 support with selective precision, protecting numerically sensitive components (router, embeddings, optimizer states) while aggressively quantizing bulk computation, provides benefits across all three walls simultaneously.
+
+    \item \textbf{Long-Context Training.} Context Parallelism and Tensor Parallelism scaling maintain constant sub-sequence lengths per device, enabling training at 16K to 64K+ token sequences where attention computation dominates.
+
+    \item \textbf{Production Features.} Load balancing strategies and token dropping ensure stable training, distributed checkpointing enables parallelism-agnostic resharding, upcycling initializes MoE models from dense checkpoints, and multi-token prediction integration supports advanced training objectives.
+
+    \item \textbf{Reinforcement Learning Support.} Megatron Core and Megatron-Bridge provide seamless integration with popular RL frameworks, while packed sequence support, dynamic context parallelism, and router replay address the unique challenges of RL post-training workloads.
+\end{itemize}
+
+These optimizations enable Megatron-Core MoE to achieve strong training throughput: DeepSeek-V3 (685B parameters, 256 experts) trains at 1,233/1,048 TFLOPS per GPU on 256 GB300/GB200s and 368 TFLOPS per GPU on 1,024 H100s; Qwen3-235B achieves 974/919 TFLOPS on GB300/GB200 and 320 TFLOPS on H100. The GB300 and GB200 platforms deliver approximately 3$\times$ higher token throughput compared to H100, demonstrating the framework's ability to exploit next-generation hardware.
+
+By open-sourcing these capabilities, Megatron-Core MoE provides researchers and practitioners with production-grade tools for MoE experimentation and deployment at scale. The modular architecture enables rapid prototyping while the full optimization stack supports training from research prototypes to trillion-parameter production models.
+
+
+\section*{Contributions and Acknowledgments}
+\label{sec:contributions}
+
+% {\color{red}\textbf{Note:} This list of contributors has not been finalized. If there are any issues or omissions, please feel free to contact Zijie.}
+
+\paragraph{Core Contributors.}
+Zijie Yan\textsuperscript{*\S}, Hongxiao Bai\textsuperscript{*}, Xin Yao\textsuperscript{*}, Dennis Liu\textsuperscript{*}, Tong Liu, Hongbin Liu, Pingtian Li, Evan Wu, Shiqing Fan, Li Tao, Robin Zhang, Yuzhong Wang, Shifang Xu, Jack Chang, Xuwen Chen, Kunlun Li, Yan Bai, Gao Deng, Nan Zheng, Vijay Anand Korthikanti, Abhinav Khattar, Ethan He, Soham Govande.\\
+{\small \textsuperscript{*}Equal contribution. \textsuperscript{\S}Project lead.}
+
+\paragraph{Contributors.}
+Sangkug Lym, Zhongbo Zhu, Tailai Ma, Qi Zhang, Haochen Yuan, Xiaowei Ren, Deyu Fu, Shunkang Zhang, Jiang Shao, Ray Wang, Vasudevan Rengasamy, Rachit Garg, Santosh Bhavani.
+
+\paragraph{Leadership.}
+June Yang\textsuperscript{\dag}, Jiajie Yao\textsuperscript{\dag}, Xipeng Li, Chandler Zhou, David Wu, Yingcan Wei, Ashwath Aithal, Michael Andersch, Mohammad Shoeybi.\\
+{\small \textsuperscript{\dag}Corresponding authors.}
+
+\vspace{0.5em}
+\noindent\textit{We also acknowledge contributions from other colleagues not listed individually, as well as from the open-source community for co-developed features, valuable feedback, and continued engagement.}
+
+\bibliographystyle{ieeetr}
+\bibliography{references}
+
+\newpage
+\appendix
+
+\section{Notation Reference}\label{sec:notation}
+
+Table~\ref{tab:notation} summarizes the notation used throughout this report.
+
+\begin{table}[ht]
+\centering
+\caption{Notation and abbreviations used throughout this report.}
+\label{tab:notation}
+\begin{tabular}{cl}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+\multicolumn{2}{l}{\emph{Model parameters}} \\
+$E$ & Number of experts in an MoE layer \\
+$K$ & Top-$k$ routing width (experts activated per token; $K \ll E$) \\
+$h$ & Hidden dimension \\
+$N$ & Total model parameters \\
+$N_{\text{active}}$ & Parameters activated per token (scales with $K$) \\
+$N_{\text{total}}$ & Total parameters including all experts (scales with $E$) \\
+\midrule
+\multicolumn{2}{l}{\emph{Training dimensions}} \\
+$T$ & Local token count per GPU \\
+$B$ & Batch size (tokens per batch) \\
+$s$ & Sequence length \\
+$L$ & Number of MoE layers \\
+\midrule
+\multicolumn{2}{l}{\emph{Parallelism}} \\
+TP & Tensor Parallelism degree \\
+PP & Pipeline Parallelism degree \\
+CP & Context Parallelism degree \\
+DP & Data Parallelism degree \\
+EP & Expert Parallelism degree \\
+ETP & Expert Tensor Parallelism degree (MoE-specific) \\
+EDP & Expert Data Parallelism degree (MoE-specific) \\
+VPP & Virtual Pipeline Parallelism (interleaved pipeline stages) \\
+\midrule
+\multicolumn{2}{l}{\emph{Batch configuration}} \\
+MBS & Micro-batch size \\
+GBS & Global batch size \\
+GA & Gradient accumulation steps \\
+\midrule
+\multicolumn{2}{l}{\emph{Precision formats}} \\
+BF16 & BFloat16 (16-bit brain floating point) \\
+%FP8-CS & FP8 with current-scaling quantization \\
+FP8-BLK & FP8 with blockwise scaling quantization (Hopper) \\
+MXFP8 & Microscaling FP8 with native Tensor support (Blackwell) \\
+\midrule
+\multicolumn{2}{l}{\emph{Metrics and abbreviations}} \\
+MFU & Model FLOP Utilization \\
+GEMM & General Matrix Multiplication \\
+SDPA & Scaled Dot-Product Attention \\
+MLA & Multi-Latent Attention \\
+MTP & Multi-Token Prediction \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Detailed Benchmark Configurations}\label{sec:showcase_settings}
+
+This section lists the parallelism configurations and detailed settings for reproducing the performance numbers reported in Table~\ref{tab:moe_throughput_unified}. Each configuration is identified by its system, GPU count, and precision format, and the corresponding hyper-parameter string summarizes the parallelism layout and batch configuration. 
+
+\subsection{Configuration Details} 
+Table~\ref{tab:appendix_showcase_configs} lists the benchmark configurations corresponding to the throughput results in Table~\ref{tab:moe_throughput_unified}. These settings are best-found configurations from empirical tuning at the time of writing and may not be globally optimal.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Parallelism and training configuration details for benchmark entries reported in Table~\ref{tab:moe_throughput_unified}.}
+\label{tab:appendix_showcase_configs}
+\begin{tabular}{lll}
+\toprule
+Model & Configuration & Hyper-parameters \\
+\midrule
+DeepSeek-V3 & GB300, 256 GPUs, 4k seqlen, MXFP8, 1233 TF      & \texttt{TP1 PP4 CP1 EP64 VPP4 MBS1 GBS8192} \\
+DeepSeek-V3 & GB200, 256 GPUs, 4k seqlen, MXFP8, 1048 TF      & \texttt{TP1 PP4 CP1 EP64 VPP4 MBS1 GBS8192} \\
+DeepSeek-V3 & GB200, 256 GPUs, 4k seqlen, BF16, 857 TF        & \texttt{TP1 PP8 CP1 EP32 VPP4 MBS1 GBS4096} \\
+DeepSeek-V3 & H100, 1{,}024 GPUs, 4k seqlen, FP8-BLK, 368 TF  & \texttt{TP2 PP4 CP1 EP64 VPP4 MBS1 GBS8192} \\
+\midrule
+Qwen3-235B & GB300, 256 GPUs, 4k seqlen, MXFP8, 974 TF        & \texttt{TP1 PP4 CP1 EP64 VPP\phantom{0}6 MBS2 GBS3072} \\
+Qwen3-235B & GB200, 256 GPUs, 4k seqlen, MXFP8, 919 TF        & \texttt{TP1 PP4 CP1 EP64 VPP\phantom{0}6 MBS3 GBS3072} \\
+Qwen3-235B & GB200, 256 GPUs, 4k seqlen, BF16, 750 TF         & \texttt{TP1 PP4 CP1 EP32 VPP12 MBS1 GBS8192} \\
+Qwen3-235B & H100, 256 GPUs, 4k seqlen, BF16, 320 TF          & \texttt{TP2 PP8 CP1 EP32 VPP\phantom{0}4 MBS1 GBS2048} \\
+\midrule
+Qwen3-235B & GB300, 128 GPUs, 128k seqlen, MXFP8, 1{,}150 TF    & \texttt{TP4 PP4 CP4 EP32 VPP12 MBS1 GBS1024} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Key Optimizations} 
+This section summarizes the configuration of the most performance-critical optimization features used in our benchmark runs. Although the full optimization space is larger, these features consistently have first-order impact on throughput and are configured differently across workloads and platforms.
+
+\textbf{DeepSeek-V3}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item \textbf{Dispatcher:} HybridEP on GB300/GB200; DeepEP on H100.
+    \item \textbf{Recompute:} None on GB300; \texttt{mlp} on GB200; \texttt{up\_proj, mlp} on H100.
+    \item \textbf{1F1B overlap:} ON for GB300 and H100; OFF for GB200.
+    \item \textbf{CUDA Graphs:} \texttt{attn, moe\_router, moe\_preprocess} on GB300/GB200; OFF on H100.
+\end{itemize}
+These settings are chosen to balance memory headroom, communication overhead, and kernel efficiency for maximum sustained throughput on each platform.
+
+\textbf{Qwen3-235B}
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item \textbf{Dispatcher:} HybridEP on GB300/GB200; DeepEP on H100.
+    \item \textbf{Recompute:} \texttt{moe\_act, layernorm} on GB200 and H100.
+    \item \textbf{1F1B overlap:} OFF for GB300; ON for GB200 and H100.
+    \item \textbf{CUDA Graphs:} \texttt{attn, moe\_router, moe\_preprocess}.
+\end{itemize}
+The resulting configuration pattern reflects a throughput-first tuning strategy under model- and hardware-specific constraints.
+
+\subsection{Reproducibility} 
+The benchmark numbers in Table~\ref{tab:moe_throughput_unified} can be reproduced through two supported workflows. First, users can run end-to-end training with \textbf{Megatron-Bridge}~\footnote{\url{https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/scripts/performance}}, which provides a higher-level interface for model, parallelism, and optimization configuration. Second, users can launch training directly with \textbf{Megatron-Core (MCore)} using model-specific scripts in \textbf{Megatron-MoE-ModelZoo}~\footnote{\url{https://github.com/yanring/Megatron-MoE-ModelZoo/tree/main/best_practice/readme.md}}, which exposes the full set of low-level launch flags for performance tuning. In both workflows, start from Table~\ref{tab:appendix_showcase_configs} and adjust only a few cluster-specific runtime settings (for example, hostfile, environment modules, and job scheduler options).
+
+\end{document}

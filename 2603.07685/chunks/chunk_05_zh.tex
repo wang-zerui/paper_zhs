@@ -1,0 +1,428 @@
+\subsection{分布式检查点}
+
+传统的检查点将保存的模型状态与特定的并行性配置紧密耦合，在更改 TP、EP、PP 或其他并行性设置时需要复杂的离线转换。我们的分布式检查点库通过以下方式解决了这个问题 \textbf{与并行性无关的检查点} 自动重新分片。
+
+核心抽象是 \texttt{ShardedTensor} 描述符，对每个局部张量的全局形状、偏移量和分片模式进行编码。在保存期间，每个等级独立写入其本地分片（完全并行保存），消除协调器瓶颈。在加载过程中，每个等级根据以下情况确定它需要全局张量的哪些部分： \textit{新的} 分片规范并仅读取这些切片。
+
+这使得任意并行重新配置成为可能：保存的检查点 $\text{TP}=2$, $\text{EP}=4$ 可以装载 $\text{TP}=4$, $\text{EP}=8$ 无需离线转换。该库支持 Zarr（默认）和 PyTorch Distributed~\cite{zhao2023pytorchfsdp} 存储后端。
+
+\subsection{灵活的非对称虚拟管道并行性}\label{sec:flexible-vpp}
+
+交错管道并行~\cite{narayanan2021efficient} 将每个物理管道阶段划分为多个虚拟阶段，并进行交错调度，从而减少管道泡沫。传统的VPP需要均匀的层分布（例如，具有 $\text{PP}=4$, $\text{VPP}=2$ 将层分布为 $[6, 6, 6, 6]$）。然而，MoE 模型表现出巨大的工作负载异质性：MoE 层、密集层、嵌入、丢失和 MTP 等专用层具有显着不同的计算成本。
+
+我们介绍 \textbf{灵活的非对称VPP}，它允许每个虚拟阶段有不同数量和类型的层。考虑具有 61 个解码器层和 1 个 MTP 层的 DeepSeek-V3，位于 $\text{PP}=16$, $\text{VPP}=2$ （表~\ref{tab:flexible-vpp-example}）。初始等级将轻量级嵌入与 3 个密集解码器相结合（与 2 个 MoE 层的成本相匹配）。大多数等级每级拥有 2 个 MoE 解码器。最终排名战略性地放置了重MTP层和轻量损失层以平衡工作负载。
+
+这种方法使 VPP 能够用于具有任意层数的模型，通过考虑每层计算成本来实现真正的负载平衡，并为专用层提供灵活的放置。
+
+\begin{table}[ht]
+\centering
+\caption{具有灵活的非对称 VPP 的 DeepSeek-V3 的层分布（$\text{PP}=16$, $\text{VPP}=2$).}
+\label{tab:flexible-vpp-example}
+\begin{tabular}{lll}
+\toprule
+\textbf{PP等级} & \textbf{VPP 排名 0} & \textbf{VPP 排名 1} \\
+\midrule
+0       & 嵌入+3$\times$ 解码器 & 2$\times$ 解码器 \\
+1--13   & 2$\times$ 解码器             & 2$\times$ 解码器 \\
+14      & 2$\times$ 解码器             & MTP \\
+15      & 2$\times$ 解码器             & 损失 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+这种灵活的不对称方法（\figref{fig:flexible-vpp-layout}）具有几个关键优势：（1）它为具有任意层数和组合的模型启用 VPP，消除了对模型架构设计的人为限制； （2）它通过允许对层分布进行细粒度控制来实现真正的计算负载平衡，考虑到层类型之间计算成本的巨大差异； (3)它为专用层（MTP、编码器-解码器结构等）提供灵活的放置策略，使不同的模型架构能够充分利用管道并行性的延迟隐藏优势。从业者可以设计布局，将计算量大的层分布到各个队列中，以避免内存压力并最大限度地减少管道气泡。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/plots/flexible_vpp_layout_draft.pdf}
+    \caption{\textbf{灵活的管道平行布置。}}
+    \label{fig:flexible-vpp-layout}
+\end{figure}
+
+\subsection{升级再造}
+Upcycling将预训练的稠密模型转换为稀疏MoE架构，扩展模型容量而无需从头开始重新训练~\cite{komatsuzaki2022sparse,he2024upcyclinglargelanguagemodels,vavre2024llama}。我们支持虚拟组初始化和专家权重缩放，以实现密集检查点无缝适应细粒度 MoE 模型。该方法采用了 softmax-then-topK 路由，该路由通过选定的专家子集来路由令牌，从而以恒定或降低的推理成本提高表达能力，如下所示 \figref{fig:granular_upcycling_diagram}.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[width=1\textwidth]{figures/granular_upcycling.png}
+    \caption{将致密层粒度升级为 E2G2T2 细粒度 MoE 的示例。 E2G2T2 表示 4 位专家，前 2 位，中等大小的一半。 (1) 我们在中间维度上对 MLP 权重进行分片（$4h \rightarrow 2h$）然后复制碎片。 (2) 我们初始化一半的路由器权重，然后复制它们。这确保了 Top2 始终选择每个 MLP 分片之一，因此 MoE 输出与训练开始时的密集模型相同。}
+    \label{fig:granular_upcycling_diagram}
+\end{figure}
+
+\subsection{多标记预测}
+多令牌预测（MTP）优化模型，在每个位置预测多个连续的未来令牌，致密化监督信号~\cite{gloeckle2024better,deepseekai2025deepseekv3technicalreport}。与并行独立预测不同，MTP 通过隐藏状态转换维持预测之间的因果依赖性，从而加速收敛并提高生成质量。在推理过程中，模型恢复为标准单令牌预测以实现部署兼容性。
+
+我们将 MTP 与灵活的管道并行性相集成，允许 MTP 层战略性地放置在 VPP 布局中，以实现平衡的工作负载分配。
+
+\subsection{μ子优化器}
+与 AdamW 等执行逐元素更新的传统优化器不同，Muon 优化器通过正交化整个权重矩阵引入了矩阵感知方法~\cite{liu2025muonscalablellmtraining}。与 AdamW 相比，这改进了优化轨迹的调节并显着减少了训练步骤。
+
+我们的集成为大规模分布式训练提供了生产就绪的支持，具有以下几个关键优势：（1）完全支持分割查询键值（QKV）权重布局，即使在注意力投影矩阵存储为单独的张量时也能实现高效的正交化； (2) 与分布式优化器无缝集成，允许优化器状态跨数据并行级别进行分片，同时保持正确的正交化语义； (3) 当 GPU 内存受限时，Muon 正交化缓冲区的 CPU 卸载。
+
+\textbf{MuonClip。}
+训练万亿参数模型带来了稳定性挑战，其中查询键点积可以无限增长，导致注意力爆炸 \cite{kimik2}。 MuonClip 通过 cuDNN、cudnn-frontend 和 Transformer Engine 中的硬件加速实现解决了这个问题。
+
+\section{绩效评估}\label{performance-evaluations}
+前面的部分描述了 Megatron-Core MoE 的架构、并行策略和优化。本节通过实证评估验证了这些贡献，展示了 Megatron-Core MoE 堆栈在不同模型配置和硬件平台上的性能。
+
+\begin{notebox}
+\textbf{生活文档。} 本节中的性能结果代表基于 Megatron-Core 的时间点快照 \textbf{v0.16}，不是可实现性能的上限。积极的优化工作正在进行中，这些数字将在未来的版本中得到改善。我们还计划将覆盖范围扩大到社区中出现的其他模型架构。有关最新性能数据，请参阅 Megatron-LM 和 Megatron-Bridge 存储库。
+\end{notebox}
+
+\subsection{实验装置}
+
+\textbf{基准模型。}
+我们在两种最先进的细粒度 MoE 架构上评估了 Megatron-Core MoE，这些架构对框架的功能进行了压力测试：DeepSeek-V3-685B~\cite{deepseekai2025deepseekv3technicalreport} 还有Qwen3-235B~\cite{qwen2025qwen25technicalreport,yang2025qwen3technicalreport}。两种模型都采用细粒度的专家设计，放大了“三墙”挑战：高专家数量会导致内存容量紧张，top-k 路由会增加所有到所有的通信量，而较小的每个专家计算会降低 GEMM 效率。这些特征使它们成为验证我们的优化策略的苛刻基准。
+
+\textbf{硬件和软件堆栈。}
+基准测试是在 NVIDIA GB200 和 H100 GPU 上进行的，以评估各代硬件的性能。我们使用 \texttt{dev} 威震天-LM的分支\footnote{\url{https://github.com/NVIDIA/Megatron-LM/tree/dev}} 配备最新的 TransformerEngine\footnote{\url{https://github.com/NVIDIA/TransformerEngine/tree/main}}。完整的优化堆栈在章节中描述~\ref{key-features-optimizations} 已启用，包括但不限于：
+\begin{itemize}[noitemsep,topsep=0pt]
+    \item \textbf{FP8 训练：} GB200/GB300 (Blackwell) 上的 MXFP8 具有本机 Tensor Core 支持，H100 (Hopper) 上的块式 FP8
+    \item \textbf{内存优化：} 选择性重新计算和激活 \& 优化器状态卸载以减少峰值内存占用
+    \item \textbf{优化的令牌调度程序：} 混合EP\footnote{\url{https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep}} 在利用多节点 NVLink 和 DeepEP 的 GB200/GB300 NVL 系统上\footnote{\url{https://github.com/deepseek-ai/DeepEP/tree/main}} 在 H100 系统上
+    \item \textbf{沟通重叠：} 1F1B 与专家计算完全重叠
+    \item \textbf{内核优化：} 分组 GEMM、路由器融合、排列融合和 CUDA 图
+\end{itemize}
+
+\textbf{指标。}
+我们以 TFLOPS 为单位报告每个 GPU 的吞吐量以及每个 GPU 每秒处理的令牌数。这些指标提供了计算效率和实际训练吞吐量的两个视图。
+
+\subsection{关键绩效结果}
+
+
+\textbf{概述。}
+表~\ref{tab:moe_throughput_unified} 总结了在完全启用的优化堆栈下，NVIDIA GB300、GB200 和 H100 系统上具有代表性的细粒度 MoE 训练工作负载的每 GPU 吞吐量~\ref{key-features-optimizations}。所有配置都使用力平衡路由来确保专家之间的令牌分配均匀。
+
+% \textbf{Mixtral-8$\times$22B (long-context stress test).}
+% We additionally include Mixtral-8$\times$22B with a sequence length of 65{,}536 to highlight regimes where long-context training amplifies memory pressure and communication overhead (Table~\ref{tab:moe_throughput_unified}). At this long sequence length, FP8 training improves throughput by roughly 14\% relative to BF16 on both GB200 and H100, and the newer GB200 platform delivers substantially higher per-GPU throughput than H100.
+
+\textbf{DeepSeek-V3和Qwen3-235B（大规模训练）。}
+表~\ref{tab:moe_throughput_unified} 报告标准序列长度为 4 的两个当代细粒度 MoE 训练工作负载的结果{,}096，包括1{,}024-GPU DeepSeek-V3 在 H100 上运行。在这些设置中，测量结果显示了所有三个平台上每 GPU 的强大效率和高持续吞吐量。
+
+
+\def\unifiedthroughputtablescale{1.1}
+\begin{table}[t]
+    \centering
+    \caption{NVIDIA GB300、GB200 和 H100 上两种专家混合模型的统一吞吐量基准（每个 GPU 数据）。 All configurations use force-balanced routing. Dtype 列指定 FP8 配方：FP8-BLK 表示 Hopper 上的块式 FP8，MXFP8 表示 Blackwell 上的微缩放 FP8。}
+    \scalebox{\unifiedthroughputtablescale}{%
+    \begin{tabular}{lcccccc}
+    \toprule
+    模型 & 系统 & \#GPU & 序列 & 数据类型 & 每 GPU TF & 令牌/s/GPU \\
+    \midrule
+    DeepSeek-V3   & 国标300 & 256  &   4,096 & MXFP8    & 1233 & 4,730 \\
+    DeepSeek-V3   & 国标200 & 256  &   4,096 & MXFP8    & 1048 & 4,020 \\
+    DeepSeek-V3   & 国标200 & 256  &   4,096 & BF16     & 857  & 3,298 \\
+    DeepSeek-V3   & H100  & 1024 &   4,096 & FP8-BLK  & 368  & 1,412 \\
+    \midrule
+    Qwen3-235B    & 国标300 & 256  &   4,096 & MXFP8    & 974  & 6,583 \\
+    Qwen3-235B    & 国标200 & 256  &   4,096 & MXFP8    & 919  & 6,212 \\
+    Qwen3-235B    & 国标200 & 256  &   4,096 & BF16     & 750  & 5,100 \\
+    Qwen3-235B    & H100  & 256  &   4,096 & BF16     & 320  & 2,132 \\
+    \midrule
+    Qwen3-235B    & 国标300 & 128  & 131,072 & MXFP8    & 1,150  & 1,556 \\
+    \bottomrule
+    \end{tabular}%
+    }
+    \label{tab:moe_throughput_unified}
+\end{table}
+
+
+\textbf{FP8 培训效果。}
+如表所示~\ref{tab:moe_throughput_unified}，对于 DeepSeek-V3，FP8 训练在 H100 上的每个 GPU 达到了 368 TFLOPS，这表明分块 FP8 配方能够在 Hopper 架构上高效训练大规模 MoE 模型。章节中讨论的优化~\ref{sec:fp8-training} 通过动态专家路由和不同的计算模式成功解决了将 FP8 应用到 MoE 模型的挑战，保持数值稳定性，同时提供降低精度的性能优势。
+
+\textbf{GB200 和 GB300 性能。}
+GB200 和 GB300 平台提供大约 3$\times$ 与 H100 相比，两种 MoE 模型在 GPU 数量相当或更少的情况下具有更高的令牌吞吐量。这种效率提升源于卓越的内存带宽、更高的计算能力和原生 MXFP8 Tensor Core 支持。结合我们的软件优化（章节~\ref{sec:memory-wall} 还有~\ref{sec:compute-wall}），GB200 在 DeepSeek-V3 训练中每个 GPU 实现了超过 1,048 TFLOPS，GB300 进一步将其提升到每个 GPU 1,233 TFLOPS。
+
+\textbf{可扩展性。}
+这些结果表明，Megatron-Core MoE 可有效扩展到具有数千个 GPU 和数千亿个参数的生产工作负载。 DeepSeek-V3在1,024-GPU规模的成功部署验证了并行折叠的有效性（第~\ref{sec:parallel-folding}）、优化调度程序（小节~\ref{sec:comm-wall}），以及内核优化（部分~\ref{sec:compute-wall}).
+
+\textbf{长上下文压力测试）。}
+捕捉超出标准的行为 4{,}096-代币制度，表~\ref{tab:moe_throughput_unified} 包括序列长度为 131 的长上下文 Qwen3-235B 运行{,}GB300 上的 072。即使在这种内存和通信密集型设置中，系统也能维持 1{,}每个 GPU 150 TFLOPS，表明在完整优化堆栈下具有强大的长上下文效率。
+
+\noindent
+\textbf{配置详细信息。} 表中每个基准条目使用的并行度配置（TP、PP、CP、EP、DP、VPP 等）、批量设置和其他优化详细信息~\ref{tab:moe_throughput_unified} 附录中有提供~\ref{sec:showcase_settings}。请注意，这些配置代表了我们通过经验调整找到的最佳设置；它们可能不是全局最优的，因为对于这种规模的模型来说，详尽地搜索完整的并行性和优化配置空间是不可行的。
+
+部分~\ref{performance-evaluations} 证明了 Megatron-Core MoE 在最新 GPU 平台上的不同 MoE 架构中实现了最先进的性能。我们现在检查这些结果背后的系统方法，并展示如何从部分进行优化~\ref{sec:memory-wall}--\ref{sec:compute-wall} 通过详细的案例研究转化为部署决策。
+
+\section{性能最佳实践}\label{sec:best-practices}
+
+部分~\ref{parallelism-strategies}--\ref{sec:production-features} 提出了用于 MoE 训练的全面优化工具：并行折叠、优化调度程序、分组 GEMM、降低精度训练、CUDA 图等。然而， \textbf{拥有许多优化技术并不会自动转化为高性能}。每种技术都解决了特定的瓶颈，但也带来了自己的权衡。降低精度的训练会减少记忆，但需要仔细的精度管理。通信重叠提高了吞吐量，但增加了内存开销。 CUDA 图消除了主机延迟，但与动态张量形状冲突。挑战不在于优化的可用性；而在于优化的可用性。它知道 \emph{哪个} 要应用的优化， \emph{什么时候} 应用它们，并且 \emph{如何} 他们互相影响。
+
+这种复杂性意味着实现峰值性能需要系统的方法，而不是反复试验调整。通过在 GB200 和 H100 上优化各种 MoE 模型（从 Mixtral 到 DeepSeek-V3），我们开发了一个可重复的工作流程，用于识别瓶颈并应用有针对性的解决方案。本节将这些经验教训提炼成可操作的指导。部分~\ref{sec:best-practices-methodology} 介绍了“三墙”框架下的方法，并为每个阶段提供了具体示例。部分~\ref{sec:deepseek-case-study} 然后展示这些原则如何在 GB200 和 H100 上结合用于 DeepSeek-V3，包括为什么同一模型在不同硬件上需要不同的策略。
+
+\subsection{系统优化工作流程}\label{sec:best-practices-methodology}
+
+我们提出了 MoE 性能优化的三阶段工作流程。这种方法源于跨 GB200 和 H100 平台的 Mixtral、DeepSeek-V3 和 Qwen3 调优。这个过程本质上是 \textbf{迭代的}：解决一个瓶颈往往会暴露出下一个瓶颈，需要不断的分析和改进。
+
+\subsubsection{第一阶段：建立内存可行的并行性}
+
+内存可行性是第一个限制。在优化吞吐量之前，配置必须适合 GPU 内存。表~\ref{tab:parallel-memory-impact} 总结了每种并行策略如何影响每个 GPU 内存和通信开销。
+
+\begin{table}[ht]
+\centering
+\caption{并行策略对内存和通信的影响。 $d$ = 并行度。 $^\dagger$需要分布式优化器（\texttt{-{}-use-distributed-optimizer}).}
+\label{tab:parallel-memory-impact}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{战略} & \textbf{峰值激活} & \textbf{重量记忆} & \textbf{优化器状态} & \textbf{通信（每层）} \\
+\midrule
+TP & $1/d$ （有SP） & $1/d$ & $1/d$ & 高的 \\
+EP & $\sim$1（取决于负载） & $1/d$ （仅限教育部） & $1/d$ & 中等的 \\
+聚丙烯 & 1 ($>$1 个带 VPP） & $1/d$ & $1/d$ & 中等的 \\
+CP & $1/d$ & 1 & $1/d^\dagger$ & 中等的 \\
+DP & 1 & 1 & $1/d^\dagger$ & 低的 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{notebox}
+\textbf{快速可行性测试。} 使用 \texttt{-{}-fake-init-process-group} 在单个 GPU 上模拟分布式训练，无需分配完整集群即可实现并行配置的快速迭代。请参阅 Megatron-LM 文档\footnote{\url{https://github.com/NVIDIA/Megatron-LM/pull/2254}} 详细使用方法。\\
+\textbf{交互式内存估算器}。我们开发了一个带有 Web GUI 的交互式内存模拟器，可以针对内存占用进行快速并行调整。查看博客\cite{nvidia_memory_estimator_blog} 了解详情。
+
+\end{notebox}
+
+\noindent\textbf{例子。} 对于 685B 参数的细粒度 MoE 模型，仅 BF16 激活就可以超过 130\,每个 GPU GB（见表~\ref{tab:memory-breakdown}），立即排除 80 上的基线配置\,GB 设备甚至具有并行性，并激励 Phase~3 中的内存优化。
+
+\subsubsection{第 2 阶段：选择最佳并行策略}
+
+一旦确定了内存可行的配置，请选择在保持吞吐量的同时最大限度地减少通信开销的策略。最佳选择取决于模型架构、序列长度和硬件拓扑。
+
+\paragraph*{准则 1：最小化模型并行性，最大化数据并行性}
+\begin{itemize}
+    \item \textbf{目标：} 保持 TP/EP/PP/CP 尽可能小，同时避免 OOM。
+    \item \textbf{为什么：} 模型并行性会引入通信开销，从而损害性能。
+    \item \textbf{如何：} 使用分布式优化器（\texttt{-{}-use-distributed-optimizer}）跨 DP 等级对优化器状态进行分片，释放内存以用于更大的 DP 大小。
+\end{itemize}
+
+\paragraph*{准则 2：在 NVLink 域内保持 EP 和 TP 通信}
+\begin{itemize}
+    \item \textbf{目标：} 确保EP$\times$TP 适合 NVLink 域（通常单个节点中有 8 个 GPU，除非使用多节点 NVLink）。
+    \item \textbf{为什么：} EP和TP是通信密集型； NVLink 提供比跨节点互连更高的带宽。
+    \item \textbf{缩放比例：} 当扩展到 NVLink 域之外时，优先选择 PP，而不是跨节点扩展 TP/EP。
+\end{itemize}
+
+\noindent\textbf{笔记：} 对于像 DeepSeek-V3 这样的大型 MoE 模型，EP 通信量可能超过 NVLink 可以隐藏的量。在这种情况下，启用通信计算重叠（参见第~\ref{sec:comm-wall}）以隐藏计算背后的 EP 延迟。
+
+\paragraph*{准则 3：使用管道并行性 (PP) 进行多节点扩展}
+\begin{itemize}
+    \item \textbf{目标：} 使用 PP 在节点之间分配层，同时保留 EP$\times$NVLink 内的 TP。
+    \item \textbf{电压值：} 启用虚拟管道并行以减少 PP 时的管道气泡 $\geq 2$.
+    \item \textbf{配置：} 放 \texttt{-{}-pipeline-model-parallel-layout} 控制管道并行度设置（请参阅第〜\ref{sec:flexible-vpp}）。较大的 VPP 通常会减少管道气泡，但会增加 P2P 通信；中间值通常可以提供最佳平衡。应平衡每个 VPP 等级的工作负载以最大化吞吐量。
+\end{itemize}
+
+\paragraph*{准则 4：对于专家层，优先选择 EP 而不是 TP}
+对于 MoE 层，EP 比 TP 具有多个优势：
+\begin{itemize}
+    \item \textbf{更好的 GEMM 效率：} 较大的局部矩阵大小可提高 GPU 利用率。
+    \item \textbf{较低的沟通：} 对于 MoE 层来说，EP 的通信开销比 TP 少。
+    \item \textbf{更简单的计算图：} 更容易将通信与计算重叠。
+    \item \textbf{令牌排列：} 当EP $=$ \texttt{num\_experts}，消除了局部标记排列。
+\end{itemize}
+
+\noindent\textbf{例子：} 对于 Mixtral-8$\times$7B、EP8$\times$TP1 优于 EP4$\times$TP2。
+
+\paragraph*{准则 5：为长序列启用上下文并行性 (CP)}
+\begin{itemize}
+    \item \textbf{何时使用：} 序列长度 $\geq$ 8K 代币。
+    \item \textbf{何时避免：} 对于序列 $<$ 4K 代币，CP 开销通常超过收益。
+    \item \textbf{关键因素：} CP 效率取决于重叠通信与计算。
+    \item \textbf{配置：} 放 \texttt{-{}-context-parallel-size} 跨 GPU 划分序列。
+\end{itemize}
+
+\noindent\textbf{例子。} 考虑 NVL72 系统上的 256 名专家 MoE 模型。应用指南~4，平行折叠套装专家TP\,=\,1 使每个专家都在单个 GPU 上运行，从而最大限度地提高 GEMM 效率。根据 Guideline~2，EP6​​4 完全适合 NVLink 领域。然后，Guideline~1 驱动剩下的选择：可用内存预算决定注意力层的 TP 和 PP，剩下的由 DP 填充。
+
+\subsubsection{第 3 阶段：分析和优化瓶颈}
+
+建立工作并行配置后，分析训练运行以确定哪堵墙占主导地位。根据瓶颈类型应用有针对性的优化。
+
+\paragraph*{内存瓶颈（内存墙）}
+\textbf{症状：} 被迫使用完全重新计算或过大的并行度来避免 OOM。
+
+\noindent\textbf{解决方案：} 应用节省内存的技术（表~\ref{tab:memory-bottleneck}）以减少内存消耗。
+
+\begin{table}[ht]
+\centering
+\caption{内存瓶颈解决方案。}
+\label{tab:memory-bottleneck}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llll}
+\toprule
+\textbf{优化} & \textbf{开销} & \textbf{配置} & \textbf{参考} \\
+\midrule
+FP8 培训 & 低的 & \texttt{-{}-fp8-format -{}-fp8-recipe} & \S\ref{sec:fp8-activation} \\
+选择性重新计算 & 低的 & \texttt{-{}-recompute-granularity -{}-recompute-modules} & \S\ref{sec:recomputation} \\
+精度感知优化器 & 低的 & \texttt{-{}-use-precision-aware-optimizer} & \S\ref{sec:precision-opt} \\
+激活卸载 & 中等的 & \texttt{-{}-fine-grained-activation-offloading -{}-offload-modules} & \S\ref{sec:offloading} \\
+优化器卸载 & 中等的 & \texttt{-{}-offload-optimizer-states} & \S\ref{sec:precision-opt} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph*{通讯瓶颈（通讯墙）}
+\textbf{症状：} 分析显示，集体操作花费了大量时间。
+
+\noindent\textbf{解决方案：} 确定哪个通信是瓶颈并应用相应的优化。 （表~\ref{tab:comm-bottleneck})
+
+\begin{table}[ht]
+\centering
+\caption{通信瓶颈解决方案。}
+\label{tab:comm-bottleneck}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lll}
+\toprule
+\textbf{通讯类型} & \textbf{配置} & \textbf{参考} \\
+\midrule
+DP梯度减少和参数收集 & \texttt{-{}-overlap-grad-reduce -{}-overlap-param-gather} & --- \\
+TP通讯 & \texttt{-{}-tp-comm-overlap} & --- \\
+EP调度员 & \texttt{-{}-moe-token-dispatcher-type} & \S\ref{sec:deepep} \\
+EP 全面隐藏 & \texttt{-{}-overlap-moe-expert-parallel-comm} & \S\ref{sec:comm-overlap} \\
+PP 发送/接收 & \texttt{-{}-pipeline-model-parallel-layout} & \S\ref{sec:flexible-vpp} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\paragraph*{CPU 开销瓶颈（计算效率墙）}
+计算效率墙表现为两种不同的形式：CPU 开销和计算效率低下。当主机无法足够快地启动 GPU 内核时，就会出现 CPU 开销，从而在 GPU 执行中产生间隙。
+
+\noindent\textbf{症状：} Nsight Systems 时间线显示了 GPU 内核之间的差距，其中 CPU 无法足够快地启动内核。
+
+\noindent\textbf{解决方案：} 通过最小化内核启动和启用 CUDA 图形来减少主机端开销（表~\ref{tab:cpu-bottleneck}).
+
+\begin{table}[ht]
+\centering
+\caption{CPU开销瓶颈解决方案。}
+\label{tab:cpu-bottleneck}
+\begin{tabular}{lll}
+\toprule
+\textbf{优化} & \textbf{配置} & \textbf{参考} \\
+\midrule
+禁用 Python GC & \texttt{-{}-manual-gc -{}-manual-gc-interval 10} & --- \\
+减少内核启动 & 降低 TP 或提高 MBS & --- \\
+启用 CUDA 图形 & \texttt{-{}-cuda-graph-impl transformer\_engine} & \S\ref{sec:cuda-graphs} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph*{计算瓶颈（计算效率墙）}
+当 GPU 内核本身未充分利用硬件资源时，就会出现计算效率低下的情况，这通常是由于细粒度 MoE 架构中的 GEMM 尺寸较小所致。
+
+\noindent\textbf{症状：} 尽管没有通信或 CPU 瓶颈，但 GPU SM 利用率较低。
+
+\noindent\textbf{解决方案：} 通过批处理、融合和降低精度来提高内核效率（表~\ref{tab:compute-bottleneck}).
+
+\begin{table}[ht]
+\centering
+\caption{计算瓶颈解决方案。}
+\label{tab:compute-bottleneck}
+\begin{tabular}{llp{4cm}}
+\toprule
+\textbf{优化} & \textbf{配置} & \textbf{参考} \\
+\midrule
+分组GEMM & \texttt{-{}-moe-grouped-gemm} & \S\ref{sec:kernel-fusion} \\
+内核融合 & \texttt{-{}-moe-router-fusion -{}-moe-permute-fusion} & \S\ref{sec:kernel-fusion} \\
+FP8精度 & \texttt{-{}-fp8-format -{}-fp8-recipe} & \S\ref{sec:reduced-precision-training} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{例子。} 在 EP 跨节点的 NVL8 系统上，分析可能会揭示消耗 30--50 的所有通信\% 步骤时间，直指通讯墙。在 NVLink 域内保留相同 EP 程度的 NVL72 系统上，启用 FP8 后的主要瓶颈通常会转移到 CPU 开销；更快的 GPU 计算会暴露主机端启动延迟。不同硬件上的相同模型可能需要完全不同的优化策略。
+
+\subsubsection{概括}
+
+三个阶段的顺序很重要：内存约束是必须首先解决的硬障碍（阶段〜1），并行决策决定通信拓扑（阶段〜2），只有这样才能分析揭示要攻击的墙（阶段〜3）。关键的是，这个过程是 \textbf{迭代的}。内存优化可以实现更小的并行度，返回到 Phase~1。一些 Phase~3 优化有自己的内存成本（EP 通信重叠需要额外的缓冲区，CUDA 图形消耗额外的内存），这可能需要重新审视早期的决策。每轮之后的连续分析指导下一次迭代。
+
+\subsection{案例研究：在 GB200 和 H100 上调优 DeepSeek-V3}\label{sec:deepseek-case-study}
+
+DeepSeek-V3 代表了 MoE 训练的极限压力测试：685B 总参数，具有多令牌预测 (MTP) 和多潜在注意力 (MLA)。所有三堵墙均适用：来自 256 位专家的内存压力、前 8 名路由的高全对全容量以及每个专家的小型 GEMM。前面的工作流程（节~\ref{sec:best-practices-methodology}）展示了如何单独处理每个阶段；该案例研究研究了这些决策如何相互作用以形成连贯的优化堆栈，以及为什么相同的模型在 GB200 和 H100 上需要根本不同的策略。
+
+\subsubsection{最终优化的配置和性能}
+
+表~\ref{tab:deepseekv3-config} 总结了GB200和H100平台上最终的优化配置和性能。
+
+\begin{table}[ht]
+\centering
+\caption{DeepSeek-V3 在 GB200 和 H100 上的最终优化配置。 $^\dagger$采用平行折叠； TP仅适用于非MoE模块，专家TP始终为1。}
+\label{tab:deepseekv3-config}
+\begin{tabular}{lcc}
+\toprule
+\textbf{配置} & \textbf{国标200} & \textbf{H100} \\
+\midrule
+硬件 & 256$\times$国标200 & 1024$\times$H100 \\
+并行度（TP/PP/EP）$^\dagger$ & 1/4/64 & 2/8/64 \\
+VPP & 4 & 4 \\
+GBS / MBS / SeqLen & 8192 / 1 / 4096 & 8192 / 1 / 4096 \\
+精确 & MXFP8 & FP8-逐块 \\
+调度员 & 混合EP & 深EP \\
+重新计算 & \texttt{mlp} & \texttt{mlp}, \texttt{mla\_up\_proj}, \texttt{moe\_act}, \texttt{layernorm} \\
+CUDA 图形 & 启用 & --- \\
+EP 全部重叠 & --- & 启用 \\
+\midrule
+\textbf{性能（TFLOPS/GPU）} & \textbf{1048} & \textbf{368} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+GB200 配置使用 HybridEP（针对 NVL72 进行了优化）和 CUDA Graph 来最大限度地减少 CPU 开销，这成为 Blackwell 上 FP8 训练的主要瓶颈。 H100 配置使用 FP8 块级精度以及 DeepEP 和 EP 全部重叠来隐藏通信延迟。
+
+表~\ref{tab:deepseekv3-journey} 总结了每个平台上应用的关键优化。
+
+\begin{table}[ht]
+\centering
+\caption{按平台划分的 DeepSeek-V3 优化摘要。}
+\label{tab:deepseekv3-journey}
+\begin{tabular}{lp{5cm}p{5cm}}
+\toprule
+\textbf{类别} & \textbf{国标200} & \textbf{H100} \\
+\midrule
+并行性 & 平行折叠 \newline 灵活的VPP & 平行折叠 \newline 灵活的VPP \\
+\midrule
+精确 & MXFP8 & FP8-逐块 \\
+\midrule
+记忆 & 内存高效排列 \newline 细粒度重新计算 \newline FP8初级配重 \newline 低精度优化器状态 \newline 优化器状态卸载 & 内存高效排列 \newline 细粒度重新计算 \newline FP8初级配重 \newline 低精度优化器状态 \\
+\midrule
+沟通 & 混合EP & 深EP \newline EP 通信重叠 \\
+\midrule
+计算效率 & 内核融合 \newline CUDA 图形 \newline CPU端优化 & 内核融合 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{优化配置剖析}
+
+\paragraph*{为什么采用这种并行布局？}
+两个平台都使用并行折叠（Guideline~4）来解耦注意力和专家并行性：TP 仅适用于注意力层以减少内存，而专家将 EP 与 TP 结合使用\,=\,1 以获得更好的 GEMM 效率。选择 EP64 是为了使每个 GPU 恰好容纳 256 个专家中的 4 个，从而消除本地令牌排列开销。
+
+平台的主要区别在于内存容量。 GB200的192\,每个 GPU GB（与\ H100 的 80\,GB）允许TP1/PP4代替TP2/PP8，将管道深度减半，从而减少管道气泡并简化工作负载平衡（Guideline~1）。然后，灵活的 VPP 会微调管道：在 H100 上，布局 \texttt{Et*3|(tt|)*29m|L} 在第一级中组嵌入3个变压器层，将MTP置于独立级中，并分离损耗；在GB200上， \texttt{Et*4|(tttt|)*14tmL} 将层分布在 16 个虚拟阶段，以在较短的管道上实现平衡计算。这些并行配置为所有后续优化奠定了基础。
+
+\paragraph*{记忆墙}
+FP8 训练是第一个杠杆：它将两个平台上的激活内存减半，释放 GPU 内存，否则需要大量的重新计算。在 H100 上，释放的内存预算至关重要，因为它会启用 EP 通信重叠，这需要额外的缓冲区来进行管道调度和组合操作（请参阅下面的通信墙）。细粒度重新计算（\texttt{mlp}, \texttt{mla\_up\_proj}, \texttt{layernorm}, \texttt{moe\_act}）减少剩余的内存压力。内存高效排列消除了冗余激活存储，低精度优化器状态 (BF16) 提供了额外的空间。
+
+在 GB200 上，内存链的解析方式有所不同。 NVL72 将 EP 保持在本地，因此通信重叠并不重要，并且其内存预算被完全释放。 GB200 更高的 C2C 带宽 (NVLink-C2C) 使优化器状态卸载变得有效：传输开销足够低，卸载可以释放大量 GPU 内存用于激活。这反过来又减少了细粒度重新计算的需要 \texttt{mlp}，远没有 H100 那么激进。
+
+\paragraph*{通讯墙}
+在H100/B200（NVL8）上，EP64跨越8个节点，跨节点all-to-all时延会消耗近50\% 标准的全对全调度程序的步骤时间。 DeepEP 通过融合排列和优化的集体操作减少了这种开销。即便如此，EP 通信重叠对于隐藏专家计算背后剩余的跨节点延迟至关重要，并且这种重叠之所以可行，是因为 FP8 为额外的缓冲区释放了足够的内存（请参阅上面的内存墙）。
+
+在 GB200 (NVL72) 上，EP64 完全位于 NVLink 域内。 HybridEP充分利用了1.8\,TB/s 双向带宽，无需通信重叠。仅通过硬件拓扑就可以有效解决通信墙问题，将主要瓶颈转移到计算效率上。
+
+\paragraph*{计算效率墙}
+FP8 可以加速两个平台上的 GEMM（H100 上的块式 FP8，GB200 上具有原生 Blackwell Tensor Core 支持的 MXFP8），但这种加速有一个副作用：更快的 GPU 计算会暴露 CPU 开销。在 GB200 上，NVL72 已经消除了通信瓶颈，CPU 开销成为主要约束；主机无法足够快地启动内核以保持 GPU 饱和。
+
+部分 CUDA 图通过将注意力、路由器和 MoE 预处理捕获到静态图中来解决这个问题，同时保留动态专家计算未绘制的图。内核融合（路由器融合、置换融合、MLA RoPE 融合）减少内核启动次数。 CPU/NUMA 绑定\footnote{这 \texttt{bindpcie} 脚本位于 \url{https://github.com/NVIDIA/mlperf-common/blob/main/client/bindpcie} 根据本地等级自动检测 GPU/NUMA 拓扑并使用 \texttt{numactl} 将每个进程的 CPU 和内存绑定到距离其 GPU 最近的 NUMA 节点。} 减少主机端内存访问延迟。
+
+\medskip
+
+这些优化的跨领域性质贯穿始终：FP8 同时减少内存（激活减半）并提高计算吞吐量，但引入了放大 CPU 开销的量化内核。相同的模型在不同的硬件上会得到根本不同的优化堆栈：H100 的堆栈以隐藏通信延迟（DeepEP + EP 重叠）为中心，而 GB200 的堆栈以消除 CPU 开销（CUDA 图形 + 内核融合）为中心。这种对比验证了第 4 节中的配置文件驱动迭代方法~\ref{sec:best-practices-methodology}.
+
+\subsubsection{经验教训}
+
+DeepSeek-V3 之外还有四个见解：
+
+\begin{enumerate}
+    \item \textbf{平台特性驱动策略}：GB200 更大的内存（192GB 与 80GB）和更高的 C2C 带宽可实现更激进的选择：更小的 PP 度、更少的细粒度重新计算以及有效的优化器卸载。 H100 的 NVL8 需要 EP 通信重叠来隐藏跨节点延迟，而 GB200 的 NVL72 将 EP64 保留在 NVLink 域内。
+    \item \textbf{平行折叠释放灵活性}：将注意力 TP 与专家 EP 解耦，允许对每个层类型进行独立优化。与灵活的 VPP 相结合，可以实现跨管道阶段的细粒度工作负载平衡。
+    \item \textbf{FP8 改变瓶颈}：FP8 训练加速了 GEMM 并减少了内存，但放大了 CPU 开销，成为主要瓶颈。 CUDA 图形、内核融合和 CPU/NUMA 绑定变得至关重要。
+    \item \textbf{迭代优化}：优化过程本质上是循环的。内存优化（重新计算、卸载）释放 GPU 内存，从而实现通信重叠。通信优化暴露了计算效率瓶颈。一些优化具有交叉效果：FP8 训练减少了内存和计算时间，但增加了 CPU 开销； CUDA Graph 减少了 CPU 开销，但消耗了额外的内存。这些相互作用意味着应用一种优化可能需要重新审视之前的决策。每次更改后的持续分析可指导下一个优化目标，并有助于确定何时收益递减表明转向下一个瓶颈。
+\end{enumerate}
+

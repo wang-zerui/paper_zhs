@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **36**
+- Papers: **38**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -18,6 +18,7 @@
 
 ## Library
 
+- [Scalable Training of Mixture-of-Experts Models with Megatron Core](./papers/2603-07685.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2F2603.07685%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/2603.07685/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/2603.07685/main_zh.pdf)
 - [ARL Tangram](./papers/arl-tangram.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Farl-tangram%2Fxiaomi_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/arl-tangram/xiaomi_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/arl-tangram/xiaomi_zh.pdf)
 - [Baichuan M3](./papers/baichuan-m3.md) · 主论文 · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fbaichuan-m3%2Felegantpaper-en.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/baichuan-m3/elegantpaper-en.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/baichuan-m3/elegantpaper-en.pdf)
 - [BlitzScale](./papers/blitzscale.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fblitzscale%2Ffastllmstart-zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/blitzscale/fastllmstart-zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/blitzscale/fastllmstart-zh.pdf)
@@ -35,6 +36,7 @@
 - [GatedAttn](./papers/gated-attn.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fgated-attn%2Facl_latex.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/gated-attn/acl_latex.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/gated-attn/acl_latex.pdf)
 - [GLM5](./papers/glm-5.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fglm-5%2F0_main_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/glm-5/0_main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/glm-5/0_main_zh.pdf)
 - [HyperParallel](./papers/hyper-parallel.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fhyper-parallel%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/hyper-parallel/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/hyper-parallel/main_zh.pdf)
+- [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](./papers/iclr-camera-ready-v0.md) · 主论文 · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2FICLR_camera_ready_v0%2Fmain.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/ICLR_camera_ready_v0/main.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/ICLR_camera_ready_v0/main.pdf)
 - [LLM Viewer](./papers/llm-viewer.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fllm-viewer%2Fsrc%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/llm-viewer/src/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/llm-viewer/src/main_zh.pdf)
 - [LMetric](./papers/lmetric.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flmetric%2Flmetric_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/lmetric/lmetric_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/lmetric/lmetric_zh.pdf)
 - [Why Low-Precision Transformer Training Fails](./papers/low-precision-flash-attention.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flow-precision-flash-attention%2Ficlr2026_conference_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/low-precision-flash-attention/iclr2026_conference_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/low-precision-flash-attention/iclr2026_conference_zh.pdf)

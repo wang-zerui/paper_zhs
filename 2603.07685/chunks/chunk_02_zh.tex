@@ -1,0 +1,551 @@
+\subsection{打破沟通壁垒}\label{sec:comm-wall}
+
+通信开销直接降低了 GPU 利用率：在集体操作中花费的每一微秒都意味着计算能力的损失。优化前，EP全对全通信通常消耗20--60\% 训练时间，取决于模型配置、EP 大小和硬件拓扑。当 EP 位于 NVLink 域内时（例如 GB200 NVL72 上带有 EP64 的 DeepSeek-V3），开销约为 20\%;当EP跨节点边界时（例如跨节点H100上带有EP64的DeepSeek-V3），它上升到40--60\%。本节中的技术针对该频谱上的所有点。
+
+专家并行 (EP) 将专家分布在设备之间，以将 MoE 模型扩展至超出单设备容量，但这种分布引入了独特的通信模式。与 AllReduce 的体积与并行度无关不同，all-to-all 的体积与 token 数量和隐藏维度成正比，并且更大的 EP 推动这种通信跨节点，而带宽有限。对于像 DeepSeek-V3 和 Kimi-K2 这样的细粒度 MoE 架构，三个因素加剧了这一挑战：
+
+\begin{itemize}
+    \item \textbf{高频}：更多的专家意味着每层有更多的调度/组合操作（DeepSeek-V3 有 58 个 MoE 层，每个层需要两次 all-to-all 操作）。
+    \item \textbf{跨节点瓶颈}：对于跨越多个节点的大 EP，由于带宽较低，节点间的所有到所有延迟占主导地位。
+    \item \textbf{算术强度低}：小专家可以快速完成计算，从而减少与通信重叠的时间。
+\end{itemize}
+
+\subsubsection{通信剖析：专家并行模式}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/EP_comm.png}
+    \caption{跨 4 个 GPU 和 4 个专家的专家并行。}
+    \label{fig:EP_comm}
+\end{figure}
+
+\Figref{fig:EP_comm} 说明了专家并行通信模式。在标准 EP 实现中，每个 MoE 层需要两个集体通信操作： \textit{派遣} 将代币发送给指定的专家，并且 \textit{结合} 将处理后的令牌返回到其原始排名。对于具有 $L$ 教育部层， $B$ 每批次的标记，隐藏维度 $h$，和 EP 学位 $\text{EP}$，每次前向传播涉及 $2L$ 调度/合并操作，每次传输 $O(Bh)$ 数据跨 $\text{EP}$ 行列。
+
+在 DeepSeek-V3 规模下，这相当于 58 个 MoE 层 $\times$ 2 个操作/层 = 每个前向传递 116 个调度/组合操作。向后传递使该计数加倍。在 50 GB/s 节点间带宽（例如 InfiniBand NDR）下，具有 200 MB 有效负载的单次调度需要几毫秒，每次迭代累积到数百或数千毫秒。
+
+通信量由EP配置决定，在不改变并行策略的情况下无法减少通信量。因此，优化必须针对通信的执行和调度方式。两种策略协同作用来解决通信开销：
+
+\begin{enumerate}
+    \item \textbf{最大化带宽利用率。} 标准 NCCL 全面实施并未充分利用可用带宽，特别是对于细粒度的 MoE 工作负载。优化调度程序（DeepEP、HybridEP）使用专门的内核来融合操作并利用硬件原语来接近峰值带宽。
+    \item \textbf{将延迟隐藏在计算背后。} 即使具有最佳带宽，全面操作也需要时间。通过将通信与相邻微批次的计算重叠，可以隐藏该延迟，而不是暴露在关键路径上。
+\end{enumerate}
+
+以下小节介绍了按这些策略组织的技术：带宽优化（DeepEP、HybridEP）和延迟隐藏（EP 通信重叠、管道集成）。
+
+\subsubsection{DeepEP 和 HybridEP：最大化 EP 带宽}\label{sec:deepep}
+
+在传统的 EP 实现中，代币交换依赖于所有人对所有人的通信。即使使用优化的 NCCL 集体，这条路径也有固有的局限性：在调度之前需要一个排列阶段，它复制每个令牌顶部 -$k$ 次并产生冗余流量。在某些设置中，此预处理也会表现为主机开销。
+
+为了解决这些问题，Megatron-Core 提供了两个基于代币的调度后端：HybridEP 和 DeepEP \cite{deepep2025}。基于令牌的调度消除了排列步骤并避免发送冗余令牌，从而减少总体通信量并提高有效带宽。
+
+HybridEP 由 NVIDIA 开发。它遵循与 DeepEP 相同的基于令牌的原则，利用 TMA 和 IBGDA 等硬件原语，并以较低的 SM 使用率实现相当或更高的带宽，包括多节点 NVLink (MNVL) 部署。
+
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/hybrid_ep_dispatch.drawio.png}
+    \caption{HybridEP的调度内核设计。}
+    \label{fig:hybrid_ep_dispatch}
+\end{figure}
+
+对于调度，如图所示 \figref{fig:hybrid_ep_dispatch}，HybridEP根据路由信息从全局内存读取数据到共享内存中，然后通过FIFO队列将令牌写入目的地。在节点间的情况下，HybridEP 不是直接通过网络接口发送重复的有效负载，而是首先使用 RDMA 扭曲组在跨节点具有相同本地索引的 GPU 之间交换数据，然后在每个节点内转发。这减少了跨节点流量并允许节点间和节点内传输重叠。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/hybrid_ep_combine.drawio.png}
+    \caption{HybridEP的组合内核设计。}
+    \label{fig:hybrid_ep_combine}
+\end{figure}
+
+对于组合，标准的全对全调度仅执行通信，因此之后需要单独的取消排列阶段。相反，HybridEP 将缩减融合到通信内核中。如图所示 \figref{fig:hybrid_ep_combine}，HybridEP通过FIFO队列读取数据，执行归约，并将结果直接写入目标位置。在节点间设置中，HybridEP 首先对必须跨节点通信的数据进行跨节点归约，然后在每个节点内完成第二次归约。
+
+
+我们在 GB200 和 H100 上评估全对全调度和 HybridEP，隐藏大小为 7168，序列长度为 4096，多个 EP 大小下有 256 个专家。结果总结在表中~\ref{tab:hybrid-ep}。在所有测试设置中，HybridEP 始终优于所有设置，在节点间场景中获得更大收益。该表仅报告通信延迟；在端到端训练中，一旦包含排列和主机开销，差距通常会更大。
+
+\begin{table}[ht]
+\centering
+\caption{HybridEP 和 all-to-all 的 EP 扩展性能（以 µs 为单位）。}
+\label{tab:hybrid-ep}
+\begin{tabular}{llrrrr}
+\toprule
+ &  & \multicolumn{2}{c}{GB200（微秒）} & \multicolumn{2}{c}{H100（微秒）} \\
+ & EP尺寸 & 混合EP & 全部到全部 & 混合EP & 全部到全部 \\
+\midrule
+\multirow{4}{*}{dispatch}
+ & 8  & 391 & 735 & 661  & 1265 \\
+ & 16 & 578 & 743 & 1485 & 5774 \\
+ & 32 & 612 & 769 & 3064 & 8059 \\
+ & 64 & 675 & 930 & 4626 & 9164 \\
+\midrule
+\multirow{4}{*}{combine}
+ & 8  & 353 & 741 & 624  & 1277 \\
+ & 16 & 527 & 765 & 1688 & 5628 \\
+ & 32 & 646 & 758 & 3088 & 7815 \\
+ & 64 & 744 & 827 & 4398 & 8727 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\subsubsection{EP 通信重叠：隐藏 EP 通信延迟}\label{sec:comm-overlap}
+
+优化的调度员改善了全方位 \textit{带宽利用率}，但根本问题仍然存在：all-to-all仍然位于端到端的关键路径上。对于带有EP64的DeepSeek-V3，EP全对全通信仍然可以占到30--40\% 迭代时间，直接限制吞吐量。
+
+关键的观察结果是，所有到所有的延迟可以是 \textit{隐} 当重叠窗口中存在足够的独立工作时，落后于计算 \cite{wang2022coconet,wang2024flux}。对于 DeepSeek-V3 和 Kimi-K2 等细粒度 MoE 模型来说，这是一个挑战，因为跨节点 EP 通信可能会消耗大约一半的层时间，而相邻算子（例如 GEMM）通常太短而无法隐藏它。
+
+为了解决这种不平衡问题，Megatron-Core 使用专用的 1F1B 全部重叠方案 \cite{1f1boverlap} 合并来自相邻微批次的前向和后向传递，并跨 CUDA 流交错计算和全对所有内核 \cite{narayanan2019pipedream,huang2019gpipe}。具体来说，一个微批次的后向全对所有与另一个微批次的前向注意力/MLP 重叠。从概念上讲，这是一个类似 DualPipe 的 \cite{hfdualpipe} 双向时间表建立在标准 1F1B 之上，同时保留威震天-核心兼容性。
+
+为了在 1F1B 中实现全部重叠，我们合并相邻的微批量前向和后向传递并评估两种模式：
+
+\begin{enumerate}
+    \item \textbf{合并的 FWD-FWD / BWD-BWD}：此策略合并来自两个微批次的相同类型的通道（\figref{fig:fwd_fwd_merge}）。在 \textit{前传-前传}，微批次 0 和 1 的前向传递并行运行，并与计算全部重叠。 \textit{BWD-BWD} 将相同的原理应用于向后传递。这种方法有明显的权衡：
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{内存开销}：2 倍峰值激活内存。
+        \item \textbf{全部到全部重叠}：隐藏 all-to-all 的机会较少，因为前向计算大约是后向计算的一半。
+    \end{itemize}
+    
+    \begin{figure}[ht]
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/EP_Overlap_merged_fwd_fwd.png}
+        \caption{将 FWD-FWD 时间线与全部重叠合并。}
+        \label{fig:fwd_fwd_merge}
+    \end{figure}
+
+    \item \textbf{合并的 FWD-BWD（DualPipe 等效）}：这是首选策略（\figref{fig:fwd_bwd_merge}）。它将一个微批次的前向传递与另一个微批次的后向传递合并（例如，微批次 1 的 FWD 与微批次 0 的 BWD）。与相比 \textit{前传-前传}，它提供：
+    \begin{itemize}[leftmargin=*]
+        \item \textbf{内存开销}：没有额外的内存开销（前向传递中的激活可重复用于后向传递）。
+        \item \textbf{兼容性}：匹配 DualPipe 的设计，但避免了复杂的调度。
+        \item \textbf{局限性}：第一个FWD和最后一个BWD保留在端到端关键路径上，因此它们的all-to-all不能被隐藏。
+    \end{itemize}
+
+    
+    \begin{figure}[ht]
+        \centering
+        \includegraphics[width=0.8\linewidth]{figures/EP_Overlap_merged_fwd_bwd.png}
+        \caption{将 FWD-BWD 时间线与全部重叠合并。}
+        \label{fig:fwd_bwd_merge}
+    \end{figure}
+\end{enumerate}
+
+为了最大化合并的 FWD-BWD 中的全部隐藏，我们使用了两个关键优化：
+
+\begin{enumerate}
+    \item \textbf{流分离}：我们将工作负载分成两个 CUDA 流：
+    \begin{itemize}[leftmargin=*]
+        \item \textit{计算流}：运行前向/后向计算（例如，注意力、专家 MLP）。
+        \item \textit{通讯流}：运行全对全通信（例如，EP 的令牌调度/组合）。
+    \end{itemize}
+    通过跨流交替任务，所有到所有的计算与计算并行运行，从而最大限度地减少空闲周期。
+
+    \item \textbf{W/D 分割（权重梯度/数据梯度分割）} \cite{deepseekai2025deepseekv3technicalreport}：一个关键依赖块重叠：向后调度（B/dispatch）需要来自向后 MLP（B/mlp）的输出。为了打破这种依赖性，我们将向后 MLP 拆分为：
+    \begin{itemize}[leftmargin=*]
+        \item \textit{瓦/MLP}：权重梯度计算（独立于B/dispatch）。
+        \item \textit{D/MLP}：数据梯度计算（馈入B/调度）。
+    \end{itemize}
+    这种分割减少了计算流空闲时间：当 F/mlp 单独太短时，W/mlp 可以与 F/mlp 重叠以隐藏 B/dispatch。
+\end{enumerate}
+\Figref{fig:ep-all-to-all-overlap} 总结了这些优化。基线（顶部）按顺序执行，其中所有到所有块计算。 1F1B FWD-BWD 方案（底部）交错相邻的微批次，因此通信可以隐藏在计算后面。 W/D 的分裂进一步增加了重叠的机会。这些方法共同减少了 30--40 的 EP 通信开销\% （DeepEP 之后）低于 5\% H100 上 DeepSeek-V3 训练的迭代时间。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/EP_Overlap_Summary.png}
+    \caption{EP 全面通信重叠策略：基线与 W/D 分离的 1F1B。}
+    \label{fig:ep-all-to-all-overlap}
+\end{figure}
+
+% \begin{figure}[ht]
+%     \centering
+%     \includegraphics[width=0.8\linewidth]{figures/1f1b_split_wgrad.pdf}
+%     \caption{Compute/Comm Stream Schedules}
+%     \label{fig:compute_comm_streams}
+% \end{figure}
+
+为了将重叠扩展到大型模型，可以将合并的 FWD-BWD 与 \textit{交错管道并行性} （Interleaved PP），它将模型划分为虚拟管道阶段（VPP）并扩展跨管道等级的重叠机会。 \Figref{fig:interleaved_pp} 显示了具有三个阶段的交错 1F1B 时间表：预热、1F1B 和刷新。 1F1B阶段中的相邻FWD-BWD对可以应用上面的EP重叠模式。然而，当相邻对属于同一微批次时，它们仍然可能具有数据依赖性。为了避免这种情况，我们运行 \textit{一个额外的微批次} 在进入 1F1B 之前的预热结束时，确保相邻的 FWD/BWD 对无依赖性，并实现虚拟阶段之间完全的全部重叠。
+
+合并的 FWD-BWD (1F1B) 和 DualPipeV（改进的 DualPipe 变体）之间的延迟比较显示：
+\begin{itemize}
+    \item \textit{1F1B 更快} 具有较大的 VPP 大小（更多虚拟阶段可实现更多重叠机会）。
+    \item 在大 PP 大小和微批量计数下，延迟差距会缩小（两种策略都达到接近最佳的重叠）。
+    \item 对于混合模型（例如，具有混合密集/MoE 层的 DeepSeek-V3），跨 PP 阶段的工作负载平衡至关重要。威震天核心 \textit{灵活的非对称VPP} 支持自定义每阶段层放置以最大化重叠。
+\end{itemize}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/interleaved_pp.png}
+    \caption{交错的 PP 时间线，全部重叠。}
+    \label{fig:interleaved_pp}
+\end{figure}
+
+有几个因素限制了全部重叠可实现的加速：
+\begin{itemize}
+    \item \textbf{批次重叠比例}：更多的微批次会增加重叠批次的比例。
+    \item \textbf{全部与全部的比例}：当 all-to-all 占主导地位时，EP 重叠增益更大，特别是对于计算通信比较低的跨节点 EP 和细粒度 MoE 模型。
+    \item \textbf{SM 剥离管理费用}：为all-to-all保留SM会降低GEMM效率。在我们的 DeepSeek-V3 基准测试中，DeepEP 每个 GPU 使用 20 个 SM，并引入了大约 20 个 SM\% GEMM-效率开销。
+\end{itemize}
+
+在 DeepSeek-V3 等细粒度 MoE 模型上，将所有重叠与优化调度程序相结合（第 3 节~\ref{sec:deepep}）获得93分\% 专家通信延迟的重叠率，将专家通信份额从30--40减少\% 迭代时间低于 5\%.
+
+
+% \subsubsection{FP8 EP Communications: Reducing Communication Volume}\label{sec:fp8-comm}
+
+% The optimizations above hide all-to-all latency behind computation. An orthogonal approach is to reduce the all-to-all \textit{volume} itself. By performing dispatch communication in FP8 instead of BF16, we halve the data transferred per all-to-all operation.
+
+% However, FP8 dispatch requires careful handling depending on the FP8 recipe:
+% \begin{itemize}
+%     \item \textbf{Blockwise/Subchannel FP8}: Tokens must be quantized before dispatch. In backward pass, we dequantize to reconstruct high-precision input, then re-quantize because forward and backward use different quantization dimensions. Transposition may be required for Hopper Tensor Core layouts.
+%     \item \textbf{MXFP8}: Similar to blockwise, though transposition is unnecessary as Blackwell Tensor Cores accept any layout, backward computation requires the input tokens to be quantized along a different dimension. As a result, dequantization and re-quantization are still needed.
+% \end{itemize}
+
+% Note that \textit{combine} communication typically remains in higher precision to avoid gradient accumulation errors. The dispatch-only FP8 strategy provides 50\% all-to-all volume reduction with minimal accuracy impact. See Section~\ref{sec:fp8-dispatch-comm} for more details.
+
+\subsubsection{概括}
+通信墙优化协同工作：DeepEP/HybridEP 最大化带宽利用率； FWD-BWD 重叠隐藏了计算背后的延迟； Interleaved PP 扩展了跨管道阶段的重叠机会；灵活的 VPP 可实现最佳的负载平衡。综合起来，它们将所有人对训练时间的贡献减少到 10 以下\%。
+
+由于通信延迟隐藏在计算背后，因此 GPU 利用率可能很高。然而，分析揭示了计算效率墙，它有两个不同的方面： \textit{内核效率} （细粒度专家生成未充分利用 GPU 资源的小型 GEMM）以及 \textit{主机开销} （许多小操作会在内核执行之间造成间隙，GPU 会在其中等待主机的工作）。
+
+\subsection{打破计算效率的壁垒}\label{sec:compute-wall}
+
+计算效率是最后的限制：即使有足够的内存和隐藏的通信，如果内核效率低下或主机无法足够快地分派工作，GPU 资源也可能仍未得到充分利用。随着模型和专家数量的增长，计算效率低下的情况变得更加严重，因此优化对于实现峰值硬件利用率至关重要。
+
+\subsubsection{计算剖析：效率低下的根源}
+
+MoE 训练中计算效率低下的原因有两个：
+
+\textbf{内核效率。} 细粒度的 MoE 架构产生的工作负载未充分利用 GPU 资源。 DeepSeek-V3 的 256 个小专家生成 M 尺寸为 $\sim$每个专家 128 个代币，远低于 Tensor Core 峰值利用率所需的数千个代币。除了专家计算之外，MoE 还引入了由许多小内核组成的复杂路由和调度操作，这些小内核单独无法使 GPU 计算能力饱和。
+
+\textbf{主机开销。} 许多小操作会产生内核启动开销，并且 CPU 无法足够快地调度工作以保持 GPU 饱和。三个因素使情况变得更糟：
+\begin{itemize}
+    \item \textbf{细粒度专家}：许多单独的 GEMM，而不是少数大型 GEMM，每个 GEMM 都需要单独的内核启动。
+    \item \textbf{降低精度训练}：额外的量化内核会增加启动开销。
+    \item \textbf{无丢包路由}：动态令牌计数需要主机设备同步来确定张量形状，从而将 CPU 置于关键路径上。
+\end{itemize}
+
+结果是 \textit{主机界限}：GPU 内核以微秒的主机端延迟分隔开来，在分析跟踪中可以看到计算资源闲置的间隙。
+
+内核形状由模型架构决定，如果不修改模型就无法更改。因此，优化必须针对如何组织和调度计算。五种策略共同解决计算效率低下的问题：
+
+\begin{enumerate}
+    \item \textbf{熔断器相关操作。} 内核融合将路由、排列和辅助损失计算整合到更少、更大的内核中。
+    \item \textbf{低精度加速。} FP8/FP4 中的降低精度训练使用更快的 Tensor Core 运算，从而提高了相同内核形状的吞吐量。
+    \item \textbf{消除每次迭代的 CPU 逻辑。} CUDA 图形捕获内核序列并以最少的主机参与重放它们。
+    \item \textbf{删除主机设备同步。} 免同步执行使 GPU 内核无需等待来自主机的形状信息即可继续执行。
+    \item \textbf{平衡专家负载。} ECHO 动态地将热门专家克隆到未充分利用的等级，从而减少导致某些等级在其他等级计算时等待的负载不平衡。
+\end{enumerate}
+
+以下小节介绍了按这些策略组织的技术：批处理和融合以提高内核效率（第~\ref{sec:kernel-fusion}）、低精度加速度（小节~\ref{sec:fp8-training}），用于消除主机开销的 CUDA 图（部分~\ref{sec:cuda-graphs}），无滴 MoE 的无同步执行（部分~\ref{sec:sync-free-moe}），并通过 ECHO 进行负载平衡（部分~\ref{sec:echo}).
+
+\subsubsection{分组GEMM与内核融合：提高内核效率}\label{sec:kernel-fusion}
+
+提高内核效率最直接的方法是将小操作合并为大操作。分组 GEMM 批量专家计算以提高硬件利用率 \cite{megablocks}，而内核融合将路由和排列操作合并到更少的内核中 \cite{chen2018tvm}。 Megatron-Core 在三个级别实现这些优化：专家计算（分组 GEMM）、令牌路由（排列融合）和路由器逻辑（路由器和 Aux-Loss 融合）。
+
+\paragraph{分组GEMM}\label{sec:grouped-gemm}
+
+专家的计算本质上是一系列独立的GEMM。分组 GEMM 通过重叠内核的波尾效应，比单独的顺序 GEMM 提高了性能。
+
+Megatron-Core 提供了两种分组 GEMM 实现：
+
+\begin{itemize}
+\item[i.] cuBLASLt GEMM 的多流启动。
+通过将各个 cuBLASLt GEMM 启动到多个 CUDA 流中，它们可以彼此重叠。该方法支持各种精度和缩放模式，包括 BF16、每张量 FP8、块式 FP8、MXFP8 和 NVFP4，其性能与高度优化的分组 GEMM 实现相当。
+
+\item[ii.]\label{gmm:2} CUTLASS 分组 GEMM。
+通过将各个 GEMM 融合到单个内核中，当 GEMM 数量很大时，CUTLASS Grouped GEMM 可以获得更好的性能。然而，不同的精度、缩放模式和硬件平台需要单独的开发工作，并且需要针对不同的问题规模进行额外的调整。 TE 当前的实现仅支持 Hopper 平台上的 BF16。
+\end{itemize}
+
+
+另外两个实现正在开发中：
+
+\begin{itemize}
+\item[iii.] cuBLASLt 分组 GEMM 通过 \texttt{CUBLASLT\_BATCH\_MODE\_GROUPED}。
+cuBLASLt 分组 GEMM 假设设备上的形状信息并在单个内核中进行计算，这消除了将 CUDA 图形应用于专家部分的障碍。它涵盖了具有内置启发式的所有精度和缩放模式，并且旨在在支持的情况下取代 (i) 和 (ii)。
+
+\item[iv.] CuteDSL 具有融合功能的分组 GEMM。
+分组 GEMM 与激活函数、量化（用于下一层）和通过cuteDSL 缩放因子混合融合。这些内核针对 MXFP8 和 NVFP4 进行了优化~\cite{abecassis2025nvfp4} 在 Blackwell 平台上，针对 \texttt{fprop} FC1的GEMM和 \texttt{dgrad} FC2的GEMM。通过将专家计算、激活和量化整合到单个内核中，该方法显着减少了内核数量，并且与 CUDA 图形兼容。
+\end{itemize}
+
+\subsubsection{排列融合}
+
+目前，分组 GEMM 要求分配给同一专家的令牌连续存储（即排列令牌）。如果启用了所有人对所有人的集体通信，则需要进一步排列以确保分配给每个等级的令牌被分组在一起。使用本机 PyTorch 实现高效排列具有挑战性，因为它往往会启动许多小内核并产生额外的 CPU 开销。
+
+训练工作负载中的置换融合管道（\figref{fig:permute_fusion}）由三个阶段组成：
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.6\linewidth]{figures/permute_fusion.png}
+    \caption{训练过程中置换融合的管道。}
+    \label{fig:permute_fusion}
+\end{figure}
+
+\begin{itemize}
+    \item 预处理：排列本质上是一个数据传输过程，需要将令牌连续存储在每个专家对应的缓冲区中。预处理步骤的目的是生成偏移图（Row ID map in \figref{fig:permute_fusion})，它表示每个标记在输入和输出缓冲区中的偏移量。这确保了可以有效地执行置换和取消置换操作。在前向传递过程中，预处理内核在排列之前仅调用一次，而其他组件则重用结果。
+    \item 置换：置换内核的功能很简单：它根据偏移映射将令牌从输入缓冲区移动到输出缓冲区，然后将它们传递给后续的专家 MLP。在内存高效排列中，也需要对概率进行排列，结果直接进入EA的激活部分。
+    \item 取消排列：取消排列步骤是排列操作的逆过程。由于在排列期间令牌将被多次复制并发送到不同的目的地，因此必须在组合阶段将这些令牌求和在一起。在内存高效的排列中，组合步骤只是将它们相加；否则，概率将用作权重。所有累加均以 FP32 精度执行。
+\end{itemize}
+
+\subsubsection{路由器和 Aux-Loss 融合}
+
+路由器及辅助损耗 \cite{fedus2022switchtransformersscalingtrillion,zoph2022stmoe,hwang2023tutel,rajbhandari2022deepspeedmoe} 计算是生成许多小内核并引入大量 CPU 开销的其他领域。随着设备计算能力的增长，融合变得越来越重要。
+
+挑战在于路由器包含难以融合的组件，例如GEMM和通信。我们将剩余的操作分解为三个部分，每个部分融合成一个内核（\figref{fig:router_fusion}).
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/router_fusion.drawio.png}
+    \caption{路由器融合的工作流程。}
+    \label{fig:router_fusion}
+\end{figure}
+\begin{itemize}
+    \item 分数计算，包括top-$k$ softmax/sigmoid：这是最复杂的函数，针对不同的模型有不同的分支。它包括不同的顶部$k$ 算法（朴素的顶$k$, 组顶-$k$ \cite{deepseekai2024deepseekv2strongeconomicalefficient,deepseekai2025deepseekv3technicalreport}）、评分函数（sigmoid、softmax）、它们的组合以及可能的缩放操作。
+    \item 辅助损失的分数计算：这是第一部分的子集。在得分函数和朴素的顶部之后$k$ 计算时，生成辅助损失计算的输入。
+    \item MoE辅助损失的计算：在步骤2的基础上，辅助损失计算被融合到单个内核中。
+
+\end{itemize}
+启用路由器融合后，路由器模块内的工作流程如图所示 \figref{fig:router_fusion}。未来的工作可能会将通信纳入融合范围。
+
+\subsubsection{降低精度训练：低精度加速}\label{sec:fp8-training}
+
+具有小型专家 GEMM 的细粒度 MoE 工作负载通常会受到内存带宽的限制，从而限制了 Tensor Core 的利用率。降低精度训练通过减少数据移动并在 Hopper 和 Blackwell GPU 上使用更快的 FP8/FP4 张量核心运算来解决这个问题。
+
+从计算效率的角度来看，降低精度的训练提供了一个关键的好处： \textbf{FP8/FP4 GEMM} 通过在 FP8/FP4 中执行线性层计算来最大化 Tensor Core 利用率。再加上Sections中的记忆好处~\ref{sec:fp8-activation}，FP8训练大约达到 \textbf{10\% 至 25\% 端到端性能改进} 用于不同硬件平台上的大规模 MoE 训练，而 FP4 则提供了更多加速。
+
+有关降低精度的训练方法、MoE 特定挑战和量化策略的完整介绍，请参阅第 4 节~\ref{sec:reduced-precision-training}.
+
+\subsubsection{CUDA 图：消除主机开销}\label{sec:cuda-graphs}
+
+内核融合减少了 \emph{数字} 内核启动次数； CUDA 图消除了 \emph{每次迭代成本} 这些发射。本小节介绍 CUDA Graph 如何解决 CPU 开销、drop-and-pad 与 dropless MoE 的不同策略，以及使 CUDA Graph 实用所需的内存优化。
+
+在 MoE 训练中，CPU 开销往往成为主要的性能瓶颈。这种开销来自三个来源：
+\begin{enumerate}
+    \item \textbf{Python执行}：解释器开销、C 外部函数接口 (CFFI) 和垃圾收集会引入延迟。
+    \item \textbf{框架开销}：即使是简单的操作，例如 \texttt{torch.empty} 增加主机端成本的微秒级；库层（TransformerEngine、cuBLAS、cuDNN）添加更多。
+    \item \textbf{内核启动开销}：每次内核启动都会产生几微秒的 CPU 端成本。
+\end{enumerate}
+
+现代培训中的三个趋势放大了这一点：
+\begin{itemize}
+    \item \textbf{更快的 GPU}：随着内核执行速度的提高，重叠 CPU 工作的时间越来越少，使得 CPU 开销越来越明显。
+    \item \textbf{教育部复杂性}：MoE 模型给 FFN 层（路由器、调度、分组 GEMM 和组合操作）增加了相当大的复杂性，产生了许多超出 GEMM 本身的小内核，从而产生了大量的 CPU 开销。
+    \item \textbf{降低精度训练}：额外的量化内核，特别是在细粒度的 MoE 中，其中操作计数与专家的数量成比例。
+\end{itemize}
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/cuda_graph_comparison.pdf}
+    \caption{传统执行（顶部）与 CUDA 图形执行（底部）。}
+    \label{fig:cuda-graph-execution-comparison}
+\end{figure}
+
+% Nsight Systems profiling of non-CUDA Graph MoE training (the upper half of \figref{fig:partial_cudagraph_nsys}) 
+\Figref{fig:cuda-graph-execution-comparison} 显示了传统执行管道中巨大的 CPU 开销和由此产生的 GPU 气泡，揭示了 GPU 内核之间的巨大差距。这清楚地表明 CPU 无法足够快地启动内核来充分利用 GPU，这种现象称为 CPU 开销或主机限制。
+CUDA 图通过在初始迭代期间将一系列 GPU 内核捕获到可重播图中来解决此问题 \cite{nvidia_cudagraphs,ansel2024pytorch2}。随后的迭代会发出一个 \textit{图表发布} 调用，很大程度上绕过了每个操作 Python/框架的开销和每个内核启动的开销，从而减少了 CPU 端的延迟。
+
+然而，CUDA Graph 要求所有捕获的操作都具有 \textbf{静态的、预定的形状}。动态形状或控制流会导致图形捕获失败。这与 MoE 产生了根本性的紧张关系，每个专家的代币数量动态变化。下一段描述了 Megatron-Core 的两种 CUDA 图形模式——完整 CUDA 图形和分层 CUDA 图形——以及它们如何解决 MoE 中的动态形状约束。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/full_iter_layerwise.pdf}
+    \caption{一次训练迭代中的完整 CUDA 图与分层 CUDA 图（三层，两个微批次）。}
+    \label{fig:full_iter_layerwise}
+\end{figure}
+
+\paragraph{完整 CUDA 图与分层 CUDA 图}
+
+如图所示 \figref{fig:full_iter_layerwise}，Megatron-Core 支持两种类型的 CUDA 图：完整 CUDA 图和分层 CUDA 图。 \textit{满的} CUDA 图，也称为全迭代 CUDA 图，将整个前向-后向传递捕获到单个 CUDA 图中。仅支持使用的密集或 MoE 模型 \textbf{带填充的令牌丢弃}，表示每个专家有固定的接收能力；超出容量的令牌将被丢弃，并填充输入以确保恒定的张量形状。在所有形状都是静态的情况下，可以将整个迭代绘制成图表，从而最大限度地减少 CPU 开销。至于 \textbf{无滴的} MoE 模型（例如 DeepSeek-V3）无法删除路由令牌，完整的 CUDA 图是不可行的，因为分配给每个专家的令牌数量根据路由决策动态变化。专家 GEMM 形状在迭代之间发生变化，违反了静态形状要求。此外， \textit{设备-主机同步} 需要检索每个专家的令牌计数以进行调度。部分~\ref{sec:sync-free-moe} 描述了我们为克服动态调度和同步问题所做的努力，以便完整的 CUDA 图也可以应用于无滴 MoE。或者，这里我们介绍一种基于分层 CUDA 图的更简单的方法，称为 \textit{部分的} CUDA 图形。
+
+\begin{comment}
+Megatron-Core supports full-iteration CUDA Graph for drop-and-pad MoE models via the \texttt{local} implementation:
+
+\begin{lstlisting}
+--moe-expert-capacity-factor 1.0 \
+--moe-pad-expert-input-to-capacity \
+--cuda-graph-impl local \
+--cuda-graph-scope full_iteration
+\end{lstlisting}
+\end{comment}
+
+% Instead of capturing the entire forward-backward pass into a single CUDA Graph, layer-wise CUDA Graphs capture each transformer layer separately. Note that both full CUDA Graphs and layer-wise CUDA Graphs are natively \textbf{not feasible for dropless MoE models} such as DeepSeek-V3, where no routed tokens can be dropped, so the number of tokens assigned to each expert varies dynamically based on routing decisions. Expert GEMM shapes change from iteration to iteration, violating the static-shape requirement. Additionally, \textit{device-host synchronization} is required to retrieve per-expert token counts for dispatching. Section~\ref{sec:sync-free-moe} describes our effort to overcome the dynamic dispatching and synchronization issues so that the full CUDA Graphs (either the full-iteration CUDA Graphs or full-layer-wise CUDA Graphs) can also be applied to dropless MoE. Alternatively, here we introduce a simpler method based on layer-wise CUDA Graph, called partial CUDA Graphs, which selectively captures only the \textbf{static components} of each MoE layer while leaving dynamic parts outside the graph, achieving significant performance gains for dropless MoE despite not capturing the entire model.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.6\linewidth]{figures/partial-cudagraph.pdf}
+    \caption{部分 CUDA 图捕获静态组件（注意力、共享专家、路由器、预处理），同时将动态专家计算留在图之外。}
+    \label{fig:partial_cudagraph}
+\end{figure}
+
+逐层 CUDA 图表分别捕获每个转换器层。与完整的 CUDA 图表一样，捕获整个变压器层仍然会在 MoE 部分中遇到动态形状。部分 CUDA 图通过仅捕获 \textbf{静态组件} 的每一层，同时将动态部分留在图形之外，即使没有捕获完整模型，也可以为无滴 MoE 带来巨大的性能提升。在无滴 MoE 层中：
+
+\begin{itemize}
+    \item \textbf{静态组件} （可以用图表表示）：
+    \begin{itemize}
+        \item 注意力层（处理固定数量的标记）
+        \item 路由器计算（固定输入/输出形状）
+        \item 专家并行 (EP) 预处理（静态排列元数据）
+        \item 共享专家（如果存在，处理具有固定形状的所有标记）
+        \item 密集变压器块中的 MLP 层
+    \end{itemize}
+
+    \item \textbf{动态组件} （无法绘制图表）：
+    \begin{itemize}
+        \item 代币分发（从固定形状到动态形状）
+        \item 专家GEMM操作（基于令牌分配的动态M维度）
+        \item Token组合（从动态形状到固定形状）
+    \end{itemize}
+\end{itemize}
+
+部分 CUDA 图独立捕获每层的静态部分，使路由专家计算正常执行。
+如图所示 \figref{fig:partial_cudagraph}，每个变压器层的前向路径被分成几个“范围”，用户可以选择要绘制哪些范围。随着“\textit{收件人+教育部\_路由器+萌系\_预处理}“范围启用，一个图捕获该层的调度操作之前的所有静态组件：注意力、路由器（投影、顶部）$k$ 选择和辅助损失计算）和EP预处理（令牌元数据计算和排列）。该图中还捕获了共享专家（如果存在）。这种方法允许动态专家计算以不同的形状执行，从而消除了 CPU 开销，同时保持了正确性。尽管没有捕获整个模型，但这仍取得了显着的性能提升。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/partial-cudagraph-nsys.pdf}
+    \caption{Transformer 层前向传递：不带（上）和带（下）部分 CUDA 图。静态组件的 CPU 开销很大程度上被消除。}
+    \label{fig:partial_cudagraph_nsys}
+\end{figure}
+
+Megatron-Core 已进行了广泛的调整，以便 CUDA Graph 能够与多令牌预测 (MTP)、EP 通信重叠、细粒度卸载和检查点以及灵活的 PP 布局等关键功能正常工作。启用部分 CUDA 图形的 Nsight Systems 分析显示 CPU 开销大大降低（\figref{fig:partial_cudagraph_nsys}）。剩余的 CPU 开销主要局限于令牌调度和组合操作之间的区域，由于其动态性质，无法用图表表示。见章节~\ref{sec:sync-free-moe} 有关如何通过使整个层可绘制来解决这个剩余瓶颈的更多详细信息。
+
+\paragraph{CUDA 图的内存优化}
+
+CUDA 图形从三个来源增加内存开销：
+
+\begin{enumerate}
+    \item \textbf{图结构}：用于存储图拓扑的内存（通常可以忽略不计）。
+    \item \textbf{独立的内存池}：图形和非图形操作需要单独的 PyTorch 内存池，不能共享内存。对于部分 CUDA 图形，单个转换器层需要两个池：一个用于图形化工作，一个用于非图形化工作。
+    \item \textbf{静态缓冲区}：每个图都需要专用的输入/输出静态缓冲区，一旦分配，就会从 PyTorch 的内存分配器中取出。
+\end{enumerate}
+
+如果不仔细优化，部分 CUDA 图形将从上述三个来源产生更高的内存开销。 Megatron-Core 和 Transformer Engine 实施了多项优化来最大限度地减少这种开销：
+
+\textit{减少图表数量。}
+具有管道并行性（PP）， \textbf{每个微批次} 需要专用的 CUDA Graph。原因是，如果微批次共享一个图，那么微批次 $i+1$的前向传递将覆盖微批次之前保存的上下文 $i$的向后传递执行，导致内存损坏（\figref{fig:pp-microbatch-graph-sharing}）。这导致 $L \times M \times 2$ 总共的图表（其中 $L$ = 每个 GPU 的层数， $M$ = 微批次， $\times 2$ 用于前进/后退）。
+
+相反，如果不使用 PP，微批次可以共享相同的图，从而将计数减少到 $L \times 2$。要启用图形共享， \texttt{is\_first\_microbatch} 引入 GPU 标志是为了控制共享图中特定于微批次的行为，例如仅在第一个微批次上运行的量化。在重放之前将此标志设置为 0 或 1 会导致根据需要跳过或执行捕获的量化内核。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/cudagraph_pp.pdf}
+    \caption{为什么管道并行性会阻止 CUDA 图在微批次之间共享。 \textbf{含PP} （上）：执行是交错的——在任何向后传递之前运行多个向前传递。如果微批次共享一个图，F\_mb1 覆盖 F 保存的上下文\_B 之前的 mb0\_mb0 使用它，导致内存损坏。每个微批次都需要自己的图（$L \times M \times 2$ 图表总数）。 \textbf{不含PP} （下）：执行是连续的——每个微批次在下一个微批次开始之前完成（向前+向后）。上下文在被覆盖之前被消耗，因此微批次可以安全地共享图（仅 $L \times 2$ 图表总数）。}
+    \label{fig:pp-microbatch-graph-sharing}
+\end{figure}
+
+\textit{池共享。}
+尽管图形化和非图形化操作需要单独的内存池，但所有图形在按执行顺序捕获时都可以共享一个池。变压器发动机 \texttt{make\_graphed\_callables()} API 接受 \texttt{\_order} 指定微批次间调度的参数，允许通过正确的池共享进行顺序捕获。
+
+\textit{缓冲区重用。}
+静态输入/输出缓冲区可以根据并程执行顺序在图之间重复使用。一旦微批次完成了一层的向后传递，其前向缓冲区和向后输入缓冲区就可供下一个前向和后向图重用。只有后向输出缓冲区必须保留，直到数据发送到下一个 PP 阶段。
+
+通过这些内存优化，我们实现了 10\% 在 DeepSeek-V3 GB200 训练中，通过大约 7~GB 的额外内存实现端到端加速。
+
+\paragraph{剩下的问题：动态专家计算}
+
+完整 CUDA 图形不支持无滴 MoE。部分 CUDA 图形消除了静态组件的 CPU 开销，但是 \textbf{动态专家计算区域保留在图之外}。我们有什么办法可以制作 CUDA 图吗 \textit{覆盖} 动态部分？要实现这一目标，我们至少必须解决两个挑战：
+\begin{enumerate}
+    \item \textbf{动态形状需要主机-设备同步}：主机必须从 GPU 查询每个专家的令牌计数才能启动令牌调度和分组 GEMM。
+    \item \textbf{内存分配需要已知缓冲区大小}：最坏情况的缓冲区分配会浪费内存；实际大小分配需要同步。
+\end{enumerate}
+
+下一小节将介绍 Megatron-Core 如何通过三种互补技术（无同步内核、ECHO 和分页存储）实现无滴 MoE 的完整 CUDA 图形覆盖。
+
+\subsubsection{通过无同步内核、ECHO 和分页存储实现 Dropless MoE 的完整 CUDA 图形覆盖}\label{sec:sync-free-moe}
+
+虽然内核融合和 CUDA 图有助于减少主机开销，但无滴 MoE 引入了新的挑战：动态张量形状需要主机设备同步，从而阻止 CUDA 图覆盖专家计算。
+
+在无滴 MoE 中，每个 EP 等级接收的令牌计数根据路由决策动态变化。路由器在 GPU 上生成此形状信息，但主机需要它来启动后续操作并分配内存。获取此信息需要设备到主机的复制和同步，将 CPU 置于关键路径上并防止 CUDA Graph 捕获动态部分。为了通过动态路由实现无同步 MoE 的无丢包训练，存在两个基本挑战：
+
+\textbf{挑战 1：在不知道实际问题大小的情况下启动内核。}
+传统上，许多 GPU 操作员假设（动态）形状信息在主机上可用。主机端代码确定启动配置，例如网格大小和图块大小，以及内核必须根据运行时获得的形状信息执行的工作量。在 dropless MoE 中，这会创建一个主机设备同步点：主机必须在启动 Grouped GEMM 或通信内核之前从设备查询每个专家的令牌计数。为了解决这个问题，需要重新设计处理动态形状的 GPU 内核。我们开发了 \textbf{设备启动的 GPU 内核}，包括设备发起的分组 GEMM 和使用 HybridEP 的无同步调度。
+
+\textbf{挑战2：在不知道实际大小的情况下分配内存。}
+无同步执行意味着缓冲区的大小需要在主机上预先确定。为了避免令牌溢出，缓冲区通常需要过大，例如，基于最坏情况的大小，以适应所有令牌都路由到同一专家的情况。然而，这种过度配置会导致严重的内存碎片：如果实际的令牌分配是平衡的，则绝大多数预分配的内存仍然未使用，但它无法被图中的其他操作回收。最坏情况下的缓冲区可能需要 $O(\text{EP\_size})$ 内存比实际工作集多出几倍。
+
+这种内存碎片可以通过两种互补的策略来缓解： \emph{减少负载不平衡} 以便最坏情况下的配置更接近实际使用情况，并且 \emph{动态内存管理} 在 CUDA Graph 中回收未使用的缓冲区空间。 \textbf{回声} 采用第一种策略，通过动态克隆未充分利用的排名上的热门专家，减少每个排名令牌计数的差异，从而减少最坏情况和平均内存需求之间的差距。 \textbf{分页存储} 采用第二种策略，在 CUDA Graph 中启用细粒度内存管理，允许将预分配缓冲区的未使用部分重新用于其他操作。 ECHO 和分页存储的详细信息如下。
+
+\paragraph{设备启动的 GPU 内核}
+\label{sec:device-init}
+
+为了消除传统主机启动的 GPU 操作符所需的强制主机设备同步，内核必须 \emph{设备发起的}。这需要三件事：
+\begin{itemize}
+\item[i.] GPU内核需要从GPU内存中读取形状信息并用它来指导计算。
+\item[ii.] GPU 内核需要将其执行的实际工作量（仅在运行时才知道）与其静态启动配置解耦。
+\item[iii.] GPU内核需要跳过不必要的计算，例如对填充数据的操作。
+\end{itemize}
+为了满足这些要求，必须重新设计现有内核。下面以 Grouped GEMM 内核和 HybridEP 内核作为两个具体示例。
+
+\textbf{设备发起的分组 GEMM。}
+正如章节中所讨论的~\ref{sec:grouped-gemm}TE 提供两种分组 GEMM 实施：多流 cuBLASLt GEMM 和 CUTLASS 分组 GEMM。两者都是主机发起的。它们需要每个专家令牌计数的 CPU 端列表来确定每个 GEMM 的形状和启动配置，从而创建主机设备同步障碍。为了消除这个问题，TE 引入了设备启动的 Grouped GEMM，它直接从设备内存读取形状信息。提供了两种实现方式：
+
+\begin{itemize}
+\item[i.] \textbf{cuBLASLt 分组 GEMM。}
+从 CUDA 13.1 开始，cuBLASLt Grouped GEMM 支持将矩阵形状作为设备数组传递。此实现包括用于选择最佳内核配置的内置启发式方法，现在涵盖了最新 CUDA 版本中的各种精度和缩放模式。
+
+\item[ii.] \textbf{CuteDSL 分组 GEMM 具有融合激活和量化。}
+在基于cuteDSL的实现中，SwiGLU激活可以融合到尾声阶段，对于FP8训练，也可以融合量化。虽然当前的支持仅限于特定的精度和融合模式，但持续的开发不断扩大新配置的覆盖范围。
+\end{itemize}
+
+\textbf{使用 HybridEP 进行无同步调度。}
+HybridEP，在小节中介绍过~\ref{sec:deepep}，提供了 MoE 通信的高效实现，并且在无同步 MoE 中也发挥着重要作用。在每次调度和排列之后，给定等级接收到的令牌数量是动态的，通常需要同步来获取缓冲区大小。通过估计上限并将其传递给 HybridEP，调度程序可以根据该界限预先分配输出缓冲区，从而以额外 GPU 内存为代价消除所有同步。
+
+即使使用设备启动的内核，最坏情况的缓冲区分配也会浪费内存。两个互补的策略可以解决这个问题： \textbf{回声} 减少负载不平衡，因此最坏情况的配置接近实际使用情况，同时 \textbf{分页存储} 启用细粒度内存管理以回收未使用的缓冲区空间。
+
+\paragraph{ECHO：热门专家的弹性克隆。}\label{sec:echo}\footnote{实施细节： \url{https://github.com/NVIDIA/Megatron-LM/pull/2368}}
+
+负载不平衡是 MoE 固有的：受欢迎的专家比其他人收到更多的代币，从而产生了两个问题。首先，托管热门专家的 EP 排名成为计算瓶颈，导致其他排名在同步点等待。其次，高负载差异意味着最坏情况下的缓冲区配置与实际使用情况相比会浪费大量内存。 ECHO 通过动态克隆热门专家以在未充分利用的队伍中腾出空位来解决这两个问题。
+
+\figref{fig:echo} 说明了 ECHO 工作流程。在前向传播中，ECHO 规划器识别热门专家并生成两个输出： \emph{热点专家图} 指示哪些专家克隆到哪些空闲插槽，以及更新的 \emph{路线图} 将溢出令牌重定向到克隆。 Expert Dispatch 通过基于 HybridEP 的免同步通信将热专家权重复制到备用插槽；令牌调度将令牌发送给本地专家和克隆专家；专家计算对所有专家进行。在向后传递中，专家梯度调度从克隆中收集梯度并将其简化为家庭专家，以确保一致性。克隆专家在计算后被丢弃以节省内存。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/moe_echo.png}
+    \caption{用于向前和向后传递的 ECHO 工作流程。规划器生成路线和热门专家地图。 Expert Dispatch 将热门专家重量复制到备用位置；专家梯度调度可减少梯度返回国内专家。}
+    \label{fig:echo}
+\end{figure}
+
+克隆专家进行训练比推理要昂贵得多：每个克隆专家都需要在前向过程中进行权重通信，在后向过程中进行梯度减小，以确保一致性。将所有热专家克隆到所有备用插槽可以最大限度地提高负载平衡，但会带来过多的通信开销。 ECHO规划器的目标是最大限度地减少专家克隆的数量，同时实现足够的负载平衡。它计算 \emph{溢出效应} 对于每个专家（超过每个 EP 等级的平均负载的代币）以及 \emph{闲置产能} 每个等级（可用容量低于平均水平）。使用装箱算法，规划器可以有效地将溢出令牌与备用容量相匹配，确定要克隆哪些特定专家以及克隆到哪个等级，以最小的克隆开销生成热门专家图和路由图。
+
+ECHO 具有两个主要优点：(1) \emph{减少 CUDA 图形的内存碎片}，因为减少 EP 等级之间的负载差异使得最坏情况下的缓冲区大小更接近实际使用情况，从而实现更小的静态缓冲区；和（2） \emph{提高计算效率}，因为平衡的工作负载减少了落后者问题，从而提高了 GPU 的整体利用率。
+
+\paragraph{分页存储。}\footnote{实施细节： \url{https://github.com/NVIDIA/Megatron-LM/pull/2690}}
+
+虽然 ECHO 减少了负载不平衡，以缩小最坏情况和典型内存需求之间的差距，但分页存储解决了补充问题：在 CUDA Graph 中启用细粒度内存管理，以减少内部内存碎片。
+
+碎片问题的出现是因为 CUDA Graph 中涉及的缓冲区大小需要预先确定。为了避免不希望的溢出，缓冲区通常需要过大。在一种简单的方法中，所有层中的缓冲区都根据最坏情况的大小进行分配（\figref{fig:paged_stash}， 中间）。对于无滴 MoE，这意味着每一层根据每个等级可能接收的最大可能令牌保留一个缓冲区，从而导致 $O(\text{layers} \times \text{worst\_case})$ 即使实际令牌计数要低得多，也会产生内存开销。
+
+分页存储基于一个关键的观察：存储向后计算激活所需的实际内存与为避免每层溢出而分配的最坏情况内存之间存在巨大差距（通常超过一个数量级）。分页存储通过解耦这两个内存缓冲区来解决这个问题。这在 \figref{fig:paged_stash} （正确的）。分页存储管理器不是为每一层分配最坏情况大小的缓冲区，而是维护：(1) \emph{临时缓冲区} 调整最坏情况令牌计数的大小，该计数在所有层之间共享以进行计算，以及（2） \emph{隐藏缓冲区} 以页面的形式组织，仅存储每层使用的实际令牌。当一个层完成其前向计算时，其激活值将从 tmp 缓冲区复制到存储缓冲区，仅存储实际令牌计数而不是最坏情况分配。然后，tmp 缓冲区可以轻松地重新用于后续层的计算。这显着减少了内存消耗 $O(\text{layers} \times \text{worst\_case})$ 到 $O(\text{worst\_case} + \text{actual\_total})$.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.95\linewidth]{figures/paged_stash.png}
+    \caption{三种执行模式的内存布局比较。 \textbf{左边}：Eager 模式根据实际使用情况动态分配内存。 \textbf{中间}：基线静态形状需要每个层独立地使用最坏情况大小的缓冲区，当实际使用率较低时会导致严重的碎片。 \textbf{正确的}：分页存储使用跨层共享的单个最坏情况 tmp 缓冲区进行计算，而分页存储缓冲区仅存储实际令牌，从而显着减少总内存占用。}
+    \label{fig:paged_stash}
+\end{figure}
+
+存储缓冲区使用经典的分页思想以灵活而高效的方式管理内存。这 \texttt{PagedStashBuffer} 被组织为固定大小的页面（默认每页 64 个令牌）。页面存储管理器通过循环缓冲区实现的空闲列表来跟踪可用页面。分页操作是由设备启动的 \emph{隐藏内核}。存储内核将激活复制到从空闲列表头部分配的空闲页面并记录目标页面。这 \emph{重新加载内核} 从记录的页面中检索激活并将未使用的页面返回到空闲列表的尾部。
+
+为了最大限度地减少开销，分页存储将内存传输与使用专用 CUDA 流的计算重叠（\figref{fig:paged-stashing-overlap}）。系统在当前计算执行时预取下一个向后层的激活，隐藏重新加载延迟。由于双缓冲，这种重叠需要少量的内存开销。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figures/paged_stashing_overlap.drawio.png}
+    \caption{分页存储流重叠。 \textbf{前传}：第 N 层计算后，其激活被存储在专用 Pack 流上（从 tmp 缓冲区复制到分页存储缓冲区），而第 N+1 层在主计算流上计算 — 存储完全重叠。 \textbf{向后传球}：在第 N 层向后启动之前，在 Unpack 流上预取第 N 层的激活（从存储缓冲区重新加载到 tmp 缓冲区），从而隐藏重新加载延迟。}
+    \label{fig:paged-stashing-overlap}
+\end{figure}
+
+\paragraph{放在一起：完整的 CUDA 图形覆盖}
+
+这三种技术共同实现了无丢弃式 MoE 的完整 CUDA Graph 覆盖，消除了 CPU 开销，同时保留了动态路由的灵活性：
+\begin{itemize}
+    \item \textbf{设备启动的内核} 通过直接从 GPU 内存读取动态形状来完全消除主机设备同步，从而使 CUDA 图形可以捕获所有 MoE 操作。
+    \item \textbf{回声} 平衡 EP 级别的专家工作量，缩小最坏情况和实际缓冲要求之间的差距。这可以实现更小的静态分配，并缓解掉队问题，否则会限制 GPU 利用率。
+    \item \textbf{分页存储} 减少记忆 $O(\text{layers} \times \text{worst\_case})$ 到 $O(\text{worst\_case} + \text{actual\_total})$ 通过跨层共享单个最坏情况 tmp 缓冲区并仅将实际激活存储在分页存储缓冲区中。
+\end{itemize}
+
+\noindent\textbf{开销。}
+这些好处伴随着谨慎的权衡。
+ECHO 引入了额外的通信，用于在前向传递中克隆热门专家并在后向传递中减少其梯度；实际上，只有一小部分专家被克隆（由高于平均负载的溢出决定），因此相对于标准的全对全调度，额外的通信仍然是适度的。
+分页存储添加了内存复制操作（在前向传递中存储，在后向传递中重新加载）和具有双缓冲开销的持久最坏情况大小的 tmp 缓冲区；这些副本在与层计算重叠的专用 CUDA 流上运行，因此延迟在很大程度上是隐藏的，主要成本是额外的内存带宽。
+与消除每次迭代主机设备同步和使用 CUDA 图形实现静态内存规划所带来的收益相比，这两种开销都相对较小。
+
+\subsubsection{概括}
+
+计算效率优化解决了效率低下的两个根源。对于内核效率：分组 GEMM 批处理专家计算，内核融合整合路由和排列操作，降低精度训练可加速 Tensor Core 吞吐量。对于主机开销：CUDA Graph 消除了每次迭代的 CPU 逻辑，Sync-Free MoE 消除了主机设备同步障碍。 ECHO 解决了使这两个问题复杂化的负载不平衡问题。这些优化共同将计算效率低下从主要瓶颈转变为可管理的约束。
+

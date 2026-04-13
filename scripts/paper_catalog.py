@@ -23,8 +23,10 @@ INFRA_TOP_LEVEL = {
     ".vendor",
     "notebook",
     "pdf",
+    "site",
     "_book",
     "scripts",
+    "node_modules",
     "rong_chen_pub_downloads",
 }
 IGNORED_DIR_NAMES = {
@@ -80,8 +82,10 @@ TITLE_OVERRIDES = {
     "2601.06002": "Paper 2601.06002",
     "2602.15322": "Google Main",
     "2602.15763": "GLM-5",
+    "2603.07685": "Scalable Training of Mixture-of-Experts Models with Megatron Core",
     "2603.15202": "Paper 2603.15202",
     "2603-15202": "Paper 2603.15202",
+    "ICLR_camera_ready_v0": "FlexRL: Scaling VLM RL Training via Efficient Load Balancing",
     "lmetric": "LMetric",
     "ARL-Tangram": "ARL Tangram",
     "arl-tangram": "ARL Tangram",

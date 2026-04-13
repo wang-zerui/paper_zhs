@@ -1,20 +1,20 @@
 # Repo Index
 
-> 自动生成于 2026-04-01 20:45:22 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-04-13 14:17:41 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：36
-- 含 `00README.json`：26
-- 有本地候选 PDF：35
-- 含中文 PDF：30
-- 带源码包：21
-- 含 tracked files 的目录：35
+- 论文目录：39
+- 含 `00README.json`：27
+- 有本地候选 PDF：38
+- 含中文 PDF：32
+- 带源码包：22
+- 含 tracked files 的目录：38
 - 纯本地目录（tracked files = 0）：1
 
 ## Triage
 
-- 缺少 `00README.json`：byte-checkpoint, colossal-auto, eagle-3, eagle-feature-uncertainty, flashattention-2, flashinfer, llm-viewer, nvidia-superpod, pangu-ultra, training-compute-optimal-large-language-models
+- 缺少 `00README.json`：byte-checkpoint, catalyzer, colossal-auto, eagle-3, eagle-feature-uncertainty, flashattention-2, flashinfer, ICLR_camera_ready_v0, llm-viewer, nvidia-superpod, pangu-ultra, training-compute-optimal-large-language-models
 - 缺少候选 PDF 的目录：td-pipe
 - 当前纯本地目录：llm-viewer
 
@@ -22,10 +22,12 @@
 
 | 目录 | 标题 | 规范 | 主 tex | 本地 PDF | Tracked PDF | 中文 PDF | 源码包 | tracked files |
 | --- | --- | --- | --- | --- | --- | --- | --- | ---: |
+| 2603.07685 | Scalable Training of Mixture-of-Experts Models with Megatron Core | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 102 |
 | arl-tangram | ARL Tangram | ✅ | xiaomi.tex | xiaomi_zh.pdf | xiaomi_zh.pdf | ✅ | — | 48 |
 | baichuan-m3 | Baichuan M3 | ✅ | elegantpaper-en.tex | elegantpaper-en.pdf | elegantpaper-en.pdf | — | — | 38 |
 | blitzscale | BlitzScale | ✅ | fastllmstart.tex | fastllmstart-zh.pdf | fastllmstart-zh.pdf | ✅ | source.tar | 59 |
 | byte-checkpoint | ByteCheckpoint | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 62 |
+| catalyzer | Catalyzer | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 36 |
 | colossal-auto | Colossal Auto | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 51 |
 | concur | CONCUR | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 33 |
 | eagle-3 | EAGLE-3 | — | — | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 17 |
@@ -38,6 +40,7 @@
 | gated-attn | GatedAttn | ✅ | acl_latex.tex | acl_latex.pdf | acl_latex.pdf | — | source.tar.gz | 33 |
 | glm-5 | GLM5 | ✅ | 0_main.tex | 0_main_zh.pdf | 0_main_zh.pdf | ✅ | source.tar.gz | 40 |
 | hyper-parallel | HyperParallel | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 15 |
+| ICLR_camera_ready_v0 | FlexRL: Scaling VLM RL Training via Efficient Load Balancing | — | — | main.pdf | main.pdf | — | — | 63 |
 | llm-viewer | LLM Viewer | — | — | main_zh.pdf | — | ✅ | source.tar.gz | 0 |
 | lmetric | LMetric | ✅ | lmetric.tex | lmetric_zh.pdf | lmetric_zh.pdf | ✅ | — | 60 |
 | low-precision-flash-attention | Why Low-Precision Transformer Training Fails | ✅ | iclr2026_conference.tex | iclr2026_conference_zh.pdf | iclr2026_conference_zh.pdf | ✅ | source.tar | 31 |
@@ -68,6 +71,7 @@
 ## Commands
 
 - 刷新仓库索引：`python3 scripts/build_repo_index.py`
+- 构建新的静态 PDF 阅读器：`python3 scripts/build_pdf_reader_site.py`
 - 刷新 notebook 源文件：`python3 scripts/build_paper_notebook.py`
 - 构建 notebook 站点：`npm run build:notebook`
 

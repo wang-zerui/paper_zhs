@@ -1,6 +1,7 @@
 # Summary
 
 * [首页](README.md)
+* [Scalable Training of Mixture-of-Experts Models with Megatron Core](papers/2603-07685.md)
 * [ARL Tangram](papers/arl-tangram.md)
 * [Baichuan M3](papers/baichuan-m3.md)
 * [BlitzScale](papers/blitzscale.md)
@@ -18,6 +19,7 @@
 * [GatedAttn](papers/gated-attn.md)
 * [GLM5](papers/glm-5.md)
 * [HyperParallel](papers/hyper-parallel.md)
+* [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](papers/iclr-camera-ready-v0.md)
 * [LLM Viewer](papers/llm-viewer.md)
 * [LMetric](papers/lmetric.md)
 * [Why Low-Precision Transformer Training Fails](papers/low-precision-flash-attention.md)
