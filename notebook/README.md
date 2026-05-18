@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **38**
+- Papers: **39**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -41,6 +41,7 @@
 - [LMetric](./papers/lmetric.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flmetric%2Flmetric_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/lmetric/lmetric_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/lmetric/lmetric_zh.pdf)
 - [Why Low-Precision Transformer Training Fails](./papers/low-precision-flash-attention.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flow-precision-flash-attention%2Ficlr2026_conference_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/low-precision-flash-attention/iclr2026_conference_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/low-precision-flash-attention/iclr2026_conference_zh.pdf)
 - [Magma](./papers/magma.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmagma%2Fgoogle_main_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/magma/google_main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/magma/google_main_zh.pdf)
+- [MegaScale-MoE](./papers/megascale-moe.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmegascale-moe%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/megascale-moe/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/megascale-moe/main_zh.pdf)
 - [Mirage](./papers/mirage.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmirage%2Fpaper_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/mirage/paper_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/mirage/paper_zh.pdf)
 - [The Molecular Structure of Thought](./papers/molecular-structure-of-thought.md) · 主论文 · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmolecular-structure-of-thought%2Fpaper.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/molecular-structure-of-thought/paper.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/molecular-structure-of-thought/paper.pdf)
 - [MPK](./papers/mpk.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmpk%2Fpaper_arxiv_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/mpk/paper_arxiv_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/mpk/paper_arxiv_zh.pdf)

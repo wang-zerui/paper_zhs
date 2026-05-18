@@ -1,0 +1,363 @@
+\section{Communication-Efficient Parallelism}
+\label{sec:design:parallelism}
+
+With the rise of MoE models and the evolution of hardware compute capabilities, communication overhead has become increasingly critical in MoE training in production. In this section, we delve into the parallelism strategies employed to reduce communication volume and meet other training requirements, such as high GEMM (General Matrix Multiplication) efficiency.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/parallelism-design-space.pdf}
+    \vspace{-0.3in}
+    \caption{Design space for large-scale MoE training.}
+    \vspace{-0.1in}
+    \label{fig:parallelism_design_space}
+\end{figure}
+
+Figure~\ref{fig:parallelism_design_space} shows the design space of parallelism strategies for large-scale MoE training, excluding the outermost data parallelism. We start with inter-node parallelism. Expert parallelism alleviates memory pressure from MoE models' large parameter size by distributing experts across nodes but incurs per-layer cross-node communication, harming training efficiency. Similarly, tensor parallelism's high communication overhead makes it more efficient to limit TP to a single node. Following prior work~\cite{jiang2024megascale}, we adopt pipeline parallelism to distribute model parameters, reduce communication, and overlap communication of different micro-batches.
+
+Prior large-scale MoE training systems, such as Megatron-LM~\cite{shoeybi2019megatron} and DeepSpeed-MoE~\cite{rajbhandari2022deepspeed}, incorporate tensor parallelism to scale up training by partitioning the model parameters within the node. However, in our practice, we observe two issues with this approach: (1) TP partitions the expert dimension, which negatively impacts GEMM efficiency; and (2) TP introduces significant communication overhead, which remains constant as the parallelism size increases, eventually causing communication to exceed computation on modern hardware.
+
+To address these issues, we tailor parallelism strategies for MoE model components. For feed-forward networks (i.e., experts), we replace tensor parallelism with expert parallelism and use custom communication modes optimized for varying top-k and expert sizes, ensuring communication overhead stays lower than tensor parallelism. For other components, we apply sequence parallelism, partitioning along the sequence dimension instead of the batch dimension, allowing scaling without increasing global batch size. This also reduces communication on critical paths compared to tensor parallelism. The additional memory and DP communication overhead remain manageable due to the parameter asymmetry across components. We detail the rationale and analysis of this intra-node parallelism strategy in the following sections. Table~\ref{tab:design:description} lists the key symbols.
+
+% \begin{figure*}[t!]
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/parallelism-comparison.pdf}
+%     \newline
+%     \hspace*{0.5em}
+%         \begin{subfigure}{0.26\linewidth}
+%             \caption{DP$\times$(DP$+$EP).}
+%             \label{fig:parallelism-comparison:dp-dp-ep}
+%         \end{subfigure}
+%         % \hfill
+%         \begin{subfigure}{0.33\linewidth}
+%             \caption{EP$\times$(TP$+$TP).}
+%             \label{fig:parallelism-comparison:ep-tp}
+%         \end{subfigure}
+%         % \hfill
+%         \begin{subfigure}{0.35\linewidth}
+%             \caption{\sysname: DP$\times$(SP$+$EP).}
+%             \label{fig:parallelism-comparison:dp-sp-ep}
+%         \end{subfigure}
+%     \vspace{-0.1in}
+%     \caption{Comparison of parallelism strategies. X$\times$(Y$+$Z) indicates that X represents the inter-node parallelism, while Y and Z denotes the intra-node parallelism for attention and FFN, respectively.}
+%     \vspace{-0.1in}
+%     \label{fig:parallelism-comparison}
+% \end{figure*}
+
+\subsection{Sequence Parallelism for Attention}
+\label{sec:design:parallelism:sp_attention}
+
+Due to the inherent parallelizability of the expert components in MoE models, most prior work on MoE training~\cite{rajbhandari2022deepspeed, li2023accelerating} focuses on optimizing expert parallelism, while data parallelism (DP) is typically applied to the non-MoE components such as attention. However, when scaling up MoE training, this approach proves insufficient due to the $n \times$ activation memory consumption. This issue arises because DP splits the batch dimension both across and within nodes. Compared to other intra-node parallelism strategies shown in Figure~\ref{fig:parallelism_design_space}, applying DP to attention forces each GPU within a node to process one micro-batch simultaneously, increasing the activation size by 8$\times$, which often results in out-of-memory issues.
+% However, when attempting to scale up MoE training, we find this approach insufficient due to the limited global batch size per training step. An excessively large global batch size can negatively impact the training convergence. 
+
+% For example, when training on 8K GPUs across 1K nodes with DP for attention, each GPU must handle at least one input sequence to fill the pipeline. This results in a global batch size of 64M tokens for 8K tokens per sequence, causing convergence issues. This occurs because data parallelism splits the batch dimension both across and within nodes. In contrast, parallelizing attention within nodes reduces the global batch size to 8M tokens, enabling convergence. With the same global batch size, using DP for attention, compared to other intra-node parallelism strategies in Figure~\ref{fig:parallelism_design_space}, reduces GPU usage to 1/8 and increases the activation size by 8$\times$, leading to out-of-memory issues and limiting system scalability. 
+
+% Both data parallelism and expert parallelism partition computation workloads across the batch dimension, constraining the scalability of the system. 
+
+% Previous work on MoE training has primarily focused on parallelizing and optimizing the design of the FFN expert modules, while the attention component typically employs a simple data-parallelism approach by feeding into different data batch. This design is ineligibility for large-scale MoE training, as increased data parallelism results in a larger global batch size per training step, which may negatively impact the overall effectiveness of the training algorithm. 
+
+\begin{table}[t!]
+    \centering
+    \resizebox{0.8\linewidth}{!} {
+        \begin{tabular}{@{}ll@{}}
+            \toprule
+            Symbol & Description \\ \midrule
+            $b$ & micro-batch size \\
+            $s$ & sequence length \\
+            $h$ & hidden dimension size \\
+            $n$ & model parallelism (TP, SP, or EP) size \\
+            $m$ & the ratio between the number of query heads and \\
+            & that of key-value heads \\
+            $k$ & number of experts that each token is routed to \\
+            \bottomrule
+        \end{tabular}
+    }
+    % \vspace{-0.1in}
+    \caption{Description of symbols.}
+    \vspace{-0.25in}
+    \label{tab:design:description}
+\end{table}
+
+To enable scalable MoE training, implementing intra-node parallelism for the attention module is crucial. Tensor parallelism (TP) is commonly employed to parallelize attention operations within nodes. However, it introduces inevitable communication costs due to all-gathering and reduce-scattering activations along the critical path. With the increasing gap between computational FLOPs and communication bandwidth, we find that the TP communication overhead can even surpass the computation time of self-attention. This communication-dominated bottleneck limits the ability to overlap communication and computation, ultimately reducing training efficiency. 
+
+We adopt sequence parallelism (SP), as proposed in DeepSpeed-Ulysses~\cite{jacobs2023deepspeed}, to scale MoE training and effectively reduce communication along the critical path. SP is commonly used in long-context training to address memory challenges associated with long inputs. We find it also works well in large-scale MoE training. First, it significantly reduces communication overhead compared to TP, especially when using grouped-query attention~\cite{ainslie2023gqa}. Second, while it introduces some parameter redundancy and increased communication overhead during parameter synchronization, the unique characteristics of MoE models make these trade-offs manageable and acceptable.
+
+\parabf{Communication efficiency.} When utilizing TP, the communication volume in attention is
+\begin{align}
+    2bsh(n-1)/n. 
+    \label{eq:1}
+    % 2bsh(n-1)/n*2/m
+\end{align}
+With SP, the communication volume decreases to
+\begin{align}
+    2bsh(n-1)/n\times(2+2/m)/n, 
+    \label{eq:2}
+\end{align}
+where $m$ represents the ratio between the number of query heads and that of key-value heads. Assuming the model is trained on an NVIDIA Hopper GPU workstation with an NVLink domain of size 8, the communication latency for sequence parallel attention can be reduced to about one-fourth of that required by tensor-parallel attention.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/megascale-moe-hierarchy.pdf}
+    \vspace{-0.1in}
+    \caption{Hierarchical communication for parameter synchronization in SP attention.}
+    \vspace{-0.1in}
+    \label{fig:hierarchy}
+\end{figure}
+
+\parabf{Data communication \& memory overhead.} A notable difference between SP and TP attention is how parameters are distributed across devices: TP shards the attention weights, while SP replicates them. This raises the concern about the potential increase in communication overhead for synchronizing gradients and parameters. Counterintuitively, given the intra- and inter-node bandwidth asymmetry and the adoption of hierarchical communication operations in modern communication libraries~\cite{nccl} as shown in Figure~\ref{fig:hierarchy} and analyzed in Appendix~\ref{apdx:hierarchical}, although SP attention requires synchronization of $n \times$ more parameters compared to TP attention, the difference in communication overhead is minimal in practical scenarios. 
+
+% \begin{figure}
+%     \centering
+%     \begin{subfigure}[b]{\linewidth}
+%         \centering
+%         \includegraphics[width=0.99\textwidth]{figures/dp_comm_32gpu.pdf}
+%         \label{fig:subfig1}
+%     \end{subfigure}
+%     \begin{subfigure}[b]{\linewidth}
+%         \centering
+%         \includegraphics[width=0.99\textwidth]{figures/dp_comm_64gpu.pdf}
+%         \label{fig:subfig2}
+%     \end{subfigure}
+%      \vspace{-0.1in}
+%     \caption{Latency vs. data size. A comparison of parameter synchronization latency between SP attention and TP attention with 32GPU and 64GPU.}
+%      \vspace{-0.1in}
+%     \label{fig:sp_dp_comm}
+% \end{figure}
+
+% In the experiment, we evaluated the communication latency of parameter synchronization between TP8 and SP8 across settings of 32 and 64 GPUs. We increase the data size from 384MB to 1536MB. The experiment results in figure \ref{fig:sp_dp_comm} demonstrate that the latencies for TP8 and SP8 are consistently comparable, with no notable differences observed. This observation corroborates our initial hypothesis that the two would exhibit similar performance characteristics in term of data parallelism communication latency.
+
+On the other hand, the additional GPU memory consumption introduced by SP attention is minimal in MoE training. For large-scale MoE models with tens to hundreds of experts, the majority of GPU memory is consumed by the expert parameters. Our experiments, detailed in \S\ref{sec:evaluation:ablation}, confirm that the extra parameter synchronization and memory overhead of SP attention remain manageable.
+% For instance, in a 2.7T-parameter MoE model with 128 experts, the attention parameters only account for less than 1\% of the total parameters.
+
+\parabf{Balanced vs. imbalanced.} In addition to the Ulysses-style SP attention, we also explored other forms, including context parallelism (CP)~\cite{context_parallelism}, which partitions all activations along the sequence dimension. CP attention, however, faces workload imbalance due to causal masking in attention, as each token only attends to previous tokens. To mitigate this, we attempted the zigzag strategy by grouping the head and tail partitions of the sequence on the same GPU, although achieving perfect balance remains challenging. Consequently, in large-scale training, the entire training process is often constrained by the most imbalanced data batch. Moreover, this imbalance disturbs the training pipeline, thereby reducing overall training efficiency.
+
+\subsection{Expert Parallelism for Feed-forward Network}
+\label{sec:design:parallelism:ep}
+
+% \begin{figure}[t!]
+%     \centering
+%     \includegraphics[width=0.5\textwidth]{figures/megascale-moe-parallelism.pdf}
+%     % \vspace{-0.1in}
+%     \caption{Parallelism.}
+%     % \vspace{-0.1in}
+%     \label{fig:parallelism}
+% \end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/megascale-moe-ep.pdf}
+    \vspace{-0.3in}
+    \caption{Communication-efficient expert parallelism. $e$ represents the number of tokens routed to the worker.}
+    \vspace{-0.1in}
+    \label{fig:ep_impl}
+\end{figure}
+
+In the choice of parallelism strategies for the feed-forward network component, expert parallelism (EP) consistently outperforms tensor parallelism. TP partitions the hidden dimension of each expert, reducing GEMM efficiency, whereas EP maintains full expert computation on each device. Theoretically, the communication cost for EP is 
+\begin{align}
+    2k/n\times bsh(n-1)/n, \label{eq:3}
+\end{align}
+while for TP it is
+\begin{align}
+    2bsh(n-1)/n. \label{eq:4}
+\end{align}
+Although their relative efficiency depends on the ratio $k/n$, we design an adaptive communication strategy for different top-$k$ values to minimize the communication volume of EP.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ag-rs-a2a.pdf}
+    \vspace{-0.1in}
+    \caption{Comparison of AG, RS, and A2A for token dispatch.}
+    \vspace{-0.1in}
+    \label{fig:ag-rs-a2a}
+\end{figure}
+
+
+\parabf{Efficient communication pattern.} Figure~\ref{fig:ep_impl} compares the typical EP implementation with \sysname's approach. The standard EP implementation requires two all-to-all communications for token dispatch and aggregation. Additionally, a scatter operation may be required before sending and after receiving tokens to ensure that tokens assigned to the same expert reside in a contiguous memory space. 
+
+When the top-$k$ value exceeds $n$, we replace traditional all-to-all communication with all-gather and reduce-scatter. First, an all-gather operation collects tokens from all workers. Then, a local scatter operation discards unneeded tokens, retaining only those required by the experts on the current worker. After expert computation, the tokens are assembled into a complete tensor. This approach enables a gather operation before communication, followed by a reduce-scatter to produce the final result, ensuring that EP’s communication overhead remains equal to or lower than TP’s.
+
+In practical training, all-to-all communication is less efficient than all-gather and reduce-scatter, as it requires each worker to communicate with all others, whereas all-gather and reduce-scatter follow a ring-based communication pattern with only neighboring workers. As shown in Figure~\ref{fig:ag-rs-a2a}, the communication time for these three operations in Mixtral-8$\times$7B reveals that when top-$k$ > 6, the all-gather-based EP implementation is more efficient.
+
+% In typical EP implementations, tokens are dispatched to different devices based on the selected experts using all-to-all communication. After completing the expert computations, tokens are sent back to the original device using another all-to-all communication for subsequent processing.
+
+% In common case with $topk$ equals 1, as there is no need for weighted gathering among scattered tokens, our observation suggests that reverting all tokens to their original positions after the FFN computation may not be necessary. Instead, tokens can remain on their assigned devices for the attention computations of the following layer, and during the all-to-all communication step in sequence-parallel attention, they can be transferred to the correct positions as needed. This approach eliminates one all-to-all communication in expert parallelism, thereby reducing the communication volume by half.
+
+% \parabf{Computation efficiency.} Beyond reducing communication volume, EP enhances the computational efficiency of the feed-forward network component. Traditional tensor parallelism partitions the dimension of expert GEMM operations, and as these dimensions are divided more finely, computational efficiency decreases. In contrast, EP divides the number of expert GEMM operations on the worker, which maintains the inherent efficiency of each GEMM operation.
+
+\parabf{Efficient operators.} Instead of using \texttt{torch.scatter\_add} and \texttt{torch.gather} for tensor scattering and gathering like Megatron-LM, we develop efficient scatter and gather operators directly using CUDA. Based on the token routing results, we pre-calculate the mapping from each row of the input tensor (representing a token) to the corresponding row in the output tensor. The scatter and gather operators then perform data transfers efficiently according to this mapping. 
+
+\parabf{Load balance.} A well-known challenge in MoE model training is load balancing across experts~\cite{li2023accelerating, liu2024deepseek}. To address this, we use auxiliary loss and token dropping to balance the workload across GPUs within each node. Similar to DeepSeek-V2~\cite{liu2024deepseek}, we treat the experts placed on the same GPU as a group and calculate the balance loss and computational capacity for each device rather than for each individual expert. 
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/moe-computation.pdf}
+    \vspace{-0.15in}
+    \caption{Selective activation rematerialization.}
+    \vspace{-0.15in}
+    \label{fig:moe_computation}
+\end{figure}
+
+\section{Communication-computation Overlap}
+\label{sec:design:overlapping}
+
+After optimizing parallelism strategies to minimize communication volume, we further reduce the communication overhead to nearly zero using comprehensive communication-computation overlapping techniques. Training large models involves integrating various techniques, which increases the complexity of communication overlap. For instance, at any given moment, the device might concurrently handle computation and communication kernels, overlap PP and DP communications, and manage data transfers between the device and host. 
+Existing frameworks like Megatron-LM assemble attention and FFN modules into MoE layers and rely on the \texttt{torch.autograd} package for backward propagation, which limits the flexibility of communication overlap. In contrast, \sysname decomposes the attention and FFN modules of each MoE layer into operators that run as GPU kernels, enabling fine-grained communication overlap through flexible scheduling.
+
+\subsection{Inter-operator Overlap}
+\label{sec:design:overlapping:inter-op}
+
+We overlap communication operators with independent computation operators by executing them asynchronously on different CUDA streams. To achieve optimal performance during the training process, we adopt a specifically hand-tailored, holistic scheduling strategy. 
+% Since performance is critical, we adopted a specifically hand-tailored, comprehensive holistic scheduling strategy to ensure optimal performance across the whole training process.
+
+\parabf{Holistic scheduling.} From the caller’s perspective, we implement a unified macro module to execute the entire MoE layer’s forward and backward passes, thereby expanding our scheduling flexibility. For instance, during the backward pass, various communication operators can be overlapped with dependency-free computations, such as activation recomputation, to improve efficiency. From the runtime perspective, a key challenge is efficiently managing concurrent communication tasks by resolving resource conflicts to prevent blocking and maximize throughput. This requires careful coordination, such as determining the number of SMs allocated to each communication operator, to minimize interference and optimize overall throughput.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.5\textwidth]{figures/memory.pdf}
+    \vspace{-0.3in}
+    \caption{Activation shapes in rematerialization.}
+    \vspace{-0.1in}
+    \label{fig:memory}
+\end{figure}
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/megascale-moe-fine-grained.pdf}
+    \vspace{-0.2in}
+    \caption{Fine-grained intra-operator communication-computation overlap.}
+    \vspace{0.1in}
+    \label{fig:fine-grained}
+\end{figure*}
+
+\parabf{Selective activation rematerialization.} The holistic scheduling strategy also helps reduce memory usage without compromising training speed. Compared to dense models with equivalent computational requirements, MoE models exert significantly higher memory pressure during training due to their parameter count being several times larger. In addition to employing ZeRO optimizations~\cite{rajbhandari2020zero} to eliminate redundant optimizer states across DP groups, we further optimize memory usage through selective activation rematerialization. This approach reduces activation memory requirements by re-performing computation and communication operators that can be overlapped with other necessary operators.
+
+Figure~\ref{fig:moe_computation}a illustrates the forward pass of a Mixtral~\cite{jiang2024mixtral} MoE layer and highlights key activations produced during this process. \sysname strategically retains activations that are computationally expensive to recompute, while recalculating others generated by memory-intensive operations or communication operations. This minimizes dependencies on backward computation, enabling rematerialization operations to overlap with other computations and communications, avoiding delays in the critical path. 
+For example, as shown in Figure~\ref{fig:moe_computation}b, the backward pass of the GroupedGEMM operator for FC2 requires the activation \texttt{fc2\_in} and the gradient of  \texttt{fc2\_out} (denoted as \texttt{$\Delta$fc2\_out}) as inputs. \sysname recomputes \texttt{fc2\_in} and overlaps this operator with gradient communication (i.e., all-gather for \texttt{$\Delta$ffn\_out}). Similarly, \texttt{ffn\_in} is obtained through re-performing \texttt{RMSNorm} and all-gather, with these operators hidden within the preceding communication and the FC2 GroupedGEMM, respectively. 
+\sysname also places the weighted sum of \texttt{ffn\_out} immediately after the SwiGLU~\cite{shazeer2020glu} activation function to eliminate the need to store \texttt{ffn\_out}. This reordering ensures computational consistency by avoiding operators that cross non-linear boundaries.
+
+Figure~\ref{fig:memory} illustrates the shapes of the key activations produced during forward propagation, with the highlighted activations retained for backward propagation.
+Let the model parallelism size within one MoE layer be $n$ and the intermediate hidden size of one expert be $fh$. The total activation of a single MoE layer is 
+\begin{align}
+% (4K+3K*FH/H+12+5/mqa)BSH/n
+(2n+2k+3kf+12+5/m)bsh/n,
+\nonumber
+\end{align}
+which we have reduced to 
+\begin{align}
+(2kf+4+2/m)bsh/n.
+\nonumber
+\end{align}
+\sysname reduces the activation memory by $\sim 50\%$ while maintaining the same training speed.
+ 
+\subsection{Intra-operator Overlap}
+\label{sec:design:overlapping:intra-op}
+
+Although inter-operator overlap effectively hides communication latency, squeezing all bubbles in the execution timeline remains non-trivial---especially in the forward pass, where no rematerialization or gradient computation operators exist to overlap with communication. Some forward operators directly depend on communication, such as token dispatch for expert computation, making overlap impossible unless another micro-batch is introduced, which increases memory pressure.
+
+A widely adopted solution~\cite{jiang2024megascale, transformer-engine, wang2022overlap} is to decompose operators into smaller parallel ones to enable pipelining by executing them on separate CUDA streams. 
+However, this approach introduces non-negligible overhead: $(i)$ complex stream control, involving host interference and causing random bubbles due to the non-deterministic feature of CPU control; $(ii)$ imperfect tail computation, increasing overall computation latency.
+% The reason behind this is twofold. First, some computation operators have a direct dependency on communication operators, making it impossible to hide latency between them unless we introduce another micro-batch (which will increase memory pressure). Second, inter-operator overlap requires complex stream control, which involves host interference and may cause random bubbles due to the non-deterministic feature of CPU control.
+
+To address the above issues, we adopt intra-operator overlap to parallelize communication and computation operators with direct dependencies. The core idea is to fuse these operators and break down the workloads into tiles.
+Following prior work~\cite{jangda2022breaking, chang2024flux, zhang2025comet, zheng2025tilelink}, we implement barriers in device memory between communication and computation operators. 
+These barriers enable fine-grained tile-level notifications and remove the need for host interference, further improving training performance.
+We implement two types of kernels, overlapping with GEMMs and overlapping with MoE GroupedGEMMs, for the attention and FFN modules, respectively.
+% To achieve this, there exist two approaches. 
+% The first method~\cite{jiang2024megascale, transformer-engine, wang2022overlap} is to decompose operators into smaller parallel ones to enable the pipelining of them by executing them on separate streams, which then falls back to inter-operator overlap and thus inherits the drawbacks of inter-operator scheduling inevitably. Moreover, decomposing operators into smaller ones may introduce imperfect tail computation, which increases the overall computation latency. 
+% The second method~\cite{coconet, chang2024flux, zhang2025comet, tilelink} is to implement barriers that reside in device memory between communication operators and computation operators. Using these barriers, both computation and communication can notify each other at a fine-grained tile level. Also, barriers in device memory require no host interference, which makes it possible to further improve performance.
+
+% Computation and communication operators with direct dependencies, such as token dispatch and expert computation, cannot be overlapped by simple inter-operator overlap. 
+% A widely adopted solution for achieving overlap between dependent computation and communication is operator decomposition, which breaks down communication and computation kernels into smaller, homogeneous kernels~\cite{jiang2024megascale, transformer-engine}. This enables pipelining these smaller kernels across separate CUDA streams to achieve overlap. However, this approach introduces non-negligible overhead: (1) kernel decomposition degrades GEMM performance due to smaller GEMM shapes, and (2) managing kernel dependencies requires host intervention, resulting in substantial runtime overhead.
+
+% The challenge is that the communication and computation in sequence parallelism attention and expert parallelism have direct dependencies, making it infeasible to overlap them by simply executing them on different CUDA streams asynchronously. 
+
+% A widely adopted solution for achieving overlap between dependent computation and communication is operator decomposition, which involves decomposing communication and computation kernels into smaller, homogeneous kernels. This approach enables the pipelining of these smaller kernels by executing them on separate streams to achieve overlap. However, this method introduces non-negligible overhead: (1) Decompose the kernel degrades GEMM operation performance; (2) kernel dependencies control requires host intervention, adding substantial runtime overhead.
+
+% In detail, we integrate fine-grained intra-operator communication-computation overlapping techniques, FLUX~\cite{chang2024flux} and COMET~\cite{zhang2025comet}, throughout our training system for improved performance. 
+% The core idea is to fuse computation and communication operators within a single kernel and break down these workloads into tiles to fully utilize the hardware's capabilities. Data dependencies are managed with on-device barriers to minimize synchronization overhead. This approach ensures GEMM efficiency while enabling communication to overlap at a fine-grained level, thereby reducing latency and eliminating exposed performance gaps.
+
+\parabf{Overlapping with GEMMs.} We first introduce the intra-operator communication-computation overlap for GEMM kernels.
+Specifically, we implement all-to-all(A2A)+GEMM and GEMM+A2A kernels for Output and QKV Projections in SP attention, respectively, 
+where X+Y means Y executed after X.
+Figure~\ref{fig:fine-grained} shows the data flow and overlapping pattern in A2A+GEMM. 
+The GEMM on local data and communication for remote data starts simultaneously. We leverage dedicated GPU copy engines for data transfer, ensuring that all SMs (streaming multiprocessors) are fully utilized for computation. Once a remote data tile arrives at local memory, a signal notifies the GEMM kernel to continue its computation on the arrived tile.
+For GEMM+A2A, the all-to-all operation is fused into the GEMM kernel. Each tile of GEMM computation ends with a remote data transfer that writes the output data tile to remote ranks. 
+We also implement all-gather+GEMM and GEMM+reduce-scatter kernels for tensor parallelism, which are similar to A2A+GEMM and GEMM+A2A.
+
+For A2A+GEMM and GEMM+A2A, we allocate a small number of SMs for communication as all-to-all is more complex than all-gather and reduce-scatter. The number of SMs for communication is tuned to make communication and computation exhibit similar latency.
+Moreover, multiple ranks may simultaneously read from or write to the same device, potentially causing contention in NVLink. To mitigate this, we apply swizzling~\cite{chang2024flux, zhang2025comet, zheng2025tilelink} to reorder tile communication and computation so that the arrival of communication tiles aligns with the pace of computation tiles.
+
+% Specifically, we implement all-gather GEMM (AG+GEMM), GEMM reduce-scatter (GEMM+RS) kernels, all-to-all GEMM (A2A+GEMM), and GEMM all-to-all (GEMM+A2A).
+% Figure~\ref{fig:fine-grained} illustrates the data flow and overlapping pattern in AG+GEMM and GEMM+RS. In AG+GEMM, 
+% both GEMM on local data and communication for remote data starts simultaneously. We leverage dedicated copy engine on GPUs to perform data transfer so that all the SMs (streaming multiprocessors) are used for computation without waste. Once a remote tile of data arrives at local memory, a signal is set to notify the GEMM kernel to continue its computation on the arrived tile.
+% For GEMM+RS, the scatter operation is fused into GEMM kernel. Each tile of GEMM computation ends with a remote data transfer that writes the output data tile to remote ranks for later reduction.
+% After this, a local reduction is done at each rank.\
+
+% multiple data transfer requests to remote sources are initiated with GPU Direct Memory Access. 
+% A signal is triggered upon completion of each data tile transfer, indicating that the tile is ready to be used as input for the GEMM computation. 
+% For GEMM+RS, once the computation on a tile is complete, the output tile is written to the remote buffer. 
+
+% For A2A+GEMM and GEMM+A2A, we have to allocate a small number of SMs for communication as all-to-all is more complex than simple all-gather and reduce-scatter. The number of SMs for communication is tuned so that communication and computation produce similar latency.
+% Moreover, multiple ranks might read from or write to the same device simultaneously, which can cause contention in NVLink and negatively impact performance. To mitigate this, we apply swizzling~\cite{coconet, chang2024flux, zhang2025comet, tilelink} on the tile communication and computation order so that the arrival of communication data tiles aligns with the pace of computation tiles.
+
+\parabf{Overlapping with GroupedGEMMs} 
+For expert parallelism with token dispatch and combine, we aim to overlap communication with GroupedGEMMs. We implement two types of overlapping kernels: all-gather+scatter+GroupedGEMM and GroupedGEMM+gather+reduce-scatter. Unlike the overlapping techniques for GEMM kernels, MoE GroupedGEMMs require token shuffling (scatter/gather). As a result, each computation tile may depend on tokens from multiple ranks. To effectively overlap computation with communication, we sort the token order to minimize the number of dependent ranks for each computation tile. Additionally, since each tile has its own dependencies, the signal control for each tile varies depending on the MoE routing, which is determined dynamically.
+% In MoE, token routing introduces challenges for intra-operator overlap. 
+% Each GPU worker performs multiple expert matrix multiplications, with input tokens scattered along the column dimension and sourced from remote workers.
+% Tokens, in this case, are distinct data units and the basic elements of data movement. Meanwhile, to maximize GPU utilization, high-performance GEMM kernels typically pack rows in tiles for efficient computation. 
+% However, each tile computation may require 128/256 tokens, which are distributed across multiple GPUs. This mismatch between token-level data movement and tile-level computation complicates the fine-grained fusion of computation and communication, creating additional challenges.
+% In MoE, the token routing presents new challenges for fine-grained intra-operator overlap. Each individual GPU worker must perform multiple expert matrix multiplications, with input tokens scattered along the column dimension and originating from various other remote workers. In other words, in MoE models, tokens act as distinct data units and serve as the basic units of data movement. Meanwhile, to maximize GPU computational efficiency, high-performance GEMM kernels generally pack rows in tiles for optimized computation. However, each tile computation may require 128/256 tokens, which are distributed across multiple GPUs. This mismatch in granularity between token-level data movement and tile-level computation complicates fine-grained fusion of computation and communication, introducing further challenges.
+
+% To address this challenge, we exploit the independence of GEMM computations along certain dimensions. This independence allows us to decompose and reorganize computation tasks, optimizing the order of GEMM tile computations to align with a more efficient communication strategy. 
+In detail, for AG+scatter+GroupedGEMM, we reorder tokens along the sequence dimension based on their routed expert index. Then, for each expert, we sort the routed tokens according to their source rank index. Finally, we slice the sorted sequence into blocks and perform GroupedGEMM using a sequence of computation tiles. Specifically, as shown in Figure~\ref{fig:fine-grained}c, we fuse the local scatter into the kernel by selecting rows of input data based on the index mapping. The GroupedGEMM computation for each expert is divided into tiles, with each tile depending on only a subset or even a single source rank. 
+This reduces the overall waiting time for each computation block, avoids redundant loading of expert parameters, and improves the overlap between computation and communication tiles.
+
+% We primarily rely on the CUTLASS programming template~\cite{cutlass} to generate highly efficient GEMM kernels, and integrate NVSHMEM~\cite{nvshmem} within kernels for fine-grained communication. Unlike NCCL~\cite{nccl}, which provides a higher-level abstraction for comprehensive communication operations, NVSHMEM offers a more composable, low-level API, allowing for more granular control over data access within kernels.
+
+\section{Communication Compression}
+\label{sec:design:precision}
+
+We further reduce communication overhead by applying communication compression. To maintain convergence stability, mixed-precision training frameworks typically transfer tensors awaiting reduction in higher precision, such as FP32, to ensure more accurate accumulation. A common example of this is gradient reduce-scatter in data parallelism.
+
+\parabf{DP communication compression.} As MoE model parameters increase, so does the communication overhead for parameter and gradient synchronization in data parallelism. Prior work has explored gradient compression to mitigate this cost. In our BF16 mixed-precision training, we carefully apply FP32-to-BF16 precision reduction for gradient synchronization, balancing efficiency and convergence stability.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/megascale-moe-dp-compression.pdf}
+    \vspace{-0.1in}
+    \caption{DP communication compression.}
+    \vspace{-0.1in}
+    \label{fig:compression}
+\end{figure}
+
+Specifically, as shown in Figure~\ref{fig:compression}, we retain the main gradients in FP32 during local gradient accumulation in pipeline parallelism. After each model stage completes accumulation, instead of relying solely on reduce-scatter for gradient synchronization, we cast gradients to BF16 and perform all-to-all communication within the data parallel group to gather the required gradient shards, which are then locally aggregated in FP32. Our results show that this approach introduces negligible precision loss compared to directly performing reduce-scatter with FP32, while reducing gradient communication overhead by 50\%.
+
+This approach minimizes risk for two key reasons. First, it performs a one-time conversion of accumulated gradients to BF16 during communication, while the local gradient accumulation is maintained in FP32 precision. Second, instead of using ring-style reduce for BF16 gradient communication, it employs all-to-all communication, with the final reduction computed using FP32 summation. This design prevents precision loss that could arise from repeated accumulation of BF16 values in ring-based reductions.
+
+We observe that casting large gradients and performing all-to-all communication increases peak memory consumption, potentially causing out-of-memory errors. To mitigate this, we develop a memory-efficient operator that in-places BF16 gradients into half of the FP32 input buffer while using the remaining half as the output buffer for BF16 all-to-all communication, preventing peak memory growth.
+
+\begin{table}[t!]
+    \centering
+    \resizebox{\linewidth}{!} {
+        \begin{tabular}{@{}cccccccc@{}}
+            \toprule
+            Name & \#layers & $h$ & \#heads & $m$ & $h_{ffn}$ & \#experts & top-$k$ \\\midrule
+            % \multirow{4}{*}{\begin{tabular}[c]{@{}c@{}}Open-\\Source\end{tabular}} & 
+            Internal-352B & 60 & 4096 & 32 & 4 & 14336 & 32 & 3 \\
+            % Internal-1T & 100 & 8192 & 64 & 8 & 12288 & 32 & 3 \\
+            Mixtral-8$\times$7B & 32 & 4096 & 32 & 4 & 14336 & 8 & 2 \\
+            Mixtral-8$\times$22B & 56 & 6144 & 48 & 6 & 16384 & 8 & 2 \\
+            Hunyuan-Large & 64 & 6400 & 80 & 10 & 18304 & 16 & 1 \\
+            Phi-3.5-MoE & 32 & 4096 & 32 & 4 & 6400 & 16 & 2 \\
+            DeepSeekMoE & 28 & 2048 & 16 & 1 & 1408 & 64 & 6 \\
+            \bottomrule
+        \end{tabular}
+    }
+    % \vspace{-0.1in}
+    \caption{Model configurations in evaluation.}
+    \vspace{-0.2in}
+    \label{tab:evaluation:model_conf}
+\end{table}
+
+\parabf{Communication compression for FP8 training.} In low-precision FP8 training, the proportion of communication time increases due to reduced computation time. To mitigate communication overhead, we explore compressing communication volume using FP8 precision with appropriate quantization techniques. 
+Currently, we apply communication compression in FP8 MoE training with tensor parallelism, focusing on reduction scenarios prone to overflow or underflow. For example, we adopt the E4M3 format (4-bit exponent and 3-bit mantissa) for all tensors. Similar to DP reduce-scatter compression, we replace BF16 TP reduce-scatter with FP8 all-to-all in forward propagation and perform reduction in FP32 precision. In the corresponding backward propagation, we apply FP8 all-gather for gradients. Notably, simply reducing precision leads to loss misalignment with BF16 training. To mitigate this, we apply per-token activation quantization for forward communication and per-channel quantization for backward communication. In backward propagation, we further group quantization along the token dimension using a small group size (e.g., 128).
+

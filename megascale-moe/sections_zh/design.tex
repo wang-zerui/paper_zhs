@@ -1,0 +1,360 @@
+\section{通信高效的并行策略}
+\label{sec:design:parallelism}
+
+随着 MoE 模型兴起以及硬件计算能力演进，通信开销在生产环境 MoE 训练中变得越来越关键。本节深入讨论用于降低通信量并满足其他训练需求的并行策略，例如保持较高的 GEMM（General Matrix Multiplication）效率。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/parallelism-design-space.pdf}
+    \vspace{-0.3in}
+    \caption{大规模 MoE 训练的设计空间。}
+    \vspace{-0.1in}
+    \label{fig:parallelism_design_space}
+\end{figure}
+
+图~\ref{fig:parallelism_design_space} 展示了大规模 MoE 训练的并行策略设计空间，其中不包括最外层的数据并行。我们先看跨节点并行。专家并行通过将专家分布到多个节点上，缓解 MoE 模型参数规模巨大带来的内存压力，但也会引入逐层跨节点通信，从而损害训练效率。类似地，张量并行的高通信开销使得将 TP 限制在单节点内更有效。沿用先前工作~\cite{jiang2024megascale} 的做法，我们采用流水线并行来分布模型参数、减少通信，并重叠不同 micro-batch 的通信。
+
+以 Megatron-LM~\cite{shoeybi2019megatron} 和 DeepSpeed-MoE~\cite{rajbhandari2022deepspeed} 为代表的既有大规模 MoE 训练系统，通过在节点内切分模型参数并引入张量并行来扩展训练。然而，在实践中我们观察到这种方法存在两个问题：（1）TP 会切分专家维度，负面影响 GEMM 效率；（2）TP 会引入显著通信开销，并且该开销不会随着并行规模增大而下降，最终在现代硬件上使通信超过计算。
+
+为解决这些问题，我们针对 MoE 模型组件定制并行策略。对于前馈网络（即专家），我们用专家并行替代张量并行，并针对不同 top-$k$ 和专家规模使用定制通信模式，确保通信开销低于张量并行。对于其他组件，我们采用序列并行，沿序列维度而不是 batch 维度进行划分，从而在不增大全局 batch size 的情况下扩展训练。与张量并行相比，这也降低了关键路径上的通信。由于不同组件之间存在参数不对称，额外内存和 DP 通信开销仍然可控。后续小节将详细说明这一节点内并行策略的理由和分析。表~\ref{tab:design:description} 列出了关键符号。
+
+% \begin{figure*}[t!]
+%     \centering
+%     \includegraphics[width=\linewidth]{figures/parallelism-comparison.pdf}
+%     \newline
+%     \hspace*{0.5em}
+%         \begin{subfigure}{0.26\linewidth}
+%             \caption{DP$\times$(DP$+$EP).}
+%             \label{fig:parallelism-comparison:dp-dp-ep}
+%         \end{subfigure}
+%         % \hfill
+%         \begin{subfigure}{0.33\linewidth}
+%             \caption{EP$\times$(TP$+$TP).}
+%             \label{fig:parallelism-comparison:ep-tp}
+%         \end{subfigure}
+%         % \hfill
+%         \begin{subfigure}{0.35\linewidth}
+%             \caption{\sysname: DP$\times$(SP$+$EP).}
+%             \label{fig:parallelism-comparison:dp-sp-ep}
+%         \end{subfigure}
+%     \vspace{-0.1in}
+%     \caption{Comparison of parallelism strategies. X$\times$(Y$+$Z) indicates that X represents the inter-node parallelism, while Y and Z denotes the intra-node parallelism for attention and FFN, respectively.}
+%     \vspace{-0.1in}
+%     \label{fig:parallelism-comparison}
+% \end{figure*}
+
+\subsection{用于注意力的序列并行}
+\label{sec:design:parallelism:sp_attention}
+
+由于 MoE 模型中的专家组件天然易于并行化，大多数 MoE 训练相关工作~\cite{rajbhandari2022deepspeed, li2023accelerating} 都聚焦于优化专家并行，而对注意力等非 MoE 组件通常采用数据并行（DP）。然而，在扩展 MoE 训练时，由于 $n \times$ 的激活内存消耗，这种方法并不充分。问题源于 DP 在节点间和节点内都切分 batch 维度。相比 图~\ref{fig:parallelism_design_space} 中的其他节点内并行策略，将 DP 用于注意力会迫使节点内每张 GPU 同时处理一个 micro-batch，使激活大小增加 8$\times$，常常导致显存不足。
+% However, when attempting to scale up MoE training, we find this approach insufficient due to the limited global batch size per training step. An excessively large global batch size can negatively impact the training convergence. 
+
+% For example, when training on 8K GPUs across 1K nodes with DP for attention, each GPU must handle at least one input sequence to fill the pipeline. This results in a global batch size of 64M tokens for 8K tokens per sequence, causing convergence issues. This occurs because data parallelism splits the batch dimension both across and within nodes. In contrast, parallelizing attention within nodes reduces the global batch size to 8M tokens, enabling convergence. With the same global batch size, using DP for attention, compared to other intra-node parallelism strategies in 图~\ref{fig:parallelism_design_space}, reduces GPU usage to 1/8 and increases the activation size by 8$\times$, leading to out-of-memory issues and limiting system scalability. 
+
+% Both data parallelism and expert parallelism partition computation workloads across the batch dimension, constraining the scalability of the system. 
+
+% Previous work on MoE training has primarily focused on parallelizing and optimizing the design of the FFN expert modules, while the attention component typically employs a simple data-parallelism approach by feeding into different data batch. This design is ineligibility for large-scale MoE training, as increased data parallelism results in a larger global batch size per training step, which may negatively impact the overall effectiveness of the training algorithm. 
+
+\begin{table}[t!]
+    \centering
+    \resizebox{0.8\linewidth}{!} {
+        \begin{tabular}{@{}ll@{}}
+            \toprule
+            符号 & 描述 \\ \midrule
+            $b$ & micro-batch 大小 \\
+            $s$ & 序列长度 \\
+            $h$ & 隐藏维度大小 \\
+            $n$ & 模型并行（TP、SP 或 EP）规模 \\
+            $m$ & query heads 数量与 key-value heads 数量之比 \\
+            $k$ & 每个 token 被路由到的专家数量 \\
+            \bottomrule
+        \end{tabular}
+    }
+    % \vspace{-0.1in}
+    \caption{符号说明。}
+    \vspace{-0.25in}
+    \label{tab:design:description}
+\end{table}
+
+为了实现可扩展的 MoE 训练，在注意力模块上实现节点内并行至关重要。张量并行（TP）常被用于在节点内并行化注意力操作。然而，它会因在关键路径上对激活执行 all-gather 和 reduce-scatter 而引入不可避免的通信成本。随着计算 FLOPs 与通信带宽之间的差距扩大，我们发现 TP 的通信开销甚至可能超过自注意力的计算时间。这种由通信主导的瓶颈限制了通信与计算重叠的空间，最终降低训练效率。
+
+我们采用 DeepSpeed-Ulysses~\cite{jacobs2023deepspeed} 提出的序列并行（SP）来扩展 MoE 训练，并有效降低关键路径上的通信。SP 常用于长上下文训练，用以解决长输入带来的内存挑战。我们发现它同样适用于大规模 MoE 训练。首先，与 TP 相比，它显著降低通信开销，尤其是在使用 grouped-query attention~\cite{ainslie2023gqa} 时。其次，虽然它会引入一定参数冗余，并在参数同步时增加通信开销，但 MoE 模型的独特特性使这些取舍可控且可接受。
+
+\parabf{通信效率。} 使用 TP 时，注意力中的通信量为
+\begin{align}
+    2bsh(n-1)/n. 
+    \label{eq:1}
+    % 2bsh(n-1)/n*2/m
+\end{align}
+使用 SP 时，通信量降低为
+\begin{align}
+    2bsh(n-1)/n\times(2+2/m)/n, 
+    \label{eq:2}
+\end{align}
+其中 $m$ 表示 query heads 数量与 key-value heads 数量之比。假设模型在 NVLink 域大小为 8 的 NVIDIA Hopper GPU 工作站上训练，则序列并行注意力的通信延迟可降至张量并行注意力所需延迟的约四分之一。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/megascale-moe-hierarchy.pdf}
+    \vspace{-0.1in}
+    \caption{SP 注意力中用于参数同步的层次化通信。}
+    \vspace{-0.1in}
+    \label{fig:hierarchy}
+\end{figure}
+
+\parabf{数据通信与内存开销。} SP 注意力与 TP 注意力的一个显著区别在于参数如何分布到设备上：TP 会切分注意力权重，而 SP 会复制这些权重。这会引发一个担忧，即同步梯度和参数的通信开销是否会增加。反直觉的是，考虑到节点内与节点间带宽不对称，以及现代通信库~\cite{nccl} 采用层次化通信操作（如 图~\ref{fig:hierarchy} 所示，并在 附录~\ref{apdx:hierarchical} 中分析），尽管 SP 注意力相比 TP 注意力需要同步 $n \times$ 更多参数，但在实际场景中通信开销差异很小。
+
+% \begin{figure}
+%     \centering
+%     \begin{subfigure}[b]{\linewidth}
+%         \centering
+%         \includegraphics[width=0.99\textwidth]{figures/dp_comm_32gpu.pdf}
+%         \label{fig:subfig1}
+%     \end{subfigure}
+%     \begin{subfigure}[b]{\linewidth}
+%         \centering
+%         \includegraphics[width=0.99\textwidth]{figures/dp_comm_64gpu.pdf}
+%         \label{fig:subfig2}
+%     \end{subfigure}
+%      \vspace{-0.1in}
+%     \caption{Latency vs. data size. A comparison of parameter synchronization latency between SP attention and TP attention with 32GPU and 64GPU.}
+%      \vspace{-0.1in}
+%     \label{fig:sp_dp_comm}
+% \end{figure}
+
+% In the experiment, we evaluated the communication latency of parameter synchronization between TP8 and SP8 across settings of 32 and 64 GPUs. We increase the data size from 384MB to 1536MB. The experiment results in figure \ref{fig:sp_dp_comm} demonstrate that the latencies for TP8 and SP8 are consistently comparable, with no notable differences observed. This observation corroborates our initial hypothesis that the two would exhibit similar performance characteristics in term of data parallelism communication latency.
+
+另一方面，在 MoE 训练中，SP 注意力引入的额外 GPU 内存消耗很小。对于拥有数十到数百个专家的大规模 MoE 模型，GPU 内存的大部分由专家参数占用。我们在 \S\ref{sec:evaluation:ablation} 中详述的实验确认，SP 注意力的额外参数同步和内存开销仍然可控。
+% For instance, in a 2.7T-parameter MoE model with 128 experts, the attention parameters only account for less than 1\% of the total parameters.
+
+\parabf{均衡与不均衡。} 除了 Ulysses 风格的 SP 注意力，我们也探索了其他形式，包括上下文并行（CP）~\cite{context_parallelism}，它沿序列维度划分所有激活。然而，由于注意力中的 causal mask，每个 token 只能关注之前的 token，CP 注意力会面临负载不均衡。为缓解该问题，我们尝试了 zigzag 策略，将序列头部和尾部的分区放在同一张 GPU 上，尽管要实现完美均衡仍然困难。因此，在大规模训练中，整个训练过程常常受最不均衡的数据 batch 限制。此外，这种不均衡会扰乱训练流水线，从而降低整体训练效率。
+
+\subsection{用于前馈网络的专家并行}
+\label{sec:design:parallelism:ep}
+
+% \begin{figure}[t!]
+%     \centering
+%     \includegraphics[width=0.5\textwidth]{figures/megascale-moe-parallelism.pdf}
+%     % \vspace{-0.1in}
+%     \caption{Parallelism.}
+%     % \vspace{-0.1in}
+%     \label{fig:parallelism}
+% \end{figure}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/megascale-moe-ep.pdf}
+    \vspace{-0.3in}
+    \caption{通信高效的专家并行。$e$ 表示被路由到该 worker 的 token 数量。}
+    \vspace{-0.1in}
+    \label{fig:ep_impl}
+\end{figure}
+
+在前馈网络组件的并行策略选择上，专家并行（EP）始终优于张量并行。TP 会切分每个专家的隐藏维度，降低 GEMM 效率；而 EP 在每个设备上保持完整的专家计算。理论上，EP 的通信成本为
+\begin{align}
+    2k/n\times bsh(n-1)/n, \label{eq:3}
+\end{align}
+而 TP 的通信成本为
+\begin{align}
+    2bsh(n-1)/n. \label{eq:4}
+\end{align}
+尽管二者的相对效率取决于 $k/n$ 的比值，我们仍针对不同 top-$k$ 值设计自适应通信策略，以最小化 EP 的通信量。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.7\linewidth]{figures/ag-rs-a2a.pdf}
+    \vspace{-0.1in}
+    \caption{token 分发中 AG、RS 和 A2A 的比较。}
+    \vspace{-0.1in}
+    \label{fig:ag-rs-a2a}
+\end{figure}
+
+
+\parabf{高效通信模式。} 图~\ref{fig:ep_impl} 比较了典型 EP 实现和 \sysname 的方法。标准 EP 实现需要两次 all-to-all 通信，分别用于 token 分发和聚合。此外，在发送前和接收 token 后可能还需要 scatter 操作，以确保分配给同一专家的 token 位于连续内存空间中。
+
+当 top-$k$ 值超过 $n$ 时，我们用 all-gather 和 reduce-scatter 替代传统 all-to-all 通信。首先，all-gather 操作从所有 worker 收集 token。随后，本地 scatter 操作丢弃不需要的 token，只保留当前 worker 上专家所需的 token。专家计算完成后，token 被组装为完整张量。该方法使得通信前可执行 gather 操作，随后通过 reduce-scatter 生成最终结果，确保 EP 的通信开销不高于 TP。
+
+在实际训练中，all-to-all 通信的效率低于 all-gather 和 reduce-scatter，因为它要求每个 worker 与所有其他 worker 通信，而 all-gather 和 reduce-scatter 遵循基于环的通信模式，只与相邻 worker 通信。如 图~\ref{fig:ag-rs-a2a} 所示，Mixtral-8$\times$7B 中这三种操作的通信时间表明，当 top-$k$ > 6 时，基于 all-gather 的 EP 实现更高效。
+
+% In typical EP implementations, tokens are dispatched to different devices based on the selected experts using all-to-all communication. After completing the expert computations, tokens are sent back to the original device using another all-to-all communication for subsequent processing.
+
+% In common case with $topk$ equals 1, as there is no need for weighted gathering among scattered tokens, our observation suggests that reverting all tokens to their original positions after the FFN computation may not be necessary. Instead, tokens can remain on their assigned devices for the attention computations of the following layer, and during the all-to-all communication step in sequence-parallel attention, they can be transferred to the correct positions as needed. This approach eliminates one all-to-all communication in expert parallelism, thereby reducing the communication volume by half.
+
+% \parabf{Computation efficiency.} Beyond reducing communication volume, EP enhances the computational efficiency of the feed-forward network component. Traditional tensor parallelism partitions the dimension of expert GEMM operations, and as these dimensions are divided more finely, computational efficiency decreases. In contrast, EP divides the number of expert GEMM operations on the worker, which maintains the inherent efficiency of each GEMM operation.
+
+\parabf{高效算子。} 不同于 Megatron-LM 使用 \texttt{torch.scatter\_add} 和 \texttt{torch.gather} 进行张量 scatter 和 gather，我们直接使用 CUDA 开发了高效的 scatter 和 gather 算子。基于 token 路由结果，我们预先计算输入张量每一行（代表一个 token）到输出张量对应行的映射。随后，scatter 和 gather 算子按照该映射高效执行数据传输。
+
+\parabf{负载均衡。} MoE 模型训练中的一个众所周知的挑战是专家之间的负载均衡~\cite{li2023accelerating, liu2024deepseek}。为解决该问题，我们使用辅助 loss 和 token dropping 来平衡每个节点内 GPU 之间的工作负载。类似 DeepSeek-V2~\cite{liu2024deepseek}，我们将放置在同一张 GPU 上的专家视为一组，并按设备而非单个专家计算均衡 loss 和计算容量。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/moe-computation.pdf}
+    \vspace{-0.15in}
+    \caption{选择性激活重物化。}
+    \vspace{-0.15in}
+    \label{fig:moe_computation}
+\end{figure}
+
+\section{通信与计算重叠}
+\label{sec:design:overlapping}
+
+在优化并行策略以最小化通信量之后，我们进一步使用全面的通信-计算重叠技术，将通信开销降到近乎为零。训练大模型需要整合多种技术，这增加了通信重叠的复杂度。例如，在任意时刻，设备可能同时处理计算 kernel 和通信 kernel，重叠 PP 与 DP 通信，并管理设备与主机之间的数据传输。
+Megatron-LM 等现有框架将注意力和 FFN 模块组装为 MoE 层，并依赖 \texttt{torch.autograd} 包进行反向传播，这限制了通信重叠的灵活性。相比之下，\sysname 将每个 MoE 层的注意力和 FFN 模块分解为以 GPU kernel 运行的算子，并通过灵活调度实现细粒度通信重叠。
+
+\subsection{算子间重叠}
+\label{sec:design:overlapping:inter-op}
+
+我们通过在不同 CUDA stream 上异步执行通信算子和独立计算算子来重叠二者。为了在训练过程中达到最优性能，我们采用了专门手工定制的整体化调度策略。
+% Since performance is critical, we adopted a specifically hand-tailored, comprehensive holistic scheduling strategy to ensure optimal performance across the whole training process.
+
+\parabf{整体化调度。} 从调用方视角看，我们实现了一个统一的宏模块来执行整个 MoE 层的前向和反向传播，从而扩大调度灵活性。例如，在反向传播期间，可以将各种通信算子与无依赖计算（如激活重算）重叠，以提高效率。从运行时视角看，一个关键挑战是高效管理并发通信任务：需要解决资源冲突以避免阻塞并最大化吞吐。这要求仔细协调，例如确定分配给每个通信算子的 SM 数量，以减少干扰并优化整体吞吐。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.5\textwidth]{figures/memory.pdf}
+    \vspace{-0.3in}
+    \caption{重物化中的激活形状。}
+    \vspace{-0.1in}
+    \label{fig:memory}
+\end{figure}
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/megascale-moe-fine-grained.pdf}
+    \vspace{-0.2in}
+    \caption{细粒度算子内通信-计算重叠。}
+    \vspace{0.1in}
+    \label{fig:fine-grained}
+\end{figure*}
+
+\parabf{选择性激活重物化。} 整体化调度策略还可以在不损害训练速度的情况下减少内存使用。与计算需求相当的稠密模型相比，MoE 模型由于参数数量大数倍，在训练期间带来显著更高的内存压力。除了使用 ZeRO 优化~\cite{rajbhandari2020zero} 消除 DP 组内冗余优化器状态之外，我们还通过选择性激活重物化进一步优化内存使用。该方法会重新执行那些能够与其他必要算子重叠的计算和通信算子，从而降低激活内存需求。
+
+图~\ref{fig:moe_computation}a 展示了 Mixtral~\cite{jiang2024mixtral} MoE 层的前向传播，并突出标出了该过程中产生的关键激活。\sysname 有策略地保留重算代价高的激活，同时重新计算由内存密集型操作或通信操作产生的其他激活。这会最小化对反向计算的依赖，使重物化操作能够与其他计算和通信重叠，避免关键路径延迟。
+例如，如 图~\ref{fig:moe_computation}b 所示，FC2 的 GroupedGEMM 算子在反向传播时需要激活 \texttt{fc2\_in} 和 \texttt{fc2\_out} 的梯度（记为 \texttt{$\Delta$fc2\_out}）作为输入。\sysname 重算 \texttt{fc2\_in}，并将该算子与梯度通信（即针对 \texttt{$\Delta$ffn\_out} 的 all-gather）重叠。类似地，\texttt{ffn\_in} 通过重新执行 \texttt{RMSNorm} 和 all-gather 获得，这些算子分别被隐藏在前序通信和 FC2 GroupedGEMM 之中。
+\sysname 还将 \texttt{ffn\_out} 的加权求和放在 SwiGLU~\cite{shazeer2020glu} 激活函数之后立即执行，以消除存储 \texttt{ffn\_out} 的需求。这一重排避免了跨越非线性边界的算子，从而保证计算一致性。
+
+图~\ref{fig:memory} 展示了前向传播过程中产生的关键激活形状，其中高亮激活会被保留用于反向传播。
+设一个 MoE 层内的模型并行规模为 $n$，单个专家的中间隐藏大小为 $fh$。单个 MoE 层的总激活量为
+\begin{align}
+% (4K+3K*FH/H+12+5/mqa)BSH/n
+(2n+2k+3kf+12+5/m)bsh/n,
+\nonumber
+\end{align}
+我们将其降低为
+\begin{align}
+(2kf+4+2/m)bsh/n.
+\nonumber
+\end{align}
+\sysname 在保持相同训练速度的同时，将激活内存减少了 $\sim 50\%$。
+ 
+\subsection{算子内重叠}
+\label{sec:design:overlapping:intra-op}
+
+尽管算子间重叠可以有效隐藏通信延迟，但压缩执行时间线中的所有气泡仍非易事，尤其是在前向传播中，没有重物化或梯度计算算子可与通信重叠。一些前向算子直接依赖通信，例如专家计算前的 token 分发；除非引入另一个 micro-batch，否则无法重叠，但这又会增加内存压力。
+
+一种被广泛采用的方案~\cite{jiang2024megascale, transformer-engine, wang2022overlap} 是将算子分解为更小的并行算子，并在不同 CUDA stream 上执行，从而实现流水线化。
+然而，该方法会引入不可忽视的开销：$(i)$ 复杂的 stream 控制，它涉及主机干预，并因 CPU 控制的非确定性而产生随机气泡；$(ii)$ 不完美的尾部计算，会增加整体计算延迟。
+% The reason behind this is twofold. First, some computation operators have a direct dependency on communication operators, making it impossible to hide latency between them unless we introduce another micro-batch (which will increase memory pressure). Second, inter-operator overlap requires complex stream control, which involves host interference and may cause random bubbles due to the non-deterministic feature of CPU control.
+
+为解决上述问题，我们采用算子内重叠，将具有直接依赖关系的通信和计算算子并行化。核心思想是融合这些算子，并将工作负载拆分为 tile。
+沿用先前工作~\cite{jangda2022breaking, chang2024flux, zhang2025comet, zheng2025tilelink}，我们在设备内存中实现通信算子与计算算子之间的 barrier。
+这些 barrier 支持细粒度 tile 级通知，并消除对主机干预的需求，从而进一步提升训练性能。
+我们分别为注意力模块和 FFN 模块实现了两类 kernel：与 GEMM 重叠的 kernel，以及与 MoE GroupedGEMM 重叠的 kernel。
+% To achieve this, there exist two approaches. 
+% The first method~\cite{jiang2024megascale, transformer-engine, wang2022overlap} is to decompose operators into smaller parallel ones to enable the pipelining of them by executing them on separate streams, which then falls back to inter-operator overlap and thus inherits the drawbacks of inter-operator scheduling inevitably. Moreover, decomposing operators into smaller ones may introduce imperfect tail computation, which increases the overall computation latency. 
+% The second method~\cite{coconet, chang2024flux, zhang2025comet, tilelink} is to implement barriers that reside in device memory between communication operators and computation operators. Using these barriers, both computation and communication can notify each other at a fine-grained tile level. Also, barriers in device memory require no host interference, which makes it possible to further improve performance.
+
+% Computation and communication operators with direct dependencies, such as token dispatch and expert computation, cannot be overlapped by simple inter-operator overlap. 
+% A widely adopted solution for achieving overlap between dependent computation and communication is operator decomposition, which breaks down communication and computation kernels into smaller, homogeneous kernels~\cite{jiang2024megascale, transformer-engine}. This enables pipelining these smaller kernels across separate CUDA streams to achieve overlap. However, this approach introduces non-negligible overhead: (1) kernel decomposition degrades GEMM performance due to smaller GEMM shapes, and (2) managing kernel dependencies requires host intervention, resulting in substantial runtime overhead.
+
+% The challenge is that the communication and computation in sequence parallelism attention and expert parallelism have direct dependencies, making it infeasible to overlap them by simply executing them on different CUDA streams asynchronously. 
+
+% A widely adopted solution for achieving overlap between dependent computation and communication is operator decomposition, which involves decomposing communication and computation kernels into smaller, homogeneous kernels. This approach enables the pipelining of these smaller kernels by executing them on separate streams to achieve overlap. However, this method introduces non-negligible overhead: (1) Decompose the kernel degrades GEMM operation performance; (2) kernel dependencies control requires host intervention, adding substantial runtime overhead.
+
+% In detail, we integrate fine-grained intra-operator communication-computation overlapping techniques, FLUX~\cite{chang2024flux} and COMET~\cite{zhang2025comet}, throughout our training system for improved performance. 
+% The core idea is to fuse computation and communication operators within a single kernel and break down these workloads into tiles to fully utilize the hardware's capabilities. Data dependencies are managed with on-device barriers to minimize synchronization overhead. This approach ensures GEMM efficiency while enabling communication to overlap at a fine-grained level, thereby reducing latency and eliminating exposed performance gaps.
+
+\parabf{与 GEMM 重叠。} 我们首先介绍 GEMM kernel 的算子内通信-计算重叠。
+具体而言，我们分别为 SP 注意力中的 Output Projection 和 QKV Projection 实现 all-to-all（A2A）+GEMM 以及 GEMM+A2A kernel，其中 X+Y 表示 Y 在 X 之后执行。
+图~\ref{fig:fine-grained} 展示了 A2A+GEMM 中的数据流和重叠模式。
+本地数据上的 GEMM 与远端数据通信同时开始。我们利用专用 GPU copy engine 进行数据传输，确保所有 SM（streaming multiprocessors）都被充分用于计算。一旦远端数据 tile 到达本地内存，一个信号就会通知 GEMM kernel 继续在已到达的 tile 上计算。
+对于 GEMM+A2A，all-to-all 操作被融合进 GEMM kernel。每个 GEMM 计算 tile 结束时都会触发一次远端数据传输，将输出数据 tile 写入远端 rank。
+我们还为张量并行实现了 all-gather+GEMM 和 GEMM+reduce-scatter kernel，它们分别类似于 A2A+GEMM 和 GEMM+A2A。
+
+对于 A2A+GEMM 和 GEMM+A2A，由于 all-to-all 比 all-gather 和 reduce-scatter 更复杂，我们会为通信分配少量 SM。通信使用的 SM 数量经过调优，使通信和计算表现出相近延迟。
+此外，多个 rank 可能同时从同一设备读取或向同一设备写入，潜在造成 NVLink 竞争。为缓解该问题，我们应用 swizzling~\cite{chang2024flux, zhang2025comet, zheng2025tilelink} 来重排 tile 通信和计算顺序，使通信 tile 的到达节奏与计算 tile 的处理节奏对齐。
+
+% Specifically, we implement all-gather GEMM (AG+GEMM), GEMM reduce-scatter (GEMM+RS) kernels, all-to-all GEMM (A2A+GEMM), and GEMM all-to-all (GEMM+A2A).
+% 图~\ref{fig:fine-grained} illustrates the data flow and overlapping pattern in AG+GEMM and GEMM+RS. In AG+GEMM, 
+% both GEMM on local data and communication for remote data starts simultaneously. We leverage dedicated copy engine on GPUs to perform data transfer so that all the SMs (streaming multiprocessors) are used for computation without waste. Once a remote tile of data arrives at local memory, a signal is set to notify the GEMM kernel to continue its computation on the arrived tile.
+% For GEMM+RS, the scatter operation is fused into GEMM kernel. Each tile of GEMM computation ends with a remote data transfer that writes the output data tile to remote ranks for later reduction.
+% After this, a local reduction is done at each rank.\
+
+% multiple data transfer requests to remote sources are initiated with GPU Direct Memory Access. 
+% A signal is triggered upon completion of each data tile transfer, indicating that the tile is ready to be used as input for the GEMM computation. 
+% For GEMM+RS, once the computation on a tile is complete, the output tile is written to the remote buffer. 
+
+% For A2A+GEMM and GEMM+A2A, we have to allocate a small number of SMs for communication as all-to-all is more complex than simple all-gather and reduce-scatter. The number of SMs for communication is tuned so that communication and computation produce similar latency.
+% Moreover, multiple ranks might read from or write to the same device simultaneously, which can cause contention in NVLink and negatively impact performance. To mitigate this, we apply swizzling~\cite{coconet, chang2024flux, zhang2025comet, tilelink} on the tile communication and computation order so that the arrival of communication data tiles aligns with the pace of computation tiles.
+
+\parabf{与 GroupedGEMM 重叠。}
+对于带有 token 分发和合并的专家并行，我们希望将通信与 GroupedGEMM 重叠。我们实现了两类重叠 kernel：all-gather+scatter+GroupedGEMM 和 GroupedGEMM+gather+reduce-scatter。不同于 GEMM kernel 的重叠技术，MoE GroupedGEMM 需要 token shuffle（scatter/gather）。因此，每个计算 tile 可能依赖来自多个 rank 的 token。为了有效重叠计算与通信，我们对 token 顺序排序，以最小化每个计算 tile 依赖的 rank 数量。此外，由于每个 tile 都有自己的依赖关系，每个 tile 的信号控制会随动态确定的 MoE 路由而变化。
+% In MoE, token routing introduces challenges for intra-operator overlap. 
+% Each GPU worker performs multiple expert matrix multiplications, with input tokens scattered along the column dimension and sourced from remote workers.
+% Tokens, in this case, are distinct data units and the basic elements of data movement. Meanwhile, to maximize GPU utilization, high-performance GEMM kernels typically pack rows in tiles for efficient computation. 
+% However, each tile computation may require 128/256 tokens, which are distributed across multiple GPUs. This mismatch between token-level data movement and tile-level computation complicates the fine-grained fusion of computation and communication, creating additional challenges.
+% In MoE, the token routing presents new challenges for fine-grained intra-operator overlap. Each individual GPU worker must perform multiple expert matrix multiplications, with input tokens scattered along the column dimension and originating from various other remote workers. In other words, in MoE models, tokens act as distinct data units and serve as the basic units of data movement. Meanwhile, to maximize GPU computational efficiency, high-performance GEMM kernels generally pack rows in tiles for optimized computation. However, each tile computation may require 128/256 tokens, which are distributed across multiple GPUs. This mismatch in granularity between token-level data movement and tile-level computation complicates fine-grained fusion of computation and communication, introducing further challenges.
+
+% To address this challenge, we exploit the independence of GEMM computations along certain dimensions. This independence allows us to decompose and reorganize computation tasks, optimizing the order of GEMM tile computations to align with a more efficient communication strategy. 
+具体而言，对于 AG+scatter+GroupedGEMM，我们根据 token 被路由到的专家索引，沿序列维度重排 token。然后，对每个专家，我们按照源 rank 索引对被路由来的 token 排序。最后，我们将排序后的序列切成多个 block，并使用一系列计算 tile 执行 GroupedGEMM。具体如 图~\ref{fig:fine-grained}c 所示，我们基于索引映射选择输入数据行，从而将本地 scatter 融合进 kernel。每个专家的 GroupedGEMM 计算被划分为多个 tile，每个 tile 只依赖一部分源 rank，甚至只依赖单个源 rank。
+这减少了每个计算 block 的整体等待时间，避免了专家参数的冗余加载，并改善了计算 tile 与通信 tile 之间的重叠。
+
+% We primarily rely on the CUTLASS programming template~\cite{cutlass} to generate highly efficient GEMM kernels, and integrate NVSHMEM~\cite{nvshmem} within kernels for fine-grained communication. Unlike NCCL~\cite{nccl}, which provides a higher-level abstraction for comprehensive communication operations, NVSHMEM offers a more composable, low-level API, allowing for more granular control over data access within kernels.
+
+\section{通信压缩}
+\label{sec:design:precision}
+
+我们进一步通过通信压缩来降低通信开销。为了保持收敛稳定性，混合精度训练框架通常会以更高精度（如 FP32）传输等待归约的张量，以确保更精确的累加。数据并行中的梯度 reduce-scatter 就是一个常见例子。
+
+\parabf{DP 通信压缩。} 随着 MoE 模型参数增加，数据并行中参数和梯度同步的通信开销也随之增长。已有工作探索了梯度压缩以缓解这一成本。在我们的 BF16 混合精度训练中，我们谨慎地将 FP32 到 BF16 的精度降低用于梯度同步，以平衡效率和收敛稳定性。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figures/megascale-moe-dp-compression.pdf}
+    \vspace{-0.1in}
+    \caption{DP 通信压缩。}
+    \vspace{-0.1in}
+    \label{fig:compression}
+\end{figure}
+
+具体而言，如 图~\ref{fig:compression} 所示，在流水线并行的本地梯度累加过程中，我们将主梯度保留为 FP32。在每个模型阶段完成累加后，我们不再完全依赖 reduce-scatter 进行梯度同步，而是将梯度转换为 BF16，并在数据并行组内执行 all-to-all 通信以收集所需梯度分片，随后在本地以 FP32 聚合。结果表明，与直接使用 FP32 执行 reduce-scatter 相比，该方法引入的精度损失可以忽略不计，同时将梯度通信开销降低 50\%。
+
+该方法通过两个关键原因最小化风险。第一，它只在通信期间对累加后的梯度执行一次到 BF16 的转换，而本地梯度累加仍保持 FP32 精度。第二，它没有对 BF16 梯度通信使用环式 reduce，而是采用 all-to-all 通信，并在最终归约中使用 FP32 求和。该设计避免了在基于环的归约中反复累加 BF16 数值可能导致的精度损失。
+
+我们观察到，对大梯度进行类型转换并执行 all-to-all 通信会增加峰值内存消耗，可能导致显存不足。为缓解该问题，我们开发了一个内存高效算子：它将 BF16 梯度原地放入 FP32 输入 buffer 的一半空间，同时将剩余一半作为 BF16 all-to-all 通信的输出 buffer，从而避免峰值内存增长。
+
+\begin{table}[t!]
+    \centering
+    \resizebox{\linewidth}{!} {
+        \begin{tabular}{@{}cccccccc@{}}
+            \toprule
+            名称 & \#层数 & $h$ & \#heads & $m$ & $h_{ffn}$ & \#专家 & top-$k$ \\\midrule
+            % \multirow{4}{*}{\begin{tabular}[c]{@{}c@{}}Open-\\Source\end{tabular}} & 
+            Internal-352B & 60 & 4096 & 32 & 4 & 14336 & 32 & 3 \\
+            % Internal-1T & 100 & 8192 & 64 & 8 & 12288 & 32 & 3 \\
+            Mixtral-8$\times$7B & 32 & 4096 & 32 & 4 & 14336 & 8 & 2 \\
+            Mixtral-8$\times$22B & 56 & 6144 & 48 & 6 & 16384 & 8 & 2 \\
+            Hunyuan-Large & 64 & 6400 & 80 & 10 & 18304 & 16 & 1 \\
+            Phi-3.5-MoE & 32 & 4096 & 32 & 4 & 6400 & 16 & 2 \\
+            DeepSeekMoE & 28 & 2048 & 16 & 1 & 1408 & 64 & 6 \\
+            \bottomrule
+        \end{tabular}
+    }
+    % \vspace{-0.1in}
+    \caption{评估中的模型配置。}
+    \vspace{-0.2in}
+    \label{tab:evaluation:model_conf}
+\end{table}
+
+\parabf{FP8 训练的通信压缩。} 在低精度 FP8 训练中，由于计算时间减少，通信时间占比会增加。为缓解通信开销，我们探索了使用 FP8 精度并结合合适量化技术来压缩通信量。
+目前，我们在带有张量并行的 FP8 MoE 训练中应用通信压缩，重点处理容易发生上溢或下溢的归约场景。例如，我们对所有张量采用 E4M3 格式（4 位指数、3 位尾数）。类似 DP reduce-scatter 压缩，我们在前向传播中用 FP8 all-to-all 替代 BF16 TP reduce-scatter，并以 FP32 精度执行归约。在对应的反向传播中，我们对梯度应用 FP8 all-gather。值得注意的是，简单降低精度会导致 loss 与 BF16 训练不对齐。为缓解该问题，我们对前向通信采用按 token 的激活量化，对反向通信采用按 channel 的量化。在反向传播中，我们进一步沿 token 维度使用较小 group size（例如 128）进行分组量化。

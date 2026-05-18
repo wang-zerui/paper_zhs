@@ -1,0 +1,37 @@
+\appendix
+
+% \parait{Appendices are supporting material that has not been peer-reviewed.}
+
+\section{附录}
+\label{apdx}
+
+\subsection{用于参数同步的层次化通信}
+\label{apdx:hierarchical}
+
+设完整注意力权重大小为 $P$，模型并行（TP 或 SP）维度为 $n$，数据并行规模为 $d$。通常，用于模型并行的 GPU 位于同一节点内，需要节点内通信；而数据并行跨越多个节点，需要节点间通信。考虑一个包含 $d$ 个设备的数据并行组，其中每个设备持有相同的参数分区。
+
+对于 TP attention 中的参数同步，在 LLM 训练中，通信涉及跨 $d$ 个设备、大小为 $P/n$ 的数据，主要分为两步：
+\begin{itemize}[leftmargin=*]
+    \item 节点间 \texttt{reduce-scatter} 操作，数据大小为 $P/n$，在 $d$ 个设备上执行。
+    \item 节点间 \texttt{all-gather} 操作，数据大小为 $P/n$，在 $d$ 个设备上执行。
+\end{itemize}
+因此主要产生节点间通信，通信量为 $2P/n(d-1)/d$。
+
+使用 SP attention 时，参数同步涉及跨 $n \times d$ 个设备、大小为 $P$ 的完整数据。考虑节点内和节点间网络带宽的差异，该过程可以通过四步层次化通信实现：复制参数先在节点内归约，再跨节点归约，随后分发回每个设备。图~\ref{fig:hierarchy}a 展示了一个 $n=3$、$d=2$ 的层次化通信示例。具体步骤如下。
+\begin{itemize}[leftmargin=*]
+    \item 节点内 \texttt{reduce-scatter} 操作，数据大小为 $P$，在 $n$ 个设备上执行。
+    \item 节点间 \texttt{reduce-scatter} 操作，数据大小为 $P/n$，在 $d$ 个设备上执行。
+    \item 节点间 \texttt{all-gather} 操作，数据大小为 $P/n$，在 $d$ 个设备上执行。
+    \item 节点内 \texttt{all-gather} 操作，数据大小为 $P$，在 $n$ 个设备上执行。
+\end{itemize}
+SP attention 中的节点间通信量仍为 $2P/n(d-1)/d$，额外节点内通信量为 $2P(n-1)/n$。
+
+此外，由于节点内和节点间通信使用不同资源，这些步骤可以被切分为小 chunk 并流水线化，以便如 图~\ref{fig:hierarchy}b 所示高效地相互隐藏。节点间通信延迟与节点内通信延迟之比为
+\begin{align} \label{eq:ratio}
+    \frac{1}{n} \times \frac{\text{intra-node bandwidth}}{\text{inter-node bandwidth}} \times \frac{n(d-1)}{d(n-1)}
+\end{align}
+
+考虑一个典型训练场景：使用 H100 SXM 机器，NVLink 带宽为 450 GB/s，设备间 NIC 通信带宽为 50 GB/s。在该背景下，节点间通信延迟很容易超过节点内通信延迟。这意味着节点内通信可以被节点间通信掩盖。因此，在这类场景中，使用 SP attention 同步梯度和参数的表现事实上与 TP attention 一致。
+
+% \subsection{Selective Activation Rematerialization}
+% \label{apdx:recomputation}

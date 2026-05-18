@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-04-13 14:17:41 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-05-18 19:28:25 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：39
-- 含 `00README.json`：27
-- 有本地候选 PDF：38
-- 含中文 PDF：32
-- 带源码包：22
-- 含 tracked files 的目录：38
+- 论文目录：40
+- 含 `00README.json`：28
+- 有本地候选 PDF：39
+- 含中文 PDF：33
+- 带源码包：23
+- 含 tracked files 的目录：39
 - 纯本地目录（tracked files = 0）：1
 
 ## Triage
@@ -45,6 +45,7 @@
 | lmetric | LMetric | ✅ | lmetric.tex | lmetric_zh.pdf | lmetric_zh.pdf | ✅ | — | 60 |
 | low-precision-flash-attention | Why Low-Precision Transformer Training Fails | ✅ | iclr2026_conference.tex | iclr2026_conference_zh.pdf | iclr2026_conference_zh.pdf | ✅ | source.tar | 31 |
 | magma | Magma | ✅ | google_main.tex | google_main_zh.pdf | google_main_zh.pdf | ✅ | source.tar.gz | 23 |
+| megascale-moe | MegaScale-MoE | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 48 |
 | mirage | Mirage | ✅ | paper_osdi25.tex | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 49 |
 | molecular-structure-of-thought | The Molecular Structure of Thought | ✅ | paper.tex | paper.pdf | paper.pdf | — | source.tar.gz | 53 |
 | mpk | MPK | ✅ | paper_osdi26.tex | paper_arxiv_zh.pdf | paper_arxiv_zh.pdf | ✅ | — | 55 |

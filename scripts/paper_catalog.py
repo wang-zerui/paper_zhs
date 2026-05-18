@@ -123,6 +123,7 @@ TITLE_OVERRIDES = {
     "nvidia-superpod": "NVIDIA SuperPOD",
     "Magma": "Magma",
     "magma": "Magma",
+    "megascale-moe": "MegaScale-MoE",
     "Mirage": "Mirage",
     "mirage": "Mirage",
     "MPK": "MPK",

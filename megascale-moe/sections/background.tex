@@ -1,0 +1,63 @@
+\section{Background}
+\label{sec:background}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.65\linewidth]{figures/moe_intro.pdf}
+    \vspace{-0.15in}
+    \caption{Mixture-of-Experts (MoE) layer.}
+    \vspace{-0.1in}
+    \label{fig:moe_intro}
+\end{figure}
+
+\subsection{Mixture-of-Experts for Transformer}
+
+The Mixture of Experts (MoE) mechanism is an advanced approach designed to boost the performance of Transformer~\cite{vaswani2017attention} models, which are increasingly pivotal in the realm of LLMs~\cite{jiang2024mixtral, chowdhery2023palm, dbrx, liu2024deepseekv3}. It extends the Transformer architecture by integrating multiple expert networks within the feed-forward network (FFN) component. As illustrated in Figure~\ref{fig:moe_intro}, MoE models dynamically route input tokens to the most relevant experts based on their characteristics. This routing is managed by a trainable gating mechanism that selects the best-suited experts for each token. This architectural innovation enables MoE models to scale in capacity without a proportional increase in inference costs, as only a subset of experts is activated for each input.
+% It offers a more flexible and efficient way to improve model performance beyond simply increasing the size of the network.
+
+\subsection{Large-scale LLM Training}
+
+Training large language models at scale on tens of thousands of GPUs is a complex system engineering challenge that requires multiple systems techniques. To distribute the training workload, a combination of parallelism strategies such as data, tensor, and pipeline parallelism is necessary~\cite{shoeybi2019megatron, rasley2020deepspeed, jiang2024megascale}, as each approach has limitations that prevent relying on a single method for effective scaling. 
+
+\parabf{Data parallelism} uniformly distributes the training data across all devices, with each device replicating the model parameters and optimizer states. To synchronize the parameters after each training iteration, data parallelism performs an all-reduce communication operation. Zero Redundancy Optimizer (ZeRO)~\cite{rajbhandari2020zero} improves over data parallelism by distributing model states across all participating devices. ZeRO unfolds across three progressive stages, each designed to increasingly conserve memory, though this comes with the trade-off of elevated communication. 
+
+\parabf{Tensor parallelism} distributes compute-intensive tensor operations over multiple devices, enabling parallel computation and significantly accelerating the training process. The specific partitioning strategy and the dependencies among operators within the model dictate that tensor parallelism may necessitate gathering split inputs (all-gather) or merging outputs (reduce-scatter). In LLM training, operators like LayerNorm and Dropout, though less compute-intensive, require substantial activation memory. To tackle this problem, a variant of tensor parallelism known as \textbf{sequence parallelism}~\cite{korthikanti2023reducing} is proposed, which partitions these operators along the dimension of sequence length. For long-context training, several works~\cite{shoeybi2019megatron, jacobs2023deepspeed, context_parallelism} apply sequence parallelism or tensor parallelism to different operators in self-attention. Figure~\ref{fig:background:attention_parallelism} illustrates the mainstream parallelism strategies for attention, namely tensor, sequence, and context parallelism (TP, SP, and CP), which we analyze in \S\ref{sec:design:parallelism:sp_attention}.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=\linewidth]{figures/megascale-moe-attention-parallelism.pdf}
+    \vspace{-0.3in}
+    \caption{Different parallelism strategies for self-attention. "TP" denotes partitioning along the dimension of hidden size, while "SP" denotes partitioning along the dimension of sequence length.}
+    \vspace{-0.1in}
+    \label{fig:background:attention_parallelism}
+\end{figure}
+
+\parabf{Pipeline parallelism} enhances efficiency by dividing model layers into stages that are processed on different devices, enabling pipelined execution. Each batch is split into several micro-batches for this purpose. To minimize pipeline bubbles, various scheduling strategies have been developed, e.g., GPipe~\cite{huang2019gpipe}, PipeDream 1F1B~\cite{narayanan2019pipedream} and Interleaved 1F1B~\cite{narayanan2021efficient}, etc. Megatron-LM adopts Interleaved 1F1B pipeline scheduling, further dividing each stage on one device into multiple virtual stages to reduce the pipeline bubble rate.
+
+\parabf{Expert parallelism} is tailored for training MoE models by distributing experts across multiple devices, alleviating memory pressure and enabling parallel processing. To efficiently assign tokens to the appropriate experts and retrieve their outputs, all-to-all communication is typically employed.
+
+\iffalse
+
+\begin{table*}[t!]
+    \centering
+    \resizebox{\linewidth}{!} {
+        \begin{tabular}{c|c|c|c|c|c|c}
+            \hline
+            \hline
+            \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Parallelism Strategy\end{tabular}} & \multicolumn{3}{c|}{Partitioning Dimension} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Communication\\ Operation\end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Communication\\ Volume\end{tabular}} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Attention \\Parameters\end{tabular}}\\
+            \cline{2-4}
+            & $ \text{Linear}_{\text{QKV}} $ & Attention & $ \text{Linear}_{\text{Out}} $ & & & \\
+            \hline
+            Tensor Parallelism (TP)~\cite{shoeybi2019megatron} & H & H & H & All-Gather+Reduce-Scatter & $2bsh(n-1)/n$ & Partitioned \\
+            Ulysses Sequence Parallelism (SP)~\cite{jacobs2023deepspeed} & S & H & S & All-to-All QKV\&Output & $2bsh(n-1)/n \times (2+2/m)/n$ & Replicated \\
+            Context Parallelism (CP)~\cite{context_parallelism} & S & S & S & All-Gather KV & $2bsh(n-1)/n \times 2/m$ & Replicated \\
+            \hline
+            \hline
+        \end{tabular}
+    }
+    % \vspace{-0.1in}
+    \caption{Different parallelism strategies for self-attention. "H" denotes partitioning along the dimension of hidden size, while "S" denotes partitioning along the dimension of sequence length.}
+    \vspace{-0.1in}
+    \label{tab:background:parallelism}
+\end{table*}
+\fi

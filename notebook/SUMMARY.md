@@ -24,6 +24,7 @@
 * [LMetric](papers/lmetric.md)
 * [Why Low-Precision Transformer Training Fails](papers/low-precision-flash-attention.md)
 * [Magma](papers/magma.md)
+* [MegaScale-MoE](papers/megascale-moe.md)
 * [Mirage](papers/mirage.md)
 * [The Molecular Structure of Thought](papers/molecular-structure-of-thought.md)
 * [MPK](papers/mpk.md)
