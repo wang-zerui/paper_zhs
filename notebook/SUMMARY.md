@@ -18,6 +18,7 @@
 * [FlashInfer](papers/flashinfer.md)
 * [GatedAttn](papers/gated-attn.md)
 * [GLM5](papers/glm-5.md)
+* [GUI-Actor](papers/gui-actor.md)
 * [HyperParallel](papers/hyper-parallel.md)
 * [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](papers/iclr-camera-ready-v0.md)
 * [LLM Viewer](papers/llm-viewer.md)

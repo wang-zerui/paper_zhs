@@ -115,6 +115,7 @@ TITLE_OVERRIDES = {
     "gated-attn": "GatedAttn",
     "GLM5": "GLM5",
     "glm-5": "GLM5",
+    "gui-actor": "GUI-Actor",
     "HyperParallel": "HyperParallel",
     "hyper-parallel": "HyperParallel",
     "LLM-viewer": "LLM Viewer",

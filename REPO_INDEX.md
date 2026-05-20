@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-05-18 19:28:25 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-05-20 22:20:55 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：40
-- 含 `00README.json`：28
-- 有本地候选 PDF：39
-- 含中文 PDF：33
-- 带源码包：23
-- 含 tracked files 的目录：39
+- 论文目录：41
+- 含 `00README.json`：29
+- 有本地候选 PDF：40
+- 含中文 PDF：34
+- 带源码包：24
+- 含 tracked files 的目录：40
 - 纯本地目录（tracked files = 0）：1
 
 ## Triage
@@ -39,6 +39,7 @@
 | flashinfer | FlashInfer | — | — | main.pdf | main.pdf | — | source.tar.gz | 60 |
 | gated-attn | GatedAttn | ✅ | acl_latex.tex | acl_latex.pdf | acl_latex.pdf | — | source.tar.gz | 33 |
 | glm-5 | GLM5 | ✅ | 0_main.tex | 0_main_zh.pdf | 0_main_zh.pdf | ✅ | source.tar.gz | 40 |
+| gui-actor | GUI-Actor | ✅ | neurips_2025.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 38 |
 | hyper-parallel | HyperParallel | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 15 |
 | ICLR_camera_ready_v0 | FlexRL: Scaling VLM RL Training via Efficient Load Balancing | — | — | main.pdf | main.pdf | — | — | 63 |
 | llm-viewer | LLM Viewer | — | — | main_zh.pdf | — | ✅ | source.tar.gz | 0 |

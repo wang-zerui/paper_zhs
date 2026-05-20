@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **39**
+- Papers: **40**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -35,6 +35,7 @@
 - [FlashInfer](./papers/flashinfer.md) · 主论文 · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fflashinfer%2Fmain.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/flashinfer/main.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/flashinfer/main.pdf)
 - [GatedAttn](./papers/gated-attn.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fgated-attn%2Facl_latex.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/gated-attn/acl_latex.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/gated-attn/acl_latex.pdf)
 - [GLM5](./papers/glm-5.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fglm-5%2F0_main_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/glm-5/0_main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/glm-5/0_main_zh.pdf)
+- [GUI-Actor](./papers/gui-actor.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fgui-actor%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/gui-actor/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/gui-actor/main_zh.pdf)
 - [HyperParallel](./papers/hyper-parallel.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fhyper-parallel%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/hyper-parallel/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/hyper-parallel/main_zh.pdf)
 - [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](./papers/iclr-camera-ready-v0.md) · 主论文 · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2FICLR_camera_ready_v0%2Fmain.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/ICLR_camera_ready_v0/main.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/ICLR_camera_ready_v0/main.pdf)
 - [LLM Viewer](./papers/llm-viewer.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fllm-viewer%2Fsrc%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/llm-viewer/src/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/llm-viewer/src/main_zh.pdf)
