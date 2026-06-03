@@ -1,0 +1,75 @@
+\section{方法}
+\label{sec:method}
+
+\begin{figure*}
+    \centering
+   \resizebox{1.0\textwidth}{!}{%
+    \includegraphics{figures_zh/grpo.png}
+    }
+    \vspace{-0.1in}
+    \caption{\textbf{PhyPrompt 的 GRPO 流程。} 对每个输入提示词，LLM（Qwen2.5~\cite{Qwen2024}）生成多个增强提示词；随后 T2V 生成器（CogVideoX-2B~\cite{yang2024cogvideox}）为每个增强提示词生成一个视频。视频评估器（VideoPhy2-Auto~\cite{bansal2025videophy2}）为每个视频打分，我们据此使用 GRPO 优化 LLM。}
+    \label{fig:pipeline}
+    \vspace{-0.2in}
+\end{figure*}
+
+本节介绍 (i) 我们用于监督微调的以物理为中心的思维链 (CoT) 数据集，(ii) 基于 GRPO 的提示优化，以及 (iii) 我们的动态奖励课程，它解决了语义保真度和物理真实性之间的内在冲突。
+
+\subsection{以物理为中心的思维链数据集}
+
+我们构建 CoT 数据集来教会语言模型进行物理感知的提示词增强。我们从 PhyGenBench 的 160 个示例出发 \cite{phygenbench2024}；每个示例包含原始提示词 $x$、物理定律 $L$，以及 GPT-4o \cite{achiam2023gpt-4o} 生成的增强提示词 $y_{\text{GPT}}$。由于这些示例缺少显式推理过程，我们使用 GPT-4o1-preview \cite{jaech2024o1-preview} 生成逐步推理链，解释如何基于 $L$ 将 $x$ 转换为 $y_{\text{GPT}}$。
+
+最终数据集包含三元组 $(x, \mathbf{r}, y_{\text{CoT}})$，其中 $\mathbf{r}$ 为推理链，$y_{\text{CoT}}$ 为物理感知提示词。这使我们能够在保留用户意图的同时对 Qwen2.5 进行监督微调。
+
+\subsection{两阶段训练流程}
+
+\noindent\textbf{监督微调。} 我们初始化 $\pi_{\theta}$ 通过最小化交叉熵损失：
+\begin{equation}
+  \mathcal{L}_{\text{SFT}}
+  = -\E_{(x,y_{\text{CoT}})} \bigl[\log \pi_{\theta}(y_{\text{CoT}} \mid x)\bigr].
+\end{equation}
+
+\noindent\textbf{通过 GRPO 进行强化学习。} 图~\ref{fig:pipeline} 展示了我们的流程。用户提示词 $x$ 由策略 $\pi_{\theta}$ 重写为增强提示词 $y$，再输入固定的 T2V 生成器 $G$（CogVideoX-2B \cite{yang2024cogvideox}）。生成视频 $v = G(y)$ 由 VideoPhy2-AutoEval \cite{bansal2025videophy2} 打分，该奖励信号驱动 RL 细化 $\pi_{\theta}$，而不改变 $G$。
+对于批量大小为 $B$ 的每个提示词 $x^{(j)}$，我们从旧策略 $\pi_{\theta_{\text{old}}}$ 采样 $G=4$ 个候选重写。每个候选生成视频 $v_i^{(j)} = G(y_i^{(j)})$ 并得到分数 $r_i^{(j)}$。定义组均值 $\bar r^{(j)} = \frac{1}{G}\sum_{i=1}^G r_i^{(j)}$ 和优势值：
+\begin{equation}
+  A_i^{(j)} = r_i^{(j)} - \bar r^{(j)}.
+  \label{eq:advantage}
+\end{equation}
+
+我们更新 $\pi_\theta$ 通过剪裁 GRPO 损失与重要性比
+$w_i^{(j)} = \pi_{\theta}(y_i^{(j)}\mid x^{(j)})/\pi_{\theta_{\text{old}}}(y_i^{(j)}\mid x^{(j)})$:
+\begin{align}
+  \mathcal{L}_{\text{GRPO}}
+  &= -\frac{1}{BG}\sum_{j=1}^B\sum_{i=1}^G
+    \min\bigl(
+      w_i^{(j)} A_i^{(j)}, \nonumber \\
+    &\quad \text{clip}(w_i^{(j)}, 1-\epsilon, 1+\epsilon)\,A_i^{(j)}
+    \bigr)
+    + \beta\,D_{\mathrm{KL}}[\pi_{\theta_{\text{old}}}\|\pi_{\theta}],
+\end{align}
+其中 $\epsilon=0.2$ 和 $\beta$ 将 KL 散度权重分配给 SFT 初始化。
+
+\subsection{动态多目标奖励设计}
+
+语义遵循度（SA）和物理常识（PC）本质上是冲突的：单目标优化表现出严重的负迁移，优化 SA 会降低 PC 的性能，反之亦然（第~\ref{sec:reward_design}）。静态加权组合不能共同最大化两个目标。我们提出了一种动态奖励课程，可以实现协同优化，超出任一单一目标方法的上界。
+
+\noindent\textbf{奖励成分。}
+VideoPhy2-自动评估 \cite{bansal2025videophy2} 提供 1-5 Likert 量表的两个分数： \textbf{语义遵循度} ($r_{\text{sa}}$）测量视频提示对齐，以及 \textbf{物理常识} ($r_{\text{pc}}$）测量物理合理性。
+
+\noindent\textbf{动态课程。}
+复合奖励使用与时间相关的权重：
+\begin{equation}
+  R(t) = w_{\text{sa}}(t) \cdot r_{\text{sa}} + w_{\text{pc}}(t) \cdot r_{\text{pc}},
+  \label{eq:total_reward}
+\end{equation}
+指数衰减：
+\begin{equation}
+  w_{\text{sa}}(t)=\exp\bigl(-\alpha\,t/T\bigr),\quad
+  w_{\text{pc}}(t)=1-w_{\text{sa}}(t),
+  \label{eq:weights}
+\end{equation}
+其中 $t$ 为训练步数，$T$ 为总步数，$\alpha$ 控制衰减速率。
+
+\noindent\textbf{组合学习机制。}
+早期训练（$w_{\text{sa}} \approx 1$）建立语义支架：物体身份、关系和场景结构。后期训练（$w_{\text{pc}} \approx 1$）用物理特性完善了这个支架：力、动力学和因果相互作用。这种分阶段方法发现了单目标优化无法达到的提示结构~\cite{bengio2009curriculum}。
+
+语义基础提供组合支架~\cite{scholkopf2021toward}，物理约束则起到隐式正则化作用~\cite{liebel2018auxiliary}。仅优化 SA 缺少来自物理目标的细化压力；仅优化 PC 则缺少组织物理细节所需的语义一致性。我们的课程顺序利用二者，实现同时超过两个单目标上界的超加性表现（见第~\ref{sec:reward_design}）。这表明该方法发现了超越静态帕累托前沿的新组合提示结构，也与近期多阶段 RL 范式一致~\cite{guo2025deepseek}：渐进式任务分解可以释放直接优化难以获得的能力。
