@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **42**
+- Papers: **43**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -56,6 +56,7 @@
 - [Speculative Actions](./papers/speculative-actions.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fspeculative-actions%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/speculative-actions/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/speculative-actions/main_zh.pdf)
 - [Step3.5 Turbo 2026](./papers/step-3-5.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstep-3-5%2Fstep3p5_turbo_2026.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/step-3-5/step3p5_turbo_2026.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/step-3-5/step3p5_turbo_2026.pdf)
 - [Step-GUI](./papers/step-gui.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstep-gui%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/step-gui/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/step-gui/main_zh.pdf)
+- [ThunderAgent](./papers/thunderagent.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fthunderagent%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/thunderagent/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/thunderagent/main_zh.pdf)
 - [Time Cost Benefits](./papers/time-cost-benefits.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ftime_cost_benefits%2Ftime_cost_benefit_schematic.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/time_cost_benefits/time_cost_benefit_schematic.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/time_cost_benefits/time_cost_benefit_schematic.pdf)
 - [Training Compute-Optimal Large Language Models](./papers/training-compute-optimal-large-language-models.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ftraining-compute-optimal-large-language-models%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/training-compute-optimal-large-language-models/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/training-compute-optimal-large-language-models/main_zh.pdf)
 - [VISTA-Gym](./papers/vista-gym.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fvista-gym%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/vista-gym/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/vista-gym/main_zh.pdf)

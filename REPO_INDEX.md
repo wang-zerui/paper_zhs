@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-06-03 16:46:28 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-06-04 00:12:34 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：44
-- 含 `00README.json`：30
-- 有本地候选 PDF：42
-- 含中文 PDF：35
+- 论文目录：45
+- 含 `00README.json`：31
+- 有本地候选 PDF：43
+- 含中文 PDF：36
 - 带源码包：24
-- 含 tracked files 的目录：44
+- 含 tracked files 的目录：45
 - 纯本地目录（tracked files = 0）：0
 
 ## Triage
@@ -62,6 +62,7 @@
 | step-3-5 | Step3.5 Turbo 2026 | ✅ | step3p5_turbo_2026.tex | step3p5_turbo_2026.pdf | step3p5_turbo_2026.pdf | — | source.tar.gz | 21 |
 | step-gui | Step-GUI | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 57 |
 | td-pipe | TD-Pipe | ✅ | main.tex | — | — | — | — | 29 |
+| thunderagent | ThunderAgent | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 48 |
 | time_cost_benefits | Time Cost Benefits | — | — | time_cost_benefit_schematic.pdf | time_cost_benefit_schematic.pdf | — | — | 8 |
 | training-compute-optimal-large-language-models | Training Compute-Optimal Large Language Models | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 28 |
 | vista-gym | VISTA-Gym | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 60 |

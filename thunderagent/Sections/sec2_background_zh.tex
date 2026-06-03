@@ -1,0 +1,33 @@
+\vspace{-2mm}
+\section{背景}
+在本节中，我们提供支持智能体推理的属性和现有方法的背景。
+% Additional discussion of related work is in \textcolor{red}{X}.
+% \vspace{-2mm}
+\subsection{当前智能体工作流的系统属性}
+\label{sec::react agent system}
+
+当前的智能体工作流在生成过程中在推理和行动之间交替。正式地，在每一步 $t$，智能体收到观察 $o_t \in \mathcal{O}$ 并产生排放 $e_t = (\ell_t, a_t) \in \mathcal{L} \times \mathcal{A}$， 在哪里 $\ell_t$ 表示一个想法并且 $a_t$ 代表一个动作。我们在步骤中定义累积上下文 $t$ 作为 $c_t = (o_1, e_1, \dots, o_t)$，它捕获智能体工作流的交互历史记录。条件为 $c_t$, $e_t$ 是从策略中采样的 $\pi(e_t|c_t)$。
+
+此工作流保留两个持久状态： \textit{(i) GPU 显存}，其中 KV 缓存 $c_t$ 充当工作流的内存。随着踪迹逐渐增长， $c_{t+1}$ 延伸 $c_t$ 作为前缀，实现理论上接近完整的 KV 缓存跨步骤重用率。 \textit{(二) 工具环境}，其中外部资源（例如沙箱或数据库连接）初始化于 $t=1$ \mbox{在整个执行过程中必须保持一致且可访问。}
+
+这些有状态的依赖关系需要 \textit{程序级} 智能体推理轨迹的视图，从而使系统能够协调异构资源并管理长期运行的工作流的状态。然而，现有的推理系统对待每个想法 $l_t$ 和行动 $a_t$ 作为一个独立的、无状态的请求。
+
+\vspace{-2mm}
+\subsection{现有的智能体推理系统}
+
+之前的工作重点是优化智能体推理中的各个组件，包括 LLM 推理引擎或工具编排器 ~(\autoref{appendx: kv opt}, \autoref{sec: pd+offload}，但很少有工作能够为跨 GPU、CPU 和远程资源的智能体工作流提供端到端优化。我们回顾这些先前的系统。
+% fail to maintain high throughput in agentic serving and RL rollout discussed in \autoref{appendx: kv opt} and \autoref{sec: pd+offload}
+% as a heterogeneous component.
+
+Autellix 将多轮智能体工作流建模为 \textbf{仅 GPU 程序} 并在中央进程表中跟踪累积的GPU执行时间~\citep{luo2025autellixefficientservingengine}。然而，它忽略了工作流局部性，允许并发工作流积极驱逐其他工作流的 KV 缓存，从而触发 \textbf{KV 缓存抖动} 在繁重的工作负担下。
+
+
+Continuum 是另一个最新的服务系统，专为多轮智能体工作流而设计~\cite{li2025continuumefficientrobustmultiturn}。它采用生存时间 (TTL) 机制将 KV 缓存固定在 HBM 中，从而减轻工具执行期间的上下文抖动。
+然而，它未能解决 KV 缓存驱逐问题。第一个原因是大多数工具都需要 \textbf{不可预测的} 时间量（例如 ToolOrchestra 中的远程模型 API~\citep{su2025toolorchestraelevatingintelligenceefficient}、代码智能体中的编译器、以及计算机使用智能体中的网络应用程序~\citep{zhou2024webarenarealisticwebenvironment}）。
+由于 TTL 估计不正确，此类不可预测的工具会触发严重的抖动以及 Continuum 中的 KV 缓存内存搁浅。
+此外，一旦正在运行的工作流的解码内存超过 GPU 限制，系统也会抢占并驱逐固定的 KV 缓存。这会导致不可避免的抖动和相应的吞吐量下降，如图所示 \autoref{fig:throughputs_vs_bs}.
+
+% These limitations necessitate a unified and protable system for agentic workloads, serving as a plug-and-play layer for agentic infrastructures.
+
+这些限制强调了对简单而快速的智能体推理系统的需求。我们设想这样一个系统作为新兴智能体推理系统的程序感知调度层（例如， \citet{zhang2026megaflow}).
+% , unlocking scalable serving and RL efficiency.
