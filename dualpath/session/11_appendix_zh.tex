@@ -1,0 +1,83 @@
+\section{附录}
+
+\subsection{流量隔离配置细节}
+\label{sec:traffic-isolation-config}
+
+\parabf{InfiniBand。}
+InfiniBand QoS 机制采用两个仲裁器：高优先级仲裁器和低优先级仲裁器。
+流量先在高优先级仲裁器中使用 Weighted Round Robin（WRR）调度，然后根据 \texttt{qos\_high\_limit} 被引导到低优先级仲裁器；将其设置为 255 会完全禁用低优先级仲裁器。
+详细调度算法见~\cite{ibta-spec}。
+我们的配置如下：
+\begin{itemize}[noitemsep]
+\item \texttt{qos\_max\_vls 4}
+\item \texttt{qos\_high\_limit 240}
+\item \texttt{qos\_vlarb\_high 0:192,1:192,2:0,3:192}
+\item \texttt{qos\_vlarb\_low 0:192,1:192,2:64,3:192}
+\end{itemize}
+
+
+\parabf{RoCE。}
+RoCE 通过基于 DSCP 的流量分类和硬件 Traffic Class（TC）执行 QoS。Packet 首先从 DSCP 值映射到 TC，每个 TC 都由 NIC 和 switch 上的专用硬件队列承载（通常最多 8 个）。为匹配 InfiniBand 中的四 VL 配置，我们配置 4 个无损 RDMA TC，并启用 Priority Flow Control（PFC）。通过在 NIC 和 switch 上为这些 TC 分配成比例的调度权重，实现带宽隔离：为模型推理流量预留大部分带宽，同时为 KV-cache 流量分配小部分带宽以防饥饿。
+
+
+\subsection{27B 模型规格}
+\label{sec:27b-model-specs}
+
+从整体模型规模看，
+hidden dimension 为 2560，
+dense layer 的 intermediate size 为 12288，
+hidden layer 数量为 30，
+attention head 数量为 32，
+routed expert 数量为 72，
+MoE intermediate size 为 1536，
+每个 token 激活 expert 数量为 6，
+shared expert 数量为 2，
+初始 dense layer 数量为 1。
+关于 index attention 机制，
+attention head 数量为 32，
+head dimension 为 64，
+sparse attention 的 topk token 数为 1024。
+Indexer 和 main attention 的 Q 矩阵 LoRA 压缩被移除。
+
+
+\subsection{智能体任务结构}
+\label{sec:agent-task-structure}
+
+为解释数据集特征，我们简要描述智能体任务结构；不过该背景与我们的系统设计正交。
+每个智能体运行在 sandbox 环境中，环境包含一个带有已知 bug 和相关错误信息的代码仓库。
+智能体通过 prompt 被要求诊断并修复 bug。
+模型具备工具使用能力，可通过生成结构化输出来在 sandbox 中调用 bash 命令。
+智能体和环境进行多轮交互，每一轮由一个 prompt（先前上下文与新信息拼接而成，其中大部分是工具输出）和模型通过 decode 生成的后续工具调用组成。
+
+每条轨迹是一系列轮次；第 $i$ 轮包含追加 token $A_i$ 和生成 token 数 $g_i$。
+我们用 $G_i$ 表示第 $i$ 轮生成的 token，这些 token 未在数据集中直接呈现。
+我们定义 $Context_{i+1}$ 为 $A_1, G_1, A_2, G_2, ..., A_i, G_i$ 的拼接列表。
+在 replay 的第 $i+1$ 轮中，智能体将 prompt 拼接为 $Context_{i+1} + A_{i+1}$，随后设置合适采样参数，确保它恰好生成 $g_{i+1}$ 个 token，即 $G_{i+1}$。
+为生成额外智能体轨迹，我们采样一条已有轨迹，并在其前面添加一个合成轮次，其中 $A_1$ 为随机 token，且 $g_1=1$。
+
+\subsection{实验配置}
+\label{sec:experimental-configurations}
+
+
+\textbf{配置参数。}
+对于 DeepSeek 模型，\sysname 每个节点分配 80GB DRAM，而 SGL(MC) 每个节点总共使用 1.5TB DRAM。
+对于 Qwen 32B，由于 KV-Cache 更大，\sysname 分配 320GB。
+所有设置都禁用 speculative decoding。
+所有配置都使用 3FS 作为存储后端。
+短读取队列阈值 $\alpha$（见 \autoref{sec:scheduling}）设置为 3 秒内可读取的 token 数，未完成 token 上限 $\beta$ 设置为单块 GPU 在 5 秒内可处理的 token 数。这些值都提前 profiling 得到。
+所有 \sysname 和 Oracle 基线的 Compute Quota Threshold 均设置为 300ms。
+
+\textbf{KV-Cache 命中长度计算。}
+对于除 SGL(MC) 以外的所有系统，我们限制 KV-Cache 命中只发生在同一条轨迹内，且由于无需 eviction，命中长度在 client 侧计算。
+对于 SGL(MC)，命中长度基于 HiCache 和 Mooncake Store cache 状态在内部计算。
+
+\subsection{KV-Cache Block 布局}
+\label{subsec:block-layout}
+逐层 prefill 将 KV-Cache block size 降为原来的 $1/layer$，并使 block 数量增至 $layer\times$，这对传输和存储性能提出挑战。
+为克服这一点，我们设计了两种不同 block 类型：\emph{Layer Block} 和 \emph{Full Block}。
+Layer Block 是形状为 $[1, tokens, bytes]$ 的字节张量，用于存储若干 token 的单层 KV-Cache。
+token 数称为 $block\_size$。
+$bytes$ 表示每层每 token 所需的 cache 字节数。
+同时，Full Block 的形状为 $[layer, tokens, bytes]$。
+该设计使我们可以在整个推理过程中避免手动 KV-Cache 内存布局转换，只需拼接 $n$ 个 Layer Block 即可得到一个 Full Block。
+KV-Cache 使用 trie 结构存储在分布式存储中，其中每个树节点对应一个 Full Block。

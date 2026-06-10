@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-06-04 00:12:34 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-06-10 14:35:16 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：45
-- 含 `00README.json`：31
-- 有本地候选 PDF：43
-- 含中文 PDF：36
-- 带源码包：24
-- 含 tracked files 的目录：45
+- 论文目录：47
+- 含 `00README.json`：33
+- 有本地候选 PDF：45
+- 含中文 PDF：38
+- 带源码包：25
+- 含 tracked files 的目录：47
 - 纯本地目录（tracked files = 0）：0
 
 ## Triage
@@ -31,6 +31,7 @@
 | colossal-auto | Colossal Auto | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 51 |
 | concur | CONCUR | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 33 |
 | Deep-Learning-Workload-Scheduling-in-GPU-Datacenters-Taxonomy-Challenges-and-Vision | Deep Learning Workload Scheduling in GPU Datacenters Taxonomy Challenges and Vision | — | — | — | — | — | — | 15 |
+| dualpath | DualPath | ✅ | paper.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
 | eagle-3 | EAGLE-3 | — | — | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 17 |
 | eagle-feature-uncertainty | EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty | — | — | example_paper_zh.pdf | example_paper_zh.pdf | ✅ | source.tar | 33 |
 | elastic-attention | Elastic Attention | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 70 |
@@ -43,6 +44,7 @@
 | gui-actor | GUI-Actor | ✅ | neurips_2025.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 38 |
 | hyper-parallel | HyperParallel | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 15 |
 | ICLR_camera_ready_v0 | FlexRL: Scaling VLM RL Training via Efficient Load Balancing | — | — | main.pdf | main.pdf | — | — | 63 |
+| kvpr | KVPR | ✅ | acl_latex.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 18 |
 | LLM-viewer | LLM Viewer | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 62 |
 | lmetric | LMetric | ✅ | lmetric.tex | lmetric_zh.pdf | lmetric_zh.pdf | ✅ | — | 60 |
 | low-precision-flash-attention | Why Low-Precision Transformer Training Fails | ✅ | iclr2026_conference.tex | iclr2026_conference_zh.pdf | iclr2026_conference_zh.pdf | ✅ | source.tar | 31 |

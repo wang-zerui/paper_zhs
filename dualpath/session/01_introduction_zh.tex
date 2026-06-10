@@ -1,0 +1,48 @@
+\section{引言}  
+
+
+大语言模型（LLM）正在快速从单轮聊天机器人~\cite{chatgpt,DeepSeekV32} 和独立推理器~\cite{chatgpt} 演进为\emph{智能体系统}：它们能够自主规划、调用工具，并通过\emph{多轮交互}解决真实世界任务~\cite{chowa2026language,wang2024survey,xi2025rise,jiang2024survey,mohammadi2025evaluation}。在这类场景中，LLM 不再服务于彼此隔离的 prompt；相反，它参与长时间运行的 session，且上下文会随时间不断累积~\cite{lin2025efficientagentscodesigninference}。随着智能体应用越来越普遍，多轮 LLM 推理已经成为生产系统中的关键工作负载，覆盖从代码助手~\cite{yang2024swe,wu2024autogen} 到自主任务智能体~\cite{zhou2023webarena,li2024personalllmagentsinsights} 等多类应用。
+
+这种应用范式的变化也显著改变了 LLM 推理工作负载：它从传统的人类-LLM 交互，转向人类-LLM-环境交互，即\emph{智能体范式}。典型的人机交互模式是用户提供输入，与 LLM 进行少数几轮交互，然后消费 LLM 生成的结果。相比之下，智能体 LLM 可能通过 Web 浏览器、Python 解释器等工具与外部环境交互，持续数十轮甚至数百轮。尽管每一次工具调用或反馈本身都很短（通常只有数百个 token），上下文会跨轮次不断累积，并可能增长到极长长度。因此，智能体工作负载会变得高度 I/O-bound：多轮、短追加的模式会带来极高的 KV-Cache 命中率，通常 $\geq 95\%$~\cite{chen2026concurhighthroughputagenticbatch}，使得 KV-Cache 加载效率而非纯计算成为主导性能的因素。
+
+\begin{figure}[t!]
+  \centering
+  \includegraphics[width=\linewidth]{figures/teaser}
+  \vspace{-0.25in}
+  \caption{\normalfont 现有瓶颈（左）与 \sysname（右）。}
+  \vspace{-0.2in}
+  \label{fig:teaser}
+\end{figure}
+
+为提升智能体工作负载下的吞吐量，已有 LLM 推理系统逐渐收敛到一组常见架构模式：\emph{逐层 prefill}~\cite{LayerKV,SOSP25:PrefillOnly}、\emph{prefill--decode（PD）解耦}~\cite{OSDI24:DistServe,ISCA24:Splitwise,zhao2025insights}，以及\emph{外部 KV-Cache 存储}~\cite{ATC24:CachedAttention, LMCache, FAST25:Mooncake}。
+在这些系统中，prefill engine 以逐层方式加载 KV-Cache，以便在单个 batch 中容纳尽可能多的请求。当 prefill 完成后，decode engine 通常通过高性能 RDMA 网络从 prefill engine 接收 KV-Cache。随后 decode engine 生成 token，并将其 KV-Cache 存入分布式存储，以支持跨轮次复用。%, instead of loading from storage, to avoid read amplification. % This separation allows better specialization and scalability, and has been widely adopted in recent systems.
+
+然而，该架构也引入了一个关键限制。如~\autoref{fig:teaser} 所示，prefill engine 必须从远端存储加载大量 KV-Cache。
+因此，\emph{prefill 侧存储网络带宽}会成为整个系统的吞吐量瓶颈，即使 decode engine 通常拥有大量未被使用的存储网络带宽。
+
+这种不均衡暴露了现有设计中的根本低效：不同 engine 之间的存储网络带宽利用不均。prefill engine 的带宽长期饱和，而 decode engine 的带宽利用不足。简单为 prefill engine 增配带宽代价高昂，在通用集群中也往往不现实。因此，更有前景的做法是利用并汇聚所有 engine 的可用 I/O 带宽，而不是只让 prefill engine 承担全部压力，从而加速智能体 LLM 工作负载中的 KV-Cache 加载。
+
+已有研究尝试缓解 KV-Cache 加载瓶颈。
+Mooncake~\cite{FAST25:Mooncake} 将 KV-Cache 缓存在分布式 DRAM 池中，并采用亲和性感知 scheduler 来最大化 DRAM KV-Cache 命中率。
+然而，它无法用于内存受限场景，例如 RL 的 rollout 阶段，因为此时 DRAM 会被用于保存从 HBM 卸载下来的大量训练状态。
+在工作集极大的场景（如在线服务）中，考虑 DRAM 与 SSD 的成本差异，该方案也不具备成本效率。
+其他工作减少需要取回的 KV-Cache 数据量~\cite{EuroSys25:HCache}，或降低取回开销~\cite{APSys25:TARDIS, SC25:Phoenix}。
+然而，它们并未解决不同 engine 之间存储 I/O 不均衡所造成的内在低效。
+
+
+本文提出 \sysname，一个新的 LLM 推理系统，用于重新思考现代智能体推理架构中的 KV-Cache 加载方式。\sysname 的核心洞察是：KV-Cache 加载并不必须以 prefill 为中心。现有系统总是直接从存储将 KV-Cache 加载到 prefill engine，因而无法利用 decode engine 的远端存储带宽。\sysname 利用这一观察，启用\textbf{双路径 KV-Cache 加载}：除传统 storage-to-prefill 路径之外，KV-Cache 也可以先加载到 decode engine，再通过高性能 RDMA 传输到 prefill engine。通过在两条路径之间动态选择，\sysname 重新分配网络负载并缓解 prefill 侧带宽压力。
+
+实现这一设计带来两个挑战。
+第一，引入额外加载路径会产生复杂流量模式，并可能干扰模型执行中的 collective 原语；若管理不当，会降低整体性能。
+第二，系统必须在动态且异构的工作负载下在线决定使用哪条加载路径，并同时保证 GPU 与 NIC 的负载均衡。
+为解决这些挑战，\sysname 采用了：（1）优化的双路径加载数据通路设计，在常见 P/D 比例下不引入固有拥塞；（2）以 NIC 为中心的流量管理方式，将 KV-Cache 流量与对延迟敏感的模型推理通信隔离；（3）动态调度策略，在 prefill 与 decode engine 之间联合均衡计算和网络利用率。
+
+我们在现代推理栈之上实现 \sysname，并使用具有长上下文和高缓存复用率的代表性智能体工作负载进行评估。
+实验表明，\sysname 在保持 token 间延迟的同时，显著提升系统吞吐量和首 token 延迟表现。在智能体推理场景中，\sysname 对离线推理最高可将端到端吞吐量提升 1.87$\times$，并使在线服务吞吐量平均提升 1.96$\times$。
+
+总之，本文做出三项贡献：
+\begin{itemize}[leftmargin=*]
+  \item 我们识别出多轮智能体 LLM 工作负载的 I/O-bound 特性，并说明在现代 LLM 推理架构下，KV-Cache 加载会主导系统性能。
+  \item 我们提出 \sysname，一个引入双路径 KV-Cache 加载的推理系统，利用 decode engine 带宽解决 prefill 侧瓶颈。
+  \item 我们设计并评估了一个工作负载感知调度算法，该算法动态均衡计算和网络资源，在真实工作负载上显著改善负载均衡。
+\end{itemize}

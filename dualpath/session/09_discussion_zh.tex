@@ -1,0 +1,41 @@
+\section{讨论}
+\label{sec:discussion}
+
+
+\subsection{潜在未来工作}
+\label{subsec:futurework}
+
+离线推理的工作负载高度动态。例如，在我们的智能体 RL 任务中，工作负载很大程度上取决于研究者的算法设计，并且 prefill 阶段通常在执行前半段承受的压力显著高于后半段。同时，对这些试探性实验进行 profiling 成本很高，因为有些实验只会运行有限次数。因此，需要更自适应且更灵活的并行方式和 P/D 比例配置方法，例如模拟器或在线调整机制。其次，调度算法仍有改进空间，因为我们期望在大规模部署中获得更低的 TTFT 分位数。
+
+\subsection{Working Set 分析}
+
+如 \autoref{fig:serving-jct} 所示，给定到达率 $\lambda$（即每秒新轨迹数）和平均 JCT $\bar{T}$，KV-Cache 的 working set 可近似为 $\lambda \bar{T} \times total\_len_{avg}/2$。
+在 DS 660B 服务设置中，\sysname 的该值从 APS 0.1 时的 69 GB 到 APS 0.45 时的 681 GB 不等。
+
+在真实设置中，working set 会更大，因为我们的评估假设 inter-arrival time 为零且 tool call latency 为零。
+如果由于这些间隔导致 JCT 增加 $r$ 倍，则系统 APS 容量也会增加 $r$ 倍（这些间隔不会对 LLM 推理造成压力），使 working set 扩大 $r^2$ 倍。
+这会超过可用内存并降低分布式内存池命中率。
+这类实验需要 $r$ 倍更多机器小时和 $r^2$ 倍更多存储（成本按 $r^3$ 缩放），在有限资源下我们无法承担。
+
+
+\section{相关工作}
+
+\paraf{分布式内存缓存池。}
+Mooncake~\cite{FAST25:Mooncake} 为 KV-Cache 构建了分布式 DRAM 池。
+TokenLake~\cite{TokenLake} 引入了统一的 segment-level prefix cache 池。
+与它们相比，\sysname 直接面向存储后端，在所有 SNIC 之间均衡流量，并在不损害性能的情况下大幅减少 DRAM 使用。
+\sysname 也可以与中间 DRAM cache 结合，但性能收益较小。
+
+\parabf{KV-Cache I/O 优化。}
+在解耦式 LLM serving 架构中，从其他缓存层级高效加载大规模 KV-Cache 是一个根本瓶颈。
+已有工作主要从单条数据路径角度处理这一问题。
+Strata~\cite{Strata} 通过协同设计 GPU 辅助 I/O 与 cache-aware scheduling，解决层次化存储中的 I/O 瓶颈。
+其他工作如 KVPR~\cite{ACL25:KVPR} 和 TailorKV~\cite{ACL25:TailorKV}，通过重计算重叠和层粒度混合量化缓解该路径上的带宽限制（例如 PCIe）。
+
+\parabf{LLM 推理系统。}
+近年来出现了许多推理加速技术，例如 paged attention~\cite{SOSP23:PagedAttention}、chunked prefill 和 hybrid batching~\cite{OSDI24:SarathiServe,FastGen}。Prefill-decode 解耦推理~\cite{ISCA24:Splitwise,OSDI24:DistServe} 将 prefill 和 decode 阶段分离到不同 GPU 上，减少二者之间的性能干扰，并允许每个阶段采用不同并行策略和硬件配置，从而释放大量优化机会。它已经基本成为推理服务的事实标准。
+
+\parabf{Attention 机制。}
+Attention 机制允许 token 与序列中的先前 token 交互。
+它有许多变体，例如 Multi-Head Attention（MHA）~\cite{NIPS17:Transformer}、Multi-Query Attention（MQA）~\cite{MQA}、Grouped-Query Attention（GQA）~\cite{EMNLP23:GQA}，以及 Multi-head Latent Attention（MLA）~\cite{DeepSeekV2}。
+对于这些 attention 机制（记为\emph{dense attention}），单个 token 的计算量与 KV-Cache 大小之比是常数，因为二者都随序列长度线性增长。

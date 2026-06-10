@@ -1,0 +1,32 @@
+
+\section{CNIC-Centric Traffic Manager}
+\label{sec:traffic-manager}
+
+Modern LLM inference systems employ a range of advanced data transfer technologies --- such as on-chip CUDA copy engine and GPUDirect Storage \cite{nvidia2026gds} --- to move data efficiently between storage, host memory, and GPU HBM. However, all these mechanisms can interfere with latency-sensitive collective communications (e.g., EP AllToAll) during model execution. This arises for two primary reasons: (1) such transfer technologies often operate over separate paths that do not share the same QoS controls as the compute network, and (2) existing GPUs do not support PCIe QoS \cite{7723586}, making it difficult to shield model inference communication from other traffic contending for PCIe bandwidth. Additionally, because the collective communications occur in rapid, sub-millisecond-level bursts, it is impractical to rely on a software-based traffic shaper to interleave lower-priority I/O operations between these high-priority traffic windows.
+
+
+To address this, we propose a \textbf{CNIC--centric data transfer} approach which is widely adopted in our production deployment: all data traffic in or out of a GPU, including local H2D/D2H copy, must go through the GPU's paired CNIC with a GPUDirect RDMA \cite{nvidiaOverviewx2014} data path. By consolidating all traffic onto the compute network, we can leverage the native QoS capabilities of compute network to enforce strict traffic differentiation.
+
+\subsection{Traffic Isolation}
+
+For the InfiniBand-based network, we leverage virtual lanes (VLs) \cite{ibta-spec} to enforce isolation between different traffic classes. 
+All model inference communication traffic is assigned to a dedicated high-priority VL, while all other traffic, including KV-Cache transfer, is mapped to a separate low-priority VL.
+We configure the VL arbiters of all network switches and NICs with a weighted round-robin policy that reserves approximately 99\% of total bandwidth to high-priority VL.
+The remaining bandwidth is allocated to the low-priority VL to prevent starvation.
+This configuration ensures that model execution traffic is virtually unaffected by KV-cache transfers, while still allowing KV-cache traffic to opportunistically utilize otherwise idle bandwidth in the compute network.
+Detailed configurations are described in \autoref{sec:traffic-isolation-config}.
+
+
+Although our experiments are conducted on an InfiniBand-based network, the same design principles naturally extend to other interconnect technologies.  
+\sysname can be conducted on RDMA over Converged Ethernet (RoCE) by leveraging Traffic Class (TC) and Differentiated Services Code Point (DSCP) markings \cite{sigcomm16:rocev2,Carpenter2002DifferentiatedSI} in conjunction with hardware packet queues.  
+Emerging technologies such as UnifiedBus \cite{unifiedbus} and Ultra Ethernet \cite{uec-spec} are likewise converging on QoS mechanisms for heterogeneous traffic, which can directly support the requirements of \sysname.
+
+\subsection{CNIC-Assisted KV-Cache Copy}
+
+Existing GPU data transfer technologies include GPUDirect Storage \cite{nvidia2026gds}, which loads KV-Cache from storage backend to GPU HBM, and CUDA copy engine, which directly copies host DRAM to GPU via PCIe. However, these methods fail to isolate KV-Cache traffic from high-priority latency-sensitive collective communications in model execution, severely degrading inference performance.
+
+To solve the limitations of existing approaches, we adopt a CNIC-assisted H2D/D2H data path. For KV-Cache loading, we first read the KV-Cache into host DRAM from the storage backend. Then, we submit an RDMA Write request to the GPU's paired CNIC to perform local H2D copy. Storing newly generated KV-Cache follows a symmetric process: it is first transferred to host DRAM via CNIC, then persisted to the storage backend over the storage network. This design establishes the CNIC as the central QoS scheduler for all GPU PCIe traffic, allowing its VL arbiter to prioritize the inference communication traffic and perform KV-Cache transfer using spare PCIe bandwidth. 
+
+Although this approach may appear to take a detour compared to GPUDirect Storage (which directly reads KV-Cache to GPU HBM) and CUDA copy engine (which directly copies host memory to GPU HBM), to our best knowledge, this is currently the only practical method to ensure that KV-Cache load/store does not degrade the performance of critical model--execution communication.
+
+We also observe that CNIC-assisted H2D and D2H outperform the CUDA copy engine when handling a large number of small data chunks. Our measurements show that submitting a single copy operation via \texttt{cudaMemcpyAsync} incurs a latency overhead of approximately {5}-{7}$\mu s$. We failed to further break down this overhead due to the closed-source nature of CUDA driver. In contrast, submitting one RDMA Write work request involves only a few mmio writes to NIC registers in user space and takes only around {1}$\mu s$. Furthermore, the RDMA work submission overhead can be significantly amortized by leveraging \emph{doorbell batching} \cite{kalia2016design}.

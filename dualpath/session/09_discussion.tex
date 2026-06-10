@@ -1,0 +1,42 @@
+\section{Discussion}
+\label{sec:discussion}
+
+
+\subsection{Potential Future Work}
+\label{subsec:futurework}
+
+The workload of offline inference is highly dynamic. For example, in our agentic RL tasks, the workload depends heavily on the researchers' algorithm design, and the prefill stage typically experiences significantly higher pressure in the first half of execution than in the second half. Meanwhile, profiling these tentative experiments is costly, as some experiments are only run a limited number of times. Therefore, more adaptive and flexible approaches for parallelism and P/D ratio configuration are needed, such as simulators or online adjustment mechanisms. Second, the scheduling algorithm still has room for improvement, as we expect to achieve lower TTFT percentiles under large-scale deployment.
+
+\subsection{Working Set Analysis}
+
+As shown in \autoref{fig:serving-jct}, given an arrival rate $\lambda$ (i.e., new trajectories per second) and mean JCT $\bar{T}$, the working set of the KV-Cache can thus be approximated as $\lambda \bar{T} \times total\_len_{avg}/2$.
+In our setting of DS 660B serving, this value of \sysname ranges from 69 GB at APS 0.1 to 681 GB at APS 0.45.
+
+In realistic setting, the working set would be larger since our evaluation assumes zero inter-arrival time and zero tool call latency. 
+If JCT increases by $r$ times due to these gaps, the system's APS capacity increases by $r$ times (gaps do not stress LLM inference), causing the working set to expand by $r^2$ times.
+This would exceed available memory and reduce the distributed memory pool's hit rate.
+Such experiments require $r$ times more machine hours and $r^2$ times more storage (cost scaling as $r^3$), which we cannot afford given limited resources.
+
+
+\section{Related Work}
+
+\paraf{Distributed Memory Cache Pools.}
+Mooncake~\cite{FAST25:Mooncake} builds a distributed DRAM pool for KV-Cache.
+TokenLake~\cite{TokenLake} introduces a unified segment-level prefix cache pool.
+Compared to them, \sysname targets storage backend directly, balancing the traffic among all SNICs, and reduces DRAM usage greatly without harming performance.
+\sysname can also be combined with a middle DRAM cache, but the performance gain is marginal. 
+
+\parabf{KV-Cache I/O Optimization.}
+Efficiently loading the massive KV-Cache from other caching tiers is a fundamental bottleneck in disaggregated LLM serving architectures.
+Prior work has approached this problem primarily from the perspective of a single data path.
+Strata~\cite{Strata} tackles I/O bottlenecks in hierarchical storage by co-designing GPU-assisted I/O with cache-aware scheduling.
+Other work, like KVPR~\cite{ACL25:KVPR} and TailorKV~\cite{ACL25:TailorKV}, mitigates bandwidth constraints (e.g., PCIe) on this path via recomputation overlapping and layer-granular hybrid quantization. 
+
+\parabf{LLM Inference System.}
+Recent years have seen many inference acceleration techniques, such as paged attention \cite{SOSP23:PagedAttention}, chunked prefill, and hybrid batching \cite{OSDI24:SarathiServe,FastGen}. Prefill-decode disaggregated inference \cite{ISCA24:Splitwise,OSDI24:DistServe} separates the prefill and decode stages onto different GPUs, reducing performance interference between them and allowing each stage to adopt distinct parallel strategies and hardware configurations, which unlocks substantial optimization opportunities. It has largely become the de facto standard for inference serving.
+
+\parabf{Attention Mechanisms.}
+Attention mechanism allows tokens to interact with previous tokens in the sequence. 
+There are many variants such as Multi-Head Attention (MHA) \cite{NIPS17:Transformer}, Multi-Query Attention (MQA) \cite{MQA} and Grouped-Query Attention (GQA) \cite{EMNLP23:GQA}, Multi-head Latent Attention (MLA) \cite{DeepSeekV2}.
+For those attention mechanisms (denoted as \emph{dense attention}), the ratio of computation and KV-Cache size for one token is a constant since both scale linearly with sequence length. 
+

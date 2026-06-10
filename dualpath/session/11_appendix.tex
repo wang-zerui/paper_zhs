@@ -1,0 +1,83 @@
+\section{Appendix}
+
+\subsection{Traffic Isolation Configuration Details}
+\label{sec:traffic-isolation-config}
+
+\parabf{InfiniBand.}
+The InfiniBand QoS mechanism employs two arbitrators: high-priority and low-priority.
+Traffic is scheduled using Weighted Round Robin (WRR) in the high-priority arbitrator, then steered to the low-priority arbitrator according to \texttt{qos\_high\_limit}; setting it to 255 disables the low-priority arbitrator entirely.
+Detailed scheduling algorithm can be found in \cite{ibta-spec}.
+Our configuration:
+\begin{itemize}[noitemsep]
+\item \texttt{qos\_max\_vls 4}
+\item \texttt{qos\_high\_limit 240}
+\item \texttt{qos\_vlarb\_high 0:192,1:192,2:0,3:192}
+\item \texttt{qos\_vlarb\_low 0:192,1:192,2:64,3:192}
+\end{itemize}
+
+
+\parabf{RoCE.}
+RoCE enforces QoS through DSCP-based traffic classification and hardware traffic classes (TC). Packets are first mapped from DSCP values to TCs, each backed by a dedicated hardware queue on NICs and switches (typically up to eight). To match the four-VL configuration in InfiniBand, we configure four lossless RDMA TCs with Priority Flow Control (PFC) enabled. Bandwidth isolation is achieved by assigning proportional scheduling weights to these TCs on both NICs and switches, reserving the majority of bandwidth for model inference traffic while allocating a small fraction to KV-cache traffic to prevent starvation.
+
+
+\subsection{27B Model Specifications}
+\label{sec:27b-model-specs}
+
+In terms of overall model scale, 
+the hidden dimension 2560,
+the intermediate size of dense layers is 12288,
+the number of hidden layers is 30,
+the number of attention heads is 32,
+the number of routed experts is 72,
+the MoE intermediate size is 1536,
+the number of activated experts per token is 6, 
+the number of shared experts is 2, 
+and the number of initial dense layer is 1.
+Regarding the index attention mechanism, 
+the number of attention heads is 32,
+the head dimension is 64, 
+the topk tokens for sparse attention is 1024.
+The LoRA compression for the Q matrix of both indexer and main attention is removed.
+
+
+\subsection{Agent Task Structure}
+\label{sec:agent-task-structure}
+
+To provide context for the dataset characteristics, we briefly describe the agent task structure, though this background is orthogonal to our system design.
+Each agent operates within a sandbox environment containing a code repository with known bugs and associated error messages.
+The agent is instructed via prompt to diagnose and fix the bug.
+The model possesses tool-use capabilities, invoking bash commands in the sandbox by emitting structured outputs.
+The agent and environment engage in multi-turn interactions, where each turn consists of a prompt (previous context concatenated with new information, most of which is tool output) and the model generating a subsequent tool invocation by decoding.
+
+Each trajectory is a sequence of rounds; round $i$ consists of appended tokens $A_i$ and the number of generated tokens $g_i$.
+We use $G_i$ to indicate the tokens generated in round $i$, which are not presented in our dataset.
+We define $Context_{i+1}$ as the concatenated list of $A_1, G_1, A_2, G_2, ..., A_i, G_i$.
+In round $i+1$ of our replay, the agent concatenates the prompt as $Context_{i+1} + A_{i+1}$, and then sets proper sampling parameters to ensure it generates exactly $g_{i+1}$ tokens, i.e., $G_{i+1}$.
+To generate additional agent trajectories, we sample an existing trajectory and prepend a synthetic round with random tokens as $A_1$ and $g_1=1$.
+
+\subsection{Experimental Configurations}
+\label{sec:experimental-configurations}
+
+
+\textbf{Configuration Parameters.}
+For DeepSeek models, \sysname allocates 80GB DRAM each node, and SGL(MC) uses totally 1.5TB DRAM on every node.
+For Qwen 32B, due to the larger KV-Cache, \sysname allocates 320GB.
+Speculative decoding is disabled for all settings.
+We use 3FS as the storage backend for all configurations.
+The short reading queue threshold $\alpha$ (described in \autoref{sec:scheduling}) is set to the number of tokens we can read during $3$ seconds, and the unfinished token upper limit $\beta$ is set to the number of tokens one GPU can process for $5$ seconds. Those values are profiled in advance.
+Compute Quota Threshold is set to 300ms for all \sysname and Oracle baselines.
+
+\textbf{KV-Cache Hit Length Calculation.}
+For all systems except SGL(MC), we limit the KV-Cache hits to only occur within a trajectory, and the hit length is calculated in the client because no eviction is needed.
+For SGL(MC), hit lengths are computed internally based on HiCache and Mooncake Store cache states.
+
+\subsection{KV-Cache Block Layout}
+\label{subsec:block-layout}
+Layerwise prefill reduces KV-Cache block size to $1/layer$ of the original, and makes the number of blocks larger to $layer\times$, posing challenges to transfer and storage performance.
+To overcome this, we design two distinct block types: \emph{Layer Block} and \emph{Full Block}.
+A Layer Block is a byte tensor with shape $[1, tokens, bytes]$ and stores one-layer KV-Cache for some tokens.
+The number of tokens is called $block\_size$.
+$bytes$ indicates the cache bytes needed per layer per token.
+Meanwhile, a Full Block has shape $[layer, tokens, bytes]$.
+This design enables us to avoid manual KV-Cache memory layout conversion throughout inference by simply concatenating $n$ Layer Blocks to yield a Full Block.
+KV-Cache is stored in distributed storage using a trie structure, where each tree node corresponds to a Full Block.

@@ -1,0 +1,32 @@
+
+\section{以 CNIC 为中心的流量管理器}
+\label{sec:traffic-manager}
+
+现代 LLM 推理系统会采用一系列先进数据传输技术，例如片上 CUDA copy engine 和 GPUDirect Storage~\cite{nvidia2026gds}，以便在存储、主机内存和 GPU HBM 之间高效移动数据。然而，所有这些机制都可能在模型执行期间干扰对延迟敏感的 collective 通信（例如 EP AllToAll）。这主要由两个原因造成：（1）这些传输技术通常运行在独立路径上，无法共享与计算网络相同的 QoS 控制；（2）现有 GPU 不支持 PCIe QoS~\cite{7723586}，因此难以保护模型推理通信免受其他竞争 PCIe 带宽的流量影响。此外，由于 collective 通信以快速的亚毫秒级 burst 形式出现，依赖软件流量整形器在这些高优先级流量窗口之间穿插低优先级 I/O 操作并不现实。
+
+
+为解决这一问题，我们提出一种\textbf{以 CNIC 为中心的数据传输}方法，该方法已在我们的生产部署中广泛使用：所有进出 GPU 的数据流量，包括本地 H2D/D2H copy，都必须通过 GPU 配对的 CNIC，并使用 GPUDirect RDMA~\cite{nvidiaOverviewx2014} 数据路径。通过将所有流量汇聚到计算网络上，我们可以利用计算网络原生 QoS 能力来执行严格的流量区分。
+
+\subsection{流量隔离}
+
+对于基于 InfiniBand 的网络，我们利用 virtual lane（VL）~\cite{ibta-spec} 在不同流量类别之间实现隔离。
+所有模型推理通信流量被分配到专用高优先级 VL，而所有其他流量（包括 KV-Cache 传输）都被映射到单独的低优先级 VL。
+我们将所有网络 switch 和 NIC 的 VL arbiter 配置为加权轮询策略，为高优先级 VL 预留约 99\% 的总带宽。
+剩余带宽分配给低优先级 VL，以避免饥饿。
+该配置保证模型执行流量几乎不受 KV-cache 传输影响，同时仍允许 KV-cache 流量机会性利用计算网络中的空闲带宽。
+详细配置见 \autoref{sec:traffic-isolation-config}。
+
+
+尽管我们的实验在基于 InfiniBand 的网络上进行，同样的设计原则也自然适用于其他互连技术。
+\sysname 可以在 RDMA over Converged Ethernet（RoCE）上运行，方法是结合 Traffic Class（TC）和 Differentiated Services Code Point（DSCP）标记~\cite{sigcomm16:rocev2,Carpenter2002DifferentiatedSI}，并配合硬件 packet queue。
+UnifiedBus~\cite{unifiedbus} 和 Ultra Ethernet~\cite{uec-spec} 等新兴技术同样正在向面向异构流量的 QoS 机制收敛，可直接支持 \sysname 的需求。
+
+\subsection{CNIC 辅助的 KV-Cache 拷贝}
+
+现有 GPU 数据传输技术包括 GPUDirect Storage~\cite{nvidia2026gds} 和 CUDA copy engine：前者从存储后端将 KV-Cache 加载到 GPU HBM，后者通过 PCIe 将 host DRAM 直接拷贝到 GPU。然而，这些方法无法将 KV-Cache 流量与模型执行中高优先级、对延迟敏感的 collective 通信隔离，会严重降低推理性能。
+
+为解决现有方法的限制，我们采用 CNIC 辅助的 H2D/D2H 数据路径。对于 KV-Cache 加载，我们首先从存储后端将 KV-Cache 读取到 host DRAM。随后，我们向 GPU 配对的 CNIC 提交 RDMA Write 请求，以执行本地 H2D copy。存储新生成的 KV-Cache 则采用对称流程：它先经由 CNIC 传输到 host DRAM，再通过存储网络持久化到存储后端。该设计将 CNIC 确立为所有 GPU PCIe 流量的中心 QoS scheduler，使其 VL arbiter 能够优先处理推理通信流量，并使用空闲 PCIe 带宽执行 KV-Cache 传输。
+
+相比 GPUDirect Storage（直接将 KV-Cache 读入 GPU HBM）和 CUDA copy engine（直接将 host memory 拷贝到 GPU HBM），该方法看起来绕了一段路；但据我们所知，它是目前唯一能实际保证 KV-Cache load/store 不会降低关键模型执行通信性能的方法。
+
+我们还观察到，在处理大量小数据块时，CNIC 辅助 H2D 和 D2H 优于 CUDA copy engine。测量显示，通过 \texttt{cudaMemcpyAsync} 提交一次 copy 操作会带来约 {5}-{7}$\mu s$ 的延迟开销。由于 CUDA driver 闭源，我们无法进一步拆解该开销。相比之下，提交一个 RDMA Write work request 只涉及用户态向 NIC register 的少量 mmio write，耗时约 {1}$\mu s$。此外，通过利用 \emph{doorbell batching}~\cite{kalia2016design}，RDMA work submission 开销可以被显著摊薄。

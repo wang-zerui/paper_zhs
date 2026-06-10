@@ -1,0 +1,81 @@
+\section{Adaptive Request Scheduler}
+\label{sec:scheduling}
+
+Although our theoretical analysis shows promising results, imbalanced load reduces hardware utilization, and in this scenario, we need to consider two dimensions of balance simultaneously: (1) NIC traffic, and (2) the utilization balance of GPUs.
+We divide scheduling into two levels: inter-engine scheduling, which assigns requests to a (PE, DE) pair and selects the read path (PE or DE) for each request; and intra-engine scheduling, which determines which requests are included in each forward batch for computation.
+
+\subsection{Inter-Engine Scheduling}
+
+We organize engines into groups to reduce the scheduler pressure.
+Only the engine rank $0$, called \emph{Leader Engine}, interacts with the scheduler.
+All engines of a group are all PEs or all DEs.
+All engines on one node are guaranteed to be in the same group.
+All engines in one group proactively fetch tasks together regularly.
+When fetching new requests, each engine $e$ reports (1) $seq_e$, the number of requests assigned to it that have not yet completed; (2) the total token count $tok_e$ over those $seq_e$ requests; and (3) the disk reading queue length $read\_q_{n(e)}$ of the node $n(e)$ that engine $e$ belongs to.
+GPU load, disk read load, and network load are all strongly correlated with token count. We therefore use token count as a proxy and aim to balance it across engines.
+
+\begin{figure}[t!]
+  \centering
+  % \hspace*{-0.85cm}
+  \includegraphics[width=\linewidth]{figures/intersched.pdf}
+  \vspace{-0.2in}
+  \caption{\normalfont An illustration of Inter-Engine PE Scheduling. All eight GPUs are in the same PE engine group and the scheduler will choose the best.}
+  \vspace{-0.2in}
+  \label{fig:intersched}
+\end{figure}
+
+\parabf{PE Scheduling.} All requests arriving at the scheduler enter a waiting queue and are scheduled in a FIFO order. The scheduling algorithm is invoked when a PE group initiates a fetch request.
+An illustration of the inter-engine scheduling process is shown in \autoref{fig:intersched}.
+We define two constants, short reading queue threshold $\alpha$, and unfinished token upper limit $\beta$, measured in tokens.
+All engines are split into three categories:
+(1) overloaded engines where $tok_e > \beta$;
+(2) engines on nodes with short disk reading queues where $read\_q_{n(e)} \leq \alpha$ and $tok_e \leq \beta$; and
+(3) engines on nodes with longer disk reading queues where $read\_q_{n(e)} > \alpha$ and $tok_e \leq \beta$.
+We do not assign new requests to overloaded engines.
+Second-category engines are prioritized over third-category engines because they reside on nodes with shorter disk reading queues, and lack of subsequent requests would easily lead to storage NIC underutilization.
+
+We assign the current request to the PE with minimum $tok_e$ in the second category if non-empty, otherwise in the third category if non-empty.
+After assignment, we update the selected PE's $tok_e$, then proceed to the next request in the waiting queue.
+If both categories are empty, we terminate this fetch request and return the already-assigned requests to the Leader Engine.
+
+
+\input{session/06_scheduling_algorithm}
+
+\parabf{DE Scheduling Phase 1: across groups.}
+DE scheduling is two-level and does not preserve global FIFO. There is a global waiting queue and a private queue per DE engine group. Incoming requests first enter the global queue. When a DE group fetches, \emph{group-level} scheduling drains the global queue and assigns each request to the group whose total $tok_e$ (sum over its engines) is minimum; this balances token count across groups and thus NIC and GPU load. 
+
+\parabf{DE Scheduling Phase 2: within a group.}
+Then we calculate the sum of remaining HBM for all DEs in the group and traverse from the head of the private queue to calculate how many requests can be scheduled assuming no HBM fragmentation. These requests form the set $R$.
+It is an upper bound that can be scheduled. 
+Then, we calculate a high token threshold $Z = 1.05 \times (\sum_{r\in R} {len_r} + \sum_{e\in E} {tok_e}) / |E|$.
+
+Next, we try to pop the head of private queue and schedule it to a DE. 
+Among DEs with sufficient remaining HBM for the request, we partition into (1) high-token DEs, where $tok_e + \text{len}(r) > Z$, and (2) the rest. We prefer category (2) to keep token count balanced; category (1) DEs already have higher GPU and NIC pressure. Within category (2) we choose the DE with minimum $seq_e$ to balance request count; if category (2) is empty we choose the DE with minimum $tok_e$ in category (1) to reduce HBM exhaustion and preemption risk. If no DE has sufficient HBM, the fetch ends and already-assigned requests are returned.
+
+\parabf{KV-Cache Read Task Scheduling.} 
+After selecting PE and DE for a request, we choose to read on the side with the shorter reading queue. It is probably better to split the request into two parts and read them from both sides, and we leave it as future work.
+
+\subsection{Intra-Engine Scheduling}
+
+Only PEs require intra-engine scheduling, as DEs always place all requests into the forward batch.
+An illustration of the intra-engine scheduling process is shown in \autoref{fig:intrasched}.
+Data parallelism is widely adopted for attention layers, especially for MLA models.
+Under such a parallel configuration, each GPU serves a different set of requests. 
+It may lead to workload imbalance among all GPUs that must synchronize after the attention stage and enter the FFN stage together, causing GPU bubbles waiting for other peers.
+Therefore, we need to make sure they have similar attention layer execution times to minimize the waiting bubbles.
+
+
+\begin{figure}[t!]
+  \centering
+  \includegraphics[width=\linewidth]{figures/intrasched.pdf}
+  \caption{\normalfont Intra-Engine Schedule. Left: compute-quota-based batch selection. Right: GPU timeline before and after applying compute quota.}
+  \label{fig:intrasched}
+\end{figure}
+
+\parabf{Layer Time Estimation.} We use FIFO packing to decide how many requests to include in a forward batch.
+Each request in a forward batch is described by a pair $(cached, bsz)$, where $cached$ is the number of tokens with KV-Cache already available (from storage hits or previous forward passes), and $bsz$ is the number of tokens requiring KV-Cache computation in this forward batch.
+From these pairs, we compute the total theoretical computation for the attention layer and estimate its execution time.
+The relationship between theoretical computation and wall-clock time depends on hardware and parallel configuration, and can be fitted in advance through profiling as previous works \cite{SOSP25:PrefillOnly} and \cite{OSDI24:SarathiServe}.
+
+\parabf{Algorithm.} We keep adding requests in FIFO order as long as the predicted attention layer execution time does not exceed a predefined upper bound, called the \emph{compute quota}.
+If adding a request would exceed this bound, we perform binary search on $bsz$ to find a smaller $bsz'$ to fit in the remaining compute quota and perform chunked prefill for that request. 
