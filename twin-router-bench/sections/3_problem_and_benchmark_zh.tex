@@ -1,0 +1,51 @@
+\section{问题形式化与基准概览}
+\label{sec:benchmark-overview}
+
+\subsection{步级路由}
+
+一个多轮 LLM 智能体会产生由 LLM 调用构成的轨迹 $\tau = (s_1, s_2, \ldots, s_N)$。在第 $i$ 步，智能体持有消息历史 $M_i = [m_1, \ldots, m_k]$（即一个\emph{前缀}：系统提示词、用户指令、先前的助手消息、工具输出和检索片段），产生新的助手消息 $a_i = \mathcal{R}(M_i)$，在外部环境中执行 $a_i$ 里的工具调用以得到观察 $o_i$，并将 $a_i, o_i$ 追加到历史中：$M_{i+1} = M_i \parallel [a_i, o_i]$。当智能体提交结果或预算耗尽时停止。
+
+\subsection{条件化的逐调用路由}
+\label{sec:conditional-per-call-routing}
+
+标准 LLM 路由器将查询映射到候选模型，以优化质量和成本；近期综述将其形式化为在成本预算约束下从模型集合中选择模型~\citep{varangotreille2025doing}。TwinRouterBench 研究其条件化的逐调用版本：查询是在下一次 LLM 调用之前完整、路由器可见的前缀 $x_i$，其中包括系统消息、用户请求、先前助手消息、工具输出、检索片段、日志和部分代码修改。步级路由器是如下条件决策规则：
+\[
+\pi : x_i \mapsto t_i \in \mathcal T,
+\]
+其中
+\[
+\mathcal T =
+\{\texttt{low},\texttt{mid},\texttt{mid\_high},\texttt{high}\}
+\]
+是按成本与能力排序的层级集合。每个层级对应一组能力和成本相近的模型；具体模型由下游的层级到模型映射决定，从而使公开记录不包含提供商模型 ID。
+
+理想的条件化目标层级，是在给定前缀 $x_i$ 时能够正确处理当前步骤的最低成本层级。令 $\mathcal M_t\subseteq\mathcal M$ 表示层级 $t$ 的模型池，$V_i(m;x_i)=1$ 表示模型 $m$ 在前缀 $x_i$ 下针对当前步骤给出了足够的响应。对于一次性工作负载，$V_i$ 是任务级成功谓词。对于多轮智能体工作负载，$V_i(m;x_i)=1$ 表示模型 $m$ 正确解决了第 $i$ 步提出的问题；当每一步都被正确解决时，整条轨迹更有可能成功。理想目标为
+\[
+t_i^\star
+=
+\min\left\{
+t\in\mathcal T:
+\exists m\in\mathcal M_t
+\ \text{使得}\
+V_i(m;x_i)=1
+\right\}.
+\]
+$t_i^\star$ 是条件化的逐调用量，而不是关于完整轨迹的全局最优联合策略。部署时，路由器只能观察当前前缀 $x_i$：它既不能改变先前输出，也无法在未来调用的前缀出现之前选择未来调用。
+
+由于逐步正确性并非总能孤立判断，我们通过端到端执行来近似 $V_i$：当降级步骤后的完整轨迹仍以相同步数通过时，就接受该降级步骤，并据此推断其被正确处理。因此，公开标签 $\hat{t}_i$ 是在固定降级--级联协议（\S\ref{sec:dataset-construction}）下对 $t_i^\star$ 的执行验证估计，并由人工审计补充交叉检查该推断（\S\ref{sec:dataset-construction}，人工审计）。当 $\mathcal M_t$ 中至少一个模型能解决混合模型轨迹时，即接受层级 $t$。我们使用固定的、跨四个层级的 11 模型池；完整列表与分组见附录（表~\ref{tab:appendix-model-pool}）。改变模型池、层级成员、harness 或验证协议都会改变 $\hat{t}_i$，并构成一个新的基准版本。
+
+\subsection{语料库}
+
+发布版本包含来自五个基准的 520 条轨迹实例的 970 条步级记录；每个基准的实例数、步骤数和前缀 token 中位数见附录表~\ref{tab:corpus-overview}。一条轨迹是强模型在原始任务上成功完成的一次端到端运行；每一步对应该轨迹内的一次 LLM 调用，其前缀正是路由器在该调用前能看到的消息（完整构建过程见 \S\ref{sec:dataset-construction}）。每条记录的字段形状为 \texttt{id}、\texttt{benchmark}、\texttt{instance\_id}、\texttt{step\_index}、\texttt{total\_steps}、\texttt{messages}、\texttt{target\_tier} 和 \texttt{target\_tier\_id}。公开 JSONL 中不含提供商模型 ID，只包含层级标签。完整记录示例见附录。
+
+附录表~\ref{tab:tier-distribution}汇总了不同层级的成本节约机会分布。\texttt{low} 层级检验路由器能否在保持任务成功的同时避免不必要的昂贵调用。两个中间层级是过渡性的能力带；输出三类的路由器可以将其合并为单一中间带，或通过公开的层级 ID 映射。SWE-bench 贡献了大部分 \texttt{high} 层级记录，表明路由器在困难代码修复步骤中必须保持保守。
+
+mtRAG 和 QMSum 贡献单调用记录，其前缀可能包含多轮上下文。BFCL 同时包含单轮和多轮函数调用：130 个实例产生 248 条记录，其中 29 个实例具有一个以上的路由步骤。SWE-bench 和 PinchBench 贡献多步智能体轨迹。我们纳入所有情形，因为生产路由器会同时遇到单调用的长上下文状态和序列式智能体状态。
+
+\subsection{无需在线裁判的静态评测}
+
+静态评分只对层级标签、轨迹归属和 token 成本做确定性算术计算；四个指标 \textsc{RowPass}、\textsc{RowExact}、\textsc{TrajPass} 和 \textsc{CostSave} 定义于 \S\ref{sec:static-scoring}。
+
+\subsection{动态 SWE-bench 赛道}
+
+动态赛道提供一个支持完整 500 个 SWE-bench Verified 样例的 harness；本文报告的 100 个留出样例与任意静态赛道 SWE-bench 样例均不重叠。每次 LLM 调用时，路由器根据当前前缀、可用模型、缓存状态和预算，从锁定模型池中选择具体模型。该赛道报告三项结果：解决率（官方 SWE-bench 谓词）、实际 API 支出，以及排行榜账单；后者会在每项策略的 API 成本之上加上相同的固定未解决实例惩罚（\S\ref{sec:dynamic-scoring}）。

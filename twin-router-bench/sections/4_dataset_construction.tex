@@ -1,0 +1,120 @@
+\section{Dataset Construction}
+\label{sec:dataset-construction}
+
+Figure~\ref{fig:pipeline} illustrates how each multi-turn case is progressively
+downgraded from a successful strong-model trajectory to produce per-step
+verified tier labels through execution-verified search.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig2.pdf}
+\caption{TwinRouterBench construction pipeline. For each multi-turn case, the
+pipeline starts from a successful strong-model trajectory and progressively
+downgrades individual steps to cheaper tiers via execution-verified search,
+producing the verified tier label for every LLM call in the trace.}
+\label{fig:pipeline}
+\end{figure}
+
+\paragraph{Seed from successful strong trajectories.}
+We first collect trajectories that resolve under a strong-model setting. For
+SWE-bench, Claude Opus 4.6 or GPT-5.4 running through
+\texttt{mini-swe-agent} must submit a patch that passes the official
+\texttt{FAIL\_TO\_PASS} tests; BFCL, mtRAG, QMSum, and PinchBench~\citep{pinchbench} use their
+respective harness pass predicates. Failed seeds are dropped so that routing
+labels do not conflate task difficulty with routing error.
+
+
+\paragraph{Search lower tiers under causal prefixes.}
+For each surviving trajectory, Claude Opus 4.6 provides a search hint:
+whether a step appears downgradeable and, if so, the most aggressive lower tier
+$h_i$ to probe first. The hint is a pruning device, never a label. We then run
+a greedy sequential-locking downgrade search (Appendix Algorithm~\ref{alg:seq-lock}).
+At step $i$, previously locked steps keep their verified tiers, future steps
+use the strong tier, and candidates for step $i$ are tried from cheapest to
+strongest starting at $h_i$. Because per-step correctness cannot always be
+observed directly, we accept a candidate when the full trajectory still passes
+with the same number of steps, inferring that the downgraded step was handled
+correctly; if no candidate passes, the step stays at the strong tier. This
+reduces the naive $|T|^N$ grid to $\mathcal{O}(|T|N)$ trials while ensuring
+later prefixes contain actual degraded outputs from earlier routed steps.
+Locked prefixes are replayed from a response cache keyed by instance, step,
+model, and generation parameters; cache entries are invalidated when an
+upstream lock changes.
+
+\paragraph{Verify tiers as pools, not single models.}
+A tier label should mean that the tier pool can solve the step, not that one
+model happened to pass. We run a three-model cascade for non-\texttt{low}
+labels: a tier is accepted if any of the three pool models passes under the
+mixed-model trace. In a SWE-bench last-step audit, the cascade recovered 28 of
+33 downgradeable labels versus 15 of 33 under single-model probing, confirming
+that single-representative search is too brittle for supervision.
+
+\paragraph{Harden open-ended pass predicates.}
+Some benchmarks (mtRAG, QMSum) rely on LLM-as-judge evaluation whose default
+prompts and rubrics are not strict enough. During early development we manually
+inspected a random sample of judge verdicts and found pseudo-passes where
+surface-level similarity masks incorrect or incomplete answers. We replace these
+weak reference-similarity rubrics with a structured judge that first checks
+whether the current turn is solved, then scores Faithfulness, Appropriateness,
+and Completeness, with evidence-conflict hard failures and a conservative
+fail-on-uncertainty default. We calibrate the tightened rubric against
+Radbench-style thresholded ratings \citep{kuo2025radbench} and verify through
+iterative test runs that the hardened judge eliminates the pseudo-pass patterns
+discovered in our initial sample; structurally
+unreliable mtRAG samples and all-tier failures are discarded. SWE-bench and
+BFCL already have executable or structural pass predicates and need no
+additional hardening.
+
+\paragraph{Manual audit.}
+Our downgrade search fixes all other steps and tests one step at a time. This
+greedy strategy reduces computational cost from exponential to linear but may
+miss cross-step interaction effects: a combination of two downgrades might fail
+even though each succeeds individually. To guard against such cases, we conduct
+a human sampling audit over the three workloads with multi-step trajectories
+(BFCL, SWE-bench, PinchBench), drawing an independent ${\sim}10\%$ random
+sample of routed steps from each. mtRAG and QMSum are single-turn tasks that
+lack multi-turn compounding complexity; their labels are already constrained by
+the hardened judge whose pseudo-pass patterns were eliminated through the
+iterative calibration described above, so they are not resampled in the final
+audit. For each sampled step a reviewer freezes the router-visible prefix
+and judges whether the tier can be lowered one more level, labelling it as
+\emph{tight}, \emph{uncertain}, or \emph{further-downgradeable}. The audit
+covers 64 steps (25 BFCL, 34 SWE-bench, 5 PinchBench): 63 were judged tight;
+one SWE-bench step was flagged as further-downgradeable and its tier was lowered
+before release (Table~\ref{tab:manual-audit-main}). Details of the audit
+protocol are in Appendix~\ref{app:manual-audit}.
+
+\begin{table}[t]
+\centering
+\small
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrr}
+\toprule
+Benchmark & Total steps & Sampled steps & Sampling \% & Downgradeable & Tight \% \\
+\midrule
+BFCL & 248 & 25 & 10.1 & 0 & 100.0 \\
+SWE-bench & 336 & 34 & 10.1 & 1 & 97.1 \\
+PinchBench & 48 & 5 & 10.4 & 0 & 100.0 \\
+\midrule
+Total & 632 & 64 & 10.1 & 1 & 98.4 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Step-level manual audit summary. \emph{Downgradeable}: the reviewer
+believes the verified tier can be lowered one more level without breaking task
+resolution. \emph{Tight~\%}: the share already at the conditional optimum.
+We sample routed steps from the three workloads with multi-step trajectories;
+mtRAG and QMSum are single-turn tasks already guarded by the hardened judge and
+are not resampled.}
+\label{tab:manual-audit-main}
+\end{table}
+
+\paragraph{Release criterion.}
+No row enters the static track unless (1)~the strong seed trajectory passed,
+(2)~the tier pool contains a model that passes under the mixed trace, and
+(3)~for open-ended workloads (mtRAG, QMSum), the hardened judge does not flag
+the answer as a pseudo-pass. Each label is
+an execution-verified estimate of the cheapest tier that can correctly handle
+the current step: since direct per-step judgement is not always possible, we
+infer per-step sufficiency from end-to-end trajectory pass with a fixed step
+count, and cross-check through manual audit.

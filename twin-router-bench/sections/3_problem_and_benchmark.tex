@@ -1,0 +1,116 @@
+\section{Problem Formulation and Benchmark Overview}
+\label{sec:benchmark-overview}
+
+\subsection{Step-level routing}
+
+A multi-turn LLM agent produces a trajectory $\tau = (s_1, s_2, \ldots, s_N)$ of LLM calls. At step $i$, the agent holds a message history $M_i = [m_1, \ldots, m_k]$ (a \emph{prefix}: system prompt, user instruction, previous assistant messages, tool outputs, retrieval chunks), emits a new assistant message $a_i = \mathcal{R}(M_i)$, executes any tool calls in $a_i$ against an external environment to produce observation $o_i$, and appends $a_i, o_i$ to the history: $M_{i+1} = M_i \parallel [a_i, o_i]$. The agent halts when it submits or when a budget is exhausted.
+
+\subsection{Conditional per-call routing}
+\label{sec:conditional-per-call-routing}
+
+A standard LLM router maps a query to a candidate model to optimize quality and
+cost; recent surveys formalize this as selecting from a model set subject to a
+cost budget \citep{varangotreille2025doing}. TwinRouterBench studies the
+conditional per-call version: the query is the full router-visible prefix $x_i$
+before the next LLM call, including system messages, user requests, prior
+assistant messages, tool outputs, retrieval snippets, logs, and partial code
+edits. A step-level router is a conditional decision rule
+\[
+\pi : x_i \mapsto t_i \in \mathcal T,
+\]
+where
+\[
+\mathcal T =
+\{\texttt{low},\texttt{mid},\texttt{mid\_high},\texttt{high}\}
+\]
+is an ordered set of cost and capability tiers. Each tier maps to a pool of models
+with similar capability and cost; the concrete model is decided downstream by a
+tier-to-model mapping, keeping public rows free of vendor model IDs.
+
+The ideal conditional target tier is the cheapest tier that can
+correctly handle the current step given the prefix $x_i$.
+Let $\mathcal M_t\subseteq\mathcal M$ denote the model pool for tier
+$t$, and let $V_i(m;x_i)=1$ indicate that model $m$ produces a sufficient
+response for the current step under prefix $x_i$. For one-shot workloads,
+$V_i$ is the task-level success predicate. For multi-turn agentic workloads,
+$V_i(m;x_i)=1$ means that model $m$ correctly solves the problem posed at
+step $i$; when each step is solved correctly, the trajectory as a whole is
+more likely to succeed. The ideal target is
+\[
+t_i^\star
+=
+\min\left\{
+t\in\mathcal T:
+\exists m\in\mathcal M_t
+\ \text{such that}\
+V_i(m;x_i)=1
+\right\}.
+\]
+$t_i^\star$ is a conditional per-call quantity, not a globally optimal joint
+policy over the full trajectory. At deployment time a router observes only the
+current prefix $x_i$: it cannot change earlier outputs and cannot choose future
+calls before their prefixes exist.
+
+Because per-step correctness cannot always be judged in isolation, we
+approximate $V_i$ through end-to-end execution: a downgraded step is
+accepted when the full trajectory still passes with the same number of
+steps, which lets us infer that the replaced step was handled correctly.
+The released label $\hat{t}_i$ is therefore an execution-verified
+estimate of $t_i^\star$ under our fixed downgrade-and-cascade protocol
+(\S\ref{sec:dataset-construction}), supplemented by a manual audit
+that cross-checks this inference on a random sample of steps
+(\S\ref{sec:dataset-construction}, Manual audit). A tier $t$ is accepted
+when at least one model in $\mathcal M_t$ resolves the mixed-model
+trajectory. We use a fixed 11-model pool spanning four tiers; the full
+list and grouping are in the appendix
+(Table~\ref{tab:appendix-model-pool}). Changing the pool, tier
+membership, harness, or verification protocol changes $\hat{t}_i$ and
+constitutes a new benchmark version.
+
+\subsection{Corpus}
+
+The release contains 970 step-level rows from 520 trajectory instances across
+five benchmarks; per-benchmark instance and step counts (and prefix-token
+medians) are summarized in Appendix Table~\ref{tab:corpus-overview}. A trajectory is one
+successful end-to-end run of a strong model on the original task; each step
+corresponds to one LLM call inside that trajectory, and its prefix is exactly
+the messages the router would see before that call
+(\S\ref{sec:dataset-construction} describes the full construction). Every
+row has the shape \texttt{id}, \texttt{benchmark}, \texttt{instance\_id},
+\texttt{step\_index}, \texttt{total\_steps}, \texttt{messages},
+\texttt{target\_tier}, and \texttt{target\_tier\_id}. No vendor model IDs
+appear in the public JSONL, only the tier label. Full row examples are in
+the appendix.
+
+Appendix Table~\ref{tab:tier-distribution} summarizes the distribution of cost-saving
+opportunities across tiers. The \texttt{low} tier tests whether a router can
+avoid unnecessary expensive calls while preserving task success. The two middle
+tiers are transitional capability bands; routers with three output classes can
+merge them into a single middle band or map through the released tier ids.
+SWE-bench contributes most \texttt{high}-tier rows, signaling when a router
+must stay conservative in difficult code-repair steps.
+
+mtRAG and QMSum contribute single-call rows whose prefixes may contain
+multi-turn context. BFCL contains both single-turn and multi-turn function
+calling: 130 instances yield 248 rows, with 29 instances having more than one
+routed step. SWE-bench and PinchBench contribute multi-step agent traces. We
+include all cases because production routers encounter both single-call
+long-context states and sequential agent states.
+
+\subsection{Static evaluation without an online judge}
+
+Static scoring is deterministic arithmetic over tier labels, trajectory
+membership, and token costs; the four metrics \textsc{RowPass},
+\textsc{RowExact}, \textsc{TrajPass}, and \textsc{CostSave} are defined in
+\S\ref{sec:static-scoring}.
+
+\subsection{Dynamic SWE-bench track}
+
+The dynamic track provides a harness that supports the full 500-case
+SWE-bench Verified suite; this paper reports a 100-case held-out evaluation
+disjoint from any static-track SWE-bench case. At each LLM call the router
+chooses a concrete model from the locked pool given the current prefix,
+available models, cache state, and budget. The track reports three results:
+resolve rate (the official SWE-bench predicate), realized API spend, and a
+leaderboard bill that adds the same flat unresolved-instance penalty on top
+of API cost for every policy (\S\ref{sec:dynamic-scoring}).

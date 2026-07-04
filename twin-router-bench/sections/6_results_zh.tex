@@ -1,0 +1,60 @@
+\subsection{静态赛道诊断结果}
+\label{sec:main-results}
+
+表~\ref{tab:main-results}报告静态赛道上全部 970 条记录的分数。SR-KNN~\citep{liu2026vllmsemanticrouter} 是样本内上界参考，在分隔线以上的三个数据驱动路由器中，其 \textsc{Combined} 排名第一（Opus~4.6（始终 \texttt{high}）行是 \texttt{high} 层级的成本包络参考，而非留出监督基线）。动态赛道结果另行报告于 \S\ref{sec:dynamic-results}。
+
+\begin{table}[t]
+\centering
+\small
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrc}
+\toprule
+路由器 & \textsc{RowPass}\,$\uparrow$ & \textsc{RowExact}\,$\uparrow$ & \textsc{TrajPass}\,$\uparrow$ & \textsc{CostSave}\,$\uparrow$ & \textbf{\textsc{Combined}}\,$\uparrow$ \\
+\midrule
+SR-KNN（样本内上界）       & \textbf{91.86} & \textbf{78.76} & \textbf{84.74} & \textbf{56.18} & \textbf{77.89} \\
+ClawRouter（规则）      & 80.82 & 11.75 & 64.64 & 53.82 & 52.76 \\
+UncommonRoute（规则）   & 88.35 & 61.13 & 62.37 & 15.99 & 56.96 \\
+\midrule
+Opus~4.6（始终 \texttt{high}） & 100.00 & 17.53 & 100.00 & 0.00 & 54.38 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{静态赛道诊断结果（970 条记录，均为百分比）。SR-KNN 是样本内上界。Opus~4.6（始终 \texttt{high}）行是静态 \textsc{CostSave} 分母所用的 \texttt{high} 层级包络：每条记录均有 $\tilde{t}=\texttt{high}\ge\hat{t}$，故 \textsc{RowPass} 和 \textsc{TrajPass} 均为 $100\%$；\textsc{RowExact} 为 $170/970$（仅 170 条经验证的 \texttt{high} 记录匹配）；\textsc{CostSave} 按构造为 $0$（\S\ref{sec:static-scoring}）。Opus~4.6 作为 LLM-as-router 的结果在 \S\ref{sec:opus} 单独分析，因为该运行早于考虑失败的评分公式。}
+\label{tab:main-results}
+\end{table}
+
+ClawRouter（规则）的 \textsc{RowExact} 仅为 11.75\%，但 \textsc{CostSave} 为 53.82：它在大多数非 \texttt{high} 记录上将请求路由至比验证标签高一层的模型，这破坏了精确匹配，却仍远比始终 \texttt{high} 便宜。代价是 SWE-bench 上的轨迹失败（40 条中失败 38 条）。UncommonRoute（规则）的 \textsc{RowExact} 高得多，却只有 15.99 \textsc{CostSave}，因为它在非 \texttt{high} 记录上 217 次跳转到 \texttt{high}，而且仍使 40 条 SWE 轨迹中的 39 条失败，令 SWE 切片的 \textsc{CostSave} 降至 $-86.08$。SR-KNN 取得与 ClawRouter（规则）相近的 \textsc{CostSave}，但轨迹保持能力强得多。考虑失败的 \textsc{CostSave} 公式（\S\ref{sec:static-scoring}）确保失败轨迹上的低价调用被收费而非记作收益；附录~\ref{app:cost-ablation}的消融证实，更宽松的公式会错误地奖励 ClawRouter（规则）向上一级的路由。
+
+静态赛道结果按工作负载的分解见附录~\ref{app:static-breakdown}。
+
+\paragraph{Opus 作为路由器的案例研究。}
+\label{sec:opus}
+
+我们以描述 11 模型池及其 SWE-bench 解决率的提示词，在完整基准上运行 Claude Opus 4.6。在 300 条有效的 SWE-bench 记录中，Opus 对 147 个经验证的 \texttt{high} 步骤仅有 7 个预测为 \texttt{high}，并使全部 40 条 SWE 轨迹失败。这是一个前沿模型在一个提示模板下的案例研究，而非关于所有 LLM 路由器的普遍结论；但它说明，提示前沿模型不能替代经过执行验证的步级监督。完整预测分解见附录~\ref{app:opus}（表~\ref{tab:opus-high}）。
+
+\subsection{动态留出 SWE 执行}
+\label{sec:dynamic-results}
+
+由于每次动态运行都会通过实时 API 调用端到端执行完整的 SWE-bench 智能体，成本随实例数线性增长。为在检验泛化能力的同时控制评测成本，我们随机抽取 100 个不与任何静态赛道 SWE-bench 样例重叠的 SWE-bench Verified 实例，并在这套共享留出集上运行所有策略。表~\ref{tab:dynamic-heldout}报告结果。各策略的路由监督不同：Opus 和 UncommonRoute（规则）不使用离线路由标签；SR-KNN 使用上游 \texttt{semantic-router} 默认配置~\citep{liu2026vllmsemanticrouter}；只有 UncommonRoute（训练）在静态赛道标签上拟合（\S\ref{sec:baselines}）。
+
+\begin{table}[t]
+\centering
+\small
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrr}
+\toprule
+策略 & 已解决\,$\uparrow$ & 平均 API 成本\,$\downarrow$ & API 成本\,$\downarrow$ & 惩罚成本\,$\downarrow$ & 排行榜账单\,$\downarrow$ \\
+\midrule
+SR-KNN 路由器 & \textbf{75}/100 & \$0.56 & \$55.61 & \$15.00 & \$70.61 \\
+UncommonRoute（训练） & \textbf{75}/100 & \textbf{\$0.26} & \textbf{\$25.66} & \$15.00 & \textbf{\$40.66} \\
+UncommonRoute（规则） & 73/100 & \$1.73 & \$172.56 & \$16.20 & \$188.76 \\
+\midrule
+Opus 4.6（无路由） & 74/100 & \$0.55 & \$54.73 & \$15.60 & \$70.33 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{100 个样例的留出 SWE-bench Verified 切分上的动态赛道结果。API 成本是实际发生的路由 API 支出；惩罚成本为 \$0.60$\times$未解决实例数，其中 $\gamma{=}0.60$ 是假想完美求解器的每样例价格（\S\ref{sec:dynamic-scoring}）；排行榜账单（排序键，越低越好）为 API 成本 $+$ 惩罚成本。该惩罚统一适用于每种策略。未路由的 Opus~4.6 基线位于路由策略下方，与表~\ref{tab:main-results}中的成本包络行相对应。}
+\label{tab:dynamic-heldout}
+\end{table}
+
+在可比的解决率下，训练后的 UncommonRoute 相对未路由 Opus 将 API 成本降低 $1-25.66/54.73=53.1\%$，其成本也比规则变体低 $6.7\times$（表~\ref{tab:dynamic-heldout}）。因为静态语料库较小，我们通过端到端的动态执行来验证训练后的路由器，而非报告静态留出分数。这提供了初步证据：静态标签能够训练出在这个 100 样例留出切分上维持 SWE-bench 解决率、同时显著降低成本的路由器。

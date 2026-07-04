@@ -1,0 +1,699 @@
+\appendix
+
+\setcounter{table}{0}
+\renewcommand{\thetable}{A\arabic{table}}
+\renewcommand{\theHtable}{appendix.\arabic{table}}
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{A\arabic{figure}}
+\renewcommand{\theHfigure}{appendix.\arabic{figure}}
+\setcounter{algorithm}{0}
+\renewcommand{\thealgorithm}{A\arabic{algorithm}}
+\renewcommand{\theHalgorithm}{appendix.\arabic{algorithm}}
+
+\section{Appendix}
+\label{app:appendix}
+
+\subsection{Dataset Card}
+\label{app:datacard}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Dataset card for the TwinRouterBench static track. This follows the \citet{bender2018data} and \citet{gebru2021datasheets} data statement conventions adapted for LLM benchmark releases.}
+\label{tab:datacard}
+\begin{tabularx}{\linewidth}{p{0.28\linewidth} X}
+\toprule
+Field & Value \\
+\midrule
+\textbf{Dataset name} & TwinRouterBench v1.0 (static track) \\
+\textbf{Task type} & Step-level LLM routing (4-class classification over tier IDs 0--3) \\
+\textbf{Size} & 970 rows from 520 trajectory instances \\
+\textbf{Source workloads} & SWE-bench (Apache-2.0), BFCL (CC BY 4.0), mtRAG (IBM Research; see original license), QMSum (MIT), PinchBench~\citep{pinchbench} (MIT; the 48 derived rows from 12 of its 53 tasks are included in this release and covered by the package-level Apache-2.0 license below) \\
+\textbf{Provenance} & Message prefixes extracted from successful agent trajectories under strong-model execution; tier labels produced by greedy sequential-locking downgrade search and execution verification \\
+\textbf{Label semantics} & Per-step cheapest-sufficient-tier estimate: the lowest tier whose pool contains a model that correctly handles the current step, verified by end-to-end trajectory pass with fixed step count under the 11-model pool, Opus-initialized sequential-locking downgrade search, and cascade protocol of \S\ref{sec:dataset-construction}, cross-checked by manual audit \\
+\textbf{License} & Apache-2.0 \\
+\textbf{Intended uses} & Training and evaluating step-level LLM routers; benchmarking agent deployment cost reduction \\
+\textbf{Out-of-scope uses} & Claims of absolute routing optimality; deployment to model pools substantially different from the released tier map without re-labeling; use as a general SWE-bench or BFCL capability benchmark \\
+\textbf{Potential biases} & Over-represents agentic code-repair (SWE-bench) at the \texttt{high} tier; BFCL/mtRAG/QMSum are nearly saturated at \texttt{low}; English-only content; labels are pool- and harness-specific \\
+\textbf{Maintenance plan} & New tier-pool manifests and score protocol versions will be tracked via GitHub releases; tier map and pricing are versioned; current release is v1.0 \\
+\textbf{Human oversight} & Final human audit of a $\sim$10\% random step sample from BFCL, SWE-bench, and PinchBench (64 steps total); one SWE-bench step was flagged as further-downgradeable and its verified tier was lowered by one tier before release; no other still-downgradeable label was found in the audited sample \\
+\textbf{Release URL} & Public code and data package: \url{https://github.com/CommonstackAI/TwinRouterBench} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+License metadata follows upstream documentation as of the release date; users
+should verify upstream terms before redistributing derived artifacts.
+
+\subsection{Corpus overview}
+\label{app:corpus-overview}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrl}
+\toprule
+Benchmark & Instances & Steps & Steps/trace & Prefix tokens & Scenario \\
+ & & & (median) & (median) & \\
+\midrule
+SWE-bench      & 40  & 336 & 9.0 & $\sim$5{,}300 & GitHub issue code repair (multi-step agent) \\
+BFCL           & 130 & 248 & 1.0 & $\sim$1{,}600 & Function calling (single- + multi-turn) \\
+mtRAG          & 193 & 193 & 1   & $\sim$1{,}900 & Multi-turn retrieval-augmented QA \\
+QMSum          & 145 & 145 & 1   & $\sim$3{,}000 & Query-focused meeting summarization \\
+PinchBench     & 12  & 48  & 4   & $\sim$10{,}500 & 23-task general agent suite \\
+\midrule
+\textbf{Total} & \textbf{520} & \textbf{970} & & & \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Corpus overview. Prefix-token medians are measured on the router-visible \texttt{messages} field using the Anthropic tokenizer.}
+\label{tab:corpus-overview}
+\end{table}
+
+\subsection{Target-tier distribution and sequential-locking search}
+\label{app:tier-alg}
+
+For space, we defer the workload target-tier counts (referenced from
+\S\ref{sec:benchmark-overview}) and the sequential-locking downgrade search
+pseudocode (referenced from \S\ref{sec:dataset-construction}) to this appendix.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Benchmark & \texttt{low} & \texttt{mid} & \texttt{mid\_high} & \texttt{high} \\
+\midrule
+BFCL       & 239 & 8  & 1  & 0 \\
+mtRAG      & 183 & 8  & 1  & 1 \\
+QMSum      & 132 & 10 & 3  & 0 \\
+PinchBench & 41  & 3  & 3  & 1 \\
+SWE-bench  & 94  & 33 & 41 & 168 \\
+\midrule
+Total      & 689 & 62 & 49 & 170 \\
+\bottomrule
+\end{tabular}
+\caption{Target-tier distribution by workload.}
+\label{tab:tier-distribution}
+\end{table}
+
+\begin{algorithm}[ht]
+\caption{Sequential-locking downgrade search (per trajectory)}
+\label{alg:seq-lock}
+\scriptsize
+\begin{algorithmic}[1]
+\REQUIRE trajectory $\tau$, hints $h_1,\ldots,h_N$, harness $\mathcal{H}$, tiers $T_0<T_1<T_2<T_3$
+\STATE $\text{locked}[i]\leftarrow T_3$ for all $i$
+\FOR{$i=1$ to $N$}
+  \IF{$h_i=$ not-downgradeable}
+    \STATE \textbf{continue}
+  \ENDIF
+  \FOR{$t$ from $h_i$ \textbf{upto} $T_2$}
+    \STATE run $\mathcal{H}$ with steps $<i$ locked, step $i$ at $t$, steps $>i$ at $T_3$
+    \IF{trajectory passes}
+      \STATE $\text{locked}[i]\leftarrow t$; \textbf{break}
+    \ENDIF
+  \ENDFOR
+\ENDFOR
+\RETURN $\text{locked}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Artifact Structure}
+\label{app:artifact}
+
+The reviewer package contains the static JSONL, locked manifests, scoring code,
+dynamic split, and compact dynamic summaries needed to inspect the benchmark and
+recompute the reported tables. The expected layout is:
+
+\begin{center}
+\begin{minipage}{0.95\linewidth}
+\scriptsize
+\begin{verbatim}
+data/static/question_bank.jsonl
+data/static/manifest.json
+data/dynamic/model_pool.json
+data/dynamic/model_pricing.json
+data/dynamic/tier_to_model.json
+data/dynamic/ttl_policy.json
+main/eval/
+main/metrics.py
+README.md
+\end{verbatim}
+\end{minipage}
+\end{center}
+
+The static file contains 970 rows and exposes only tier labels, not vendor model
+IDs in individual records. Dynamic scoring uses the locked pool, pricing, tier
+map, and TTL policy files under \texttt{data/dynamic/}; held-out SWE-bench IDs
+and aggregate outputs are provided with the release artifacts. The README gives
+installation and smoke-test commands for the static grader and dynamic scoring
+CLI. For E\&D-track submission, the release package also includes
+\texttt{metadata/croissant.json} with Croissant core and Responsible AI fields,
+license and source-workload metadata, and executable smoke-test scripts for the
+static grader and dynamic-summary scorer.
+
+\subsection{Static Model Pool}
+\label{app:model-pool}
+
+The static track uses a fixed pool of eleven concrete models grouped into four
+capability tiers (Table~\ref{tab:appendix-model-pool}). Target tier labels are
+defined existentially over this pool: during the downgrade-and-cascade
+procedure of \S\ref{sec:dataset-construction}, we accept a row as belonging to
+tier $t$ as soon as any one model in that tier's pool correctly handles the
+current step, as inferred from the full trajectory still passing with the
+same number of steps. Public static rows store only
+the resulting tier label rather than any specific model ID, so routers trained
+on this data remain portable when the underlying pool is updated.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Static model pool (eleven models, four tiers). Accepted aliases for
+the same logical model are shown in parentheses. Dynamic-track pricing for
+representative models is given separately in
+Table~\ref{tab:appendix-pricing}.}
+\label{tab:appendix-model-pool}
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lp{0.65\linewidth}}
+\toprule
+Tier & Models \\
+\midrule
+\texttt{high}     & \texttt{anthropic/claude-opus-4.6} (alias:
+                     \texttt{anthropic/claude-opus-4-6});
+                     \texttt{openai/gpt-5.4} (alias:
+                     \texttt{openai/gpt-5.4-2026-03-05}) \\
+\texttt{mid\_high} & \texttt{anthropic/claude-haiku-4-5};
+                     \texttt{google/gemini-3-flash-preview} (alias:
+                     \texttt{gemini/gemini-3-flash-preview});
+                     \texttt{qwen/qwen3.5-397b-a17b} \\
+\texttt{mid}      & \texttt{minimax/minimax-m2.5};
+                     \texttt{qwen/qwen3.5-27b};
+                     \texttt{qwen/qwen3-coder} \\
+\texttt{low}      & \texttt{deepseek/deepseek-v3.2};
+                     \texttt{z-ai/glm-4.5-air};
+                     \texttt{qwen/qwen3.5-9b} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{Static tier accounting rates}
+\label{app:static-tier-rates}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+ & input & cache\_read & cache\_write & output \\
+tier & (\$/1M) & (\$/1M) & (\$/1M) & (\$/1M) \\
+\midrule
+low & 0.26 & 0.13 & 0.26 & 0.5 \\
+mid & 0.30 & 0.059 & 0.30 & 2.0 \\
+mid\_high & 0.50 & 0.05 & 0.083 & 5.0 \\
+high & 5.0 & 0.50 & 6.25 & 25.0 \\
+\bottomrule
+\end{tabular}
+\caption{Per-tier accounting constants (USD per million tokens) for the static
+scoring protocol. These rates are not the prices of any single model; they are
+representative values derived from the pricing ranges of multiple models in
+each tier. The \texttt{high} tier is 10--50$\times$ more expensive than
+the lower three, which are within 2--5$\times$ of each other. Dynamic-pool
+model prices are in Table~\ref{tab:appendix-pricing}. This asymmetry drives
+the ablation in Appendix~\ref{app:cost-ablation}.}
+\label{tab:pricing}
+\end{table}
+
+\subsection{Dynamic Pool Representative Models and Pricing}
+\label{app:pricing}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Concrete representative models and live OpenRouter unit prices for the
+TwinRouterBench dynamic pool. These model prices are distinct from the static
+tier-accounting constants in Table~\ref{tab:pricing}.
+Prices are USD per million tokens; cache-write prices fall back to input prices
+where the provider does not publish a separate cache-write rate. These are the
+concrete $p$ values substituted into $c_i(t)$ when scoring the dynamic track;
+the released scorer ranks the resulting leaderboard bill including the flat
+unresolved penalty cost (\S\ref{sec:dynamic-scoring}). The \texttt{mid} representative \texttt{minimax-m2.7} was selected because
+it ranks highest among models at a comparable price point on the SWE-bench
+leaderboard and falls within the same tier as \texttt{minimax-m2.5} (the
+mid-tier representative used during static label construction); the static
+pool in Table~\ref{tab:appendix-model-pool} is frozen at the version used when
+the tier labels were constructed.}
+\label{tab:appendix-pricing}
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{llllrrrr}
+\toprule
+Tier & Representative model & Context & Max out & Input & Output & Cache read & Cache write \\
+\midrule
+high     & anthropic/claude-opus-4.6       & 1M      & 128K   & 5.00  & 25.00 & 0.50   & 6.25  \\
+mid\_high & google/gemini-3-flash-preview  & 1.05M   & 65.5K  & 0.50  &  3.00 & 0.05   & 0.0833 \\
+mid      & minimax/minimax-m2.7             & 196.6K  & 196.6K & 0.30  &  1.20 & 0.059  & 0.30  \\
+low      & deepseek/deepseek-v3.2           & 163.8K  & 163.8K & 0.252 &  0.378 & 0.0252 & 0.252 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{Rule-based UncommonRoute Configuration}
+\label{app:ur-config}
+
+Rule-based UncommonRoute is run with \texttt{MetadataSignal} and
+\texttt{EmbeddingSignal} in a two-signal ensemble, using the upstream
+defaults \path{risk_tolerance}$=0.5$,
+\path{ensemble_weights}$=(0.55,0.45)$, and
+\path{low_escalation_threshold}$=0.55$. Because the benchmark-specific
+seed set, classifier, and Platt scaler are absent in this rule-based
+setting, the embedding signal abstains and only the metadata signal
+contributes in practice.
+
+\subsection{Step-Level Cost Case Study: \texttt{sympy\_\_sympy-12096}}
+\label{app:sympy}
+
+Table~\ref{tab:appendix-sympy} shows a 13-step SWE-bench trajectory.
+Plan~A is all-high execution with prompt caching; Plan~B is verified step-level routing
+(the tier assignments in the ``Tier'' column).
+The step-level routing achieves a 39.6\% cost reduction relative to all-high while resolving the issue.
+Last-step output tokens are estimated~($*$).
+
+\begin{table}[ht]
+\centering
+\scriptsize
+\caption{Step-level cost case study for \texttt{sympy\_\_sympy-12096}.
+Plan~A = all-\texttt{high} with prompt caching.
+Plan~B = verified step-level routing.
+Token counts are in thousands; costs in USD.}
+\label{tab:appendix-sympy}
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{r l r r r r r r}
+\toprule
+Step & Tier & Plan A in & Plan A out & Plan A cost & Plan B in & Plan B out & Plan B cost \\
+\midrule
+ 1 & mid      & 1,321 & 112 & \$0.0111 & 1,284 & 108 & \$0.0005 \\
+ 2 & mid      & 1,744 &  71 & \$0.0051 & 1,699 &  68 & \$0.0003 \\
+ 3 & mid\_high & 1,846 &  69 & \$0.0032 & 1,647 &  66 & \$0.0003 \\
+ 4 & mid\_high & 2,502 &  67 & \$0.0067 & 2,343 &  65 & \$0.0003 \\
+ 5 & low      & 3,287 &  89 & \$0.0084 & 3,729 &  87 & \$0.0010 \\
+ 6 & mid\_high & 4,103 & 256 & \$0.0131 & 3,900 & 254 & \$0.0010 \\
+ 7 & low      & 4,512 &  55 & \$0.0060 & 5,215 &  55 & \$0.0009 \\
+ 8 & mid\_high & 4,612 & 168 & \$0.0071 & 4,403 & 168 & \$0.0007 \\
+ 9 & high     & 4,921 & 241 & \$0.0103 & 4,921 & 241 & \$0.0368 \\
+10 & high     & 5,149 &  85 & \$0.0060 & 5,149 &  85 & \$0.0060 \\
+11 & high     & 5,591 &  63 & \$0.0069 & 5,591 &  63 & \$0.0069 \\
+12 & low      & 5,653 &  56 & \$0.0046 & 6,789 &  59 & \$0.0018 \\
+13 & low      & 5,864 & 111$^{*}$ & \$0.0069 & 7,077 & 109$^{*}$ & \$0.0010 \\
+\midrule
+Total & -- & -- & -- & \textbf{\$0.0953} & -- & -- & \textbf{\$0.0576} \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\end{table}
+
+\subsection{mtRAG/QMSum Judge Hardening Details}
+\label{app:judge}
+
+Table~\ref{tab:appendix-judge} documents the changes from the legacy judge rubric to the hardened version
+used in the final dataset. Each row identifies a specific false-pass failure mode in the legacy judge
+and the corresponding hardened rule applied in construction.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{mtRAG/QMSum judge hardening. The changes convert weak reference-similarity judging
+into a conservative task-success predicate aligned with the current-turn/query requirement
+and RadBench-style faithfulness criteria \citep{kuo2025radbench}.}
+\label{tab:appendix-judge}
+\begin{tabularx}{\linewidth}{p{0.22\linewidth}p{0.35\linewidth}X}
+\toprule
+Risk in legacy judge & Hardened rule & Purpose \\
+\midrule
+No primary criterion &
+  First decide whether the answer completely and correctly resolves the current turn/query &
+  Prevents answer/reference surface resemblance from substituting for task success \\
+Reference treated as answer string &
+  Treat reference as coverage hints; evidence/transcript is authoritative &
+  Allows valid paraphrases and rejects reference-following errors \\
+Unsupported facts &
+  Hard fail for unsupported crucial numbers, dates, amounts, ratios, votes, or claims &
+  Suppresses hallucinated but plausible-looking answers \\
+Evidence contradiction &
+  Hard fail when candidate contradicts retrieved passages or meeting transcript &
+  Enforces faithfulness \\
+Unanswerable/no-context cases &
+  mtRAG pre-filter: must be answerable, have context passages, and positive human relevance feedback &
+  Removes structurally unreliable samples before routing search \\
+All tiers fail &
+  Mark discarded; do not emit case JSON or supervision row &
+  Prevents false passes from becoming verified labels \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Frontier LLM-as-Router Diagnostic Summary}
+\label{app:opus}
+
+Table~\ref{tab:opus-high} shows the Opus~4.6 predictions on verified-\texttt{high} SWE-bench steps;
+Table~\ref{tab:appendix-opus-bias} provides additional diagnostics.
+These numbers support the claim that a strong model's unexecuted routing judgment is not a reliable
+substitute for execution-verified step-level supervision (\S\ref{sec:opus}).
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Verified tier & $\tilde{t}=\texttt{low}$ & $\tilde{t}=\texttt{mid}$ & $\tilde{t}=\texttt{mid\_high}$ & $\tilde{t}=\texttt{high}$ & Total \\
+\midrule
+$\hat{t}=\texttt{high}$ & 34 & 43 & 63 & \textbf{7} & 147 \\
+\bottomrule
+\end{tabular}
+\caption{Opus 4.6 predictions on verified-\texttt{high} SWE-bench steps.
+140 of 147 are routed below \texttt{high}.}
+\label{tab:opus-high}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Frontier LLM-as-router (Opus~4.6) diagnostic summary on SWE-bench.
+The key finding is severe under-prediction of \texttt{high}-tier steps:
+only 5\% of verified-\texttt{high} steps are predicted \texttt{high},
+causing every SWE-bench trajectory to fail under this routing.}
+\label{tab:appendix-opus-bias}
+\begin{tabularx}{\linewidth}{lrr X}
+\toprule
+Diagnostic & Value & Scope & Interpretation \\
+\midrule
+SWE-bench valid rows & 300 & 336 rows total, 36 malformed & Valid subset for confusion-matrix analysis \\
+Verified-high predicted high & 7/147 (4.8\%) & SWE-bench valid rows & Severe under-prediction of high-tier steps \\
+Verified-high under-predicted & 140/147 (95.2\%) & SWE-bench valid rows & Most high steps routed below high \\
+SWE-bench trajectory pass & 0/40 & Legacy Opus routing run & Every trajectory has $\ge$1 under-routed step \\
+Middle-third under-prediction & 73\% & Step-position diagnostic & Core editing/test-running steps most under-predicted \\
+First-third under-prediction & 46\% & Step-position diagnostic & Lower but still substantial under-routing \\
+Last-third under-prediction & 53\% & Step-position diagnostic & Recovery/finalization steps remain difficult \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Label-Validation Audit Trail}
+\label{app:validation}
+
+Table~\ref{tab:appendix-validation} documents the validation mechanisms applied during dataset
+construction. Together they ensure that no label enters the released JSONL unless the strong baseline
+passed, a tier-pool model actually passes under the mixed-model trace, the judge does not mark
+the answer as pseudo-passing, and the final human audit sees no surviving issue.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Label-validation audit trail. Each component addresses a specific failure mode
+in the construction pipeline.}
+\label{tab:appendix-validation}
+\begin{tabularx}{\linewidth}{p{0.22\linewidth}p{0.22\linewidth}p{0.28\linewidth}X}
+\toprule
+Validation component & Scope & Failure mode addressed & Release action \\
+\midrule
+Successful seed traces &
+  All released instances &
+  Conflating task failure with routing failure &
+  Only passing seed traces enter degradation search \\
+Sequential-locking downgrade search &
+  Multi-step traces &
+  Missing the last-passing tier; hypothetical overlays on the strongest trace &
+  Push one tier below the Opus proposal under the causal mixed-model prefix until the harness fails, then lock the last passing tier \\
+Tier cascade (3 models/tier) &
+  All non-\texttt{low} tier labels &
+  Single-model false negatives within a tier &
+  Lock a cheaper tier only after an actual passing run \\
+Strict mtRAG/QMSum judge &
+  Open-ended RAG and summarization &
+  False passes from weak judging &
+  Use hard-fail rubric; discard all-tier failures \\
+Final human audit &
+  $\sim$10\% random step samples from each of BFCL, SWE-bench, and PinchBench &
+  Still-downgradeable tier labels that the upstream search did not tighten to the conditional optimum &
+  Human review under the router-visible prefix decides whether the released tier can be lowered by one more step; one SWE-bench step was flagged as further-downgradeable and its tier was lowered accordingly \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Manual Audit Protocol and Summary}
+\label{app:manual-audit}
+
+The manual audit is the final quality gate of the static track: it runs
+\emph{after} the Opus-initialized downgrade search, tier-pool cascade check,
+open-ended judge hardening, and prefix reconstruction of
+\S\ref{sec:dataset-construction} are all complete. The audit is deliberately a
+human-judgment pass rather than a second harness execution. Its purpose is to
+cross-check that the released tier label is still defensible on the same
+router-visible context that a deployed router would see, not to recompute any
+pass predicate.
+
+\paragraph{Sampling.}
+We follow the GT tier-optimality review protocol included with the release
+artifacts. The audit unit is a single routed step so that single-step and
+multi-step cases are treated on the same granularity. Within each of the
+three workloads that contain multi-step trajectories (BFCL, SWE-bench,
+PinchBench) we draw an independent random sample of roughly 10\% of the
+workload's routed steps. mtRAG and QMSum are single-turn tasks that lack
+multi-turn compounding complexity; their labels are already constrained by the
+hardened judge whose pseudo-pass patterns were eliminated through iterative
+calibration (\S\ref{sec:dataset-construction}), and are not resampled in this
+audit.
+
+\paragraph{Review procedure.}
+For each sampled step, the router-visible \texttt{messages} prefix is held
+fixed at its released form. An optional large-model pre-label may be attached
+as a reference, but the final decision is always taken by a human reviewer,
+who asks whether lowering the verified tier by one more level would still
+produce a response that correctly handles the current step; the step is then
+labelled as \emph{tight}, \emph{uncertain}, or \emph{further-downgradeable}. A \emph{tight} verdict means the released tier
+is already at the conditional optimum and cannot be lowered one more step
+without breaking task resolution; a \emph{further-downgradeable} verdict means
+the reviewer believes the released tier is still too high and the label can
+be tightened by one more tier. The audit inspected 64 steps in total; one
+SWE-bench step was flagged as further-downgradeable and its verified tier was
+lowered by one tier before release, while the remaining 63 steps were judged
+tight. This internal audit is intended to catch residual labels that the
+upstream search did not tighten to the conditional optimum, and to clarify
+label semantics; it is not presented as an external annotation study or as a
+confidence interval for the full corpus.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Manual audit summary. A sampled step is counted as
+\emph{Downgradeable} when the reviewer believes its verified tier can still
+be lowered by one more tier without breaking task resolution; \emph{Tight \%}
+is the complementary share whose tier label is already at the conditional
+optimum. Sampling is done at the step granularity across the three workloads
+that contain multi-step trajectories; mtRAG and QMSum are single-turn tasks
+already guarded by the hardened judge and are not resampled here. The audit is a targeted internal quality check.}
+\label{tab:manual-audit}
+\begin{tabular}{lrrrrr}
+\toprule
+Slice & Total steps & Sampled steps & Sampling \% & Downgradeable & Tight \% \\
+\midrule
+BFCL & 248 & 25 & 10.1 & 0 & 100.0 \\
+SWE-bench & 336 & 34 & 10.1 & 1 & 97.1 \\
+PinchBench & 48 & 5 & 10.4 & 0 & 100.0 \\
+\midrule
+Total & 632 & 64 & 10.1 & 1 & 98.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Static-Track Breakdown}
+\label{app:static-breakdown}
+
+\paragraph{Per-workload cost savings.}
+
+Table~\ref{tab:per-benchmark} shows that SWE-bench is the hardest static slice.
+It carries 34.64\% of the row-weighted \textsc{CostSave} score, and every
+router has negative cost savings there because one under-routed step fails the
+whole trajectory and triggers the failure-aware bill. On the other four
+workloads, SR-KNN and ClawRouter (rule-based) both exceed 85\% cost savings on average; the
+global ranking depends on whether a router preserves code-repair trajectories.
+
+\begin{table}[ht]
+\centering
+\scriptsize
+\begin{tabular}{lrrrrrr}
+\toprule
+Router & BFCL & mtRAG & QMSum & Pinch & SWE-bench & Overall \\
+\midrule
+SR-KNN       & \textbf{90.49} & \textbf{92.35} & 90.24 & 35.36 & \textbf{-1.64} & \textbf{56.18} \\
+ClawRouter (rule-based) & 89.87 & 83.45 & \textbf{92.12} & \textbf{55.20} & -6.55 & 53.82 \\
+UncommonRoute (rule-based) & 47.14 & 91.93 & 90.24 & 39.80 & -86.08 & 15.99 \\
+\midrule
+Row weight  & 25.57 & 19.90 & 14.95 & 4.95 & 34.64 & 100.00 \\
+\bottomrule
+\end{tabular}
+\caption{Per-workload \textsc{CostSave} under the static scoring protocol.
+The SWE-bench slice is the main stress test: failed trajectories trigger the
+failure-aware numerator in \S\ref{sec:static-scoring}.}
+\label{tab:per-benchmark}
+\end{table}
+
+\paragraph{Router failure modes.}
+\label{sec:error-patterns}
+
+The three baselines fail in different ways (Table~\ref{tab:error-patterns}). On
+the 800 rows whose verified tier is below \texttt{high}, SR-KNN is mostly
+exact; ClawRouter (rule-based) almost always routes one tier above the label; UncommonRoute
+(rule-based) is exact more often than ClawRouter (rule-based) but jumps to \texttt{high}
+217 times.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Prediction pattern on $\hat{t}<\texttt{high}$ & SR-KNN & ClawRouter (rule-based) & UncommonRoute (rule-based) \\
+\midrule
+Exact tier                         & \textbf{627} & 107 & 488 \\
+Up one tier                         & 10 & \textbf{649} & 47 \\
+Jump to \texttt{high}               & 117 & 21 & \textbf{217} \\
+Fail: predicted below $\hat{t}$     & 46 & 23 & \textbf{48} \\
+\bottomrule
+\end{tabular}
+\caption{Error patterns on the 800 non-\texttt{high} rows.}
+\label{tab:error-patterns}
+\end{table}
+
+SWE-bench exposes why row-level behavior is insufficient
+(Table~\ref{tab:swe-high}). UncommonRoute (rule-based) recognizes many
+verified-\texttt{high} steps, but missing even one step in an 8--13 call
+trajectory fails the instance.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lrrr}
+\toprule
+Router & Predicted \texttt{high} on $\hat{t}=\texttt{high}$ & Hit rate & Failed traj. \\
+\midrule
+SR-KNN       & 137/168 & \textbf{81.5\%} & \textbf{10/40} \\
+ClawRouter (rule-based) & 7/168   & 4.2\%  & 38/40 \\
+UncommonRoute (rule-based) & 105/168 & 62.5\% & 39/40 \\
+\bottomrule
+\end{tabular}
+\caption{SWE-bench high-tier decisions. One under-routed critical step fails
+the whole trajectory.}
+\label{tab:swe-high}
+\end{table}
+
+\subsection{Cost-Savings Accounting Ablation}
+\label{app:cost-ablation}
+
+This section provides the full derivation and per-variant numbers referenced in \S\ref{sec:main-results}.
+
+\paragraph{Pricing asymmetry drives the ablation.}
+Table~\ref{tab:save-asymmetry} reports, for three representative step profiles, the per-step saving against the always-\texttt{high} baseline under each target tier. The ratio \texttt{save\_mid / save\_low} is within 3\% of $1$ across all three step sizes, which means a router that mis-routes from $\hat{t}=\texttt{low}$ to $\tilde{t}=\texttt{mid}$ loses almost no money in absolute terms.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Savings vs.\ always-\texttt{high} for different target tiers on three representative step profiles.
+Mis-routing from \texttt{low} to \texttt{mid} is nearly cost-free.}
+\label{tab:save-asymmetry}
+\begin{tabular}{lrrrr}
+\toprule
+Step profile & save(high$-$low) & save(high$-$mid) & save(high$-$mid\_high) & save\_mid / save\_low \\
+\midrule
+4k cold step     & 3.621¢ & 3.530¢ & 3.467¢ & 0.975 \\
+20k warm step    & 1.965¢ & 2.032¢ & 1.900¢ & 1.034 \\
+100k cold step   & 61.13¢ & 60.65¢ & 62.67¢ & 0.992 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Five scoring variants.}
+We compare five $N/D$ accounting schemes on the same predictions:
+
+\begin{itemize}
+\item \textbf{A} (legacy row-level denominator): $D = \sum_i (\mathrm{cost}(3;i) - \mathrm{cost}(\hat{t}_i;i))$ over passing rows with $\hat{t}_i \ne \texttt{high}$; $N$ ignores failures.
+\item \textbf{B} (legacy all-row denominator): $D$ as in A but over all rows; failing trajectories subtract $\sum_i \mathrm{cost}(\tilde{t}_i;i)$ at trajectory level.
+\item \textbf{C} (intermediate high-row exclusion): exclude $\hat{t}_i=\texttt{high}$ rows from $D$.
+\item \textbf{D} ($D = \sum_i \mathrm{cost}(3;i)$, failed-step penalty at step level, no trajectory-level penalty).
+\item \textbf{E} (final failure-aware formula): same $D$ as D, but failed trajectories charge $-\sum_i \mathrm{cost}(\tilde{t}_i;i)$ at trajectory level.
+\end{itemize}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Ablation of \textsc{CostSave} accounting. Variants A--D all rank ClawRouter (rule-based) above SR-KNN;
+only variant E (the final failure-aware formula) aligns with \textsc{RowPass}, \textsc{RowExact}, and \textsc{TrajPass}.}
+\label{tab:ablation-scoring}
+\begin{tabular}{lrrr}
+\toprule
+Variant & SR-KNN \textsc{cost}\% & ClawRouter (rule-based) \textsc{cost}\% & Ranking \\
+\midrule
+A (legacy row-level denominator)                  & 84.99 & \textbf{89.71} & Claw wins \\
+B (legacy all-row denominator)                    & 84.45 & \textbf{84.59} & Claw wins \\
+C (intermediate high-row exclusion)               & 79.11 & \textbf{91.31} & Claw wins \\
+D ($D=\sum\mathrm{cost}(3)$, step-level fail)    & 61.81 & \textbf{67.67} & Claw wins \\
+\textbf{E} (final failure-aware formula)          & \textbf{56.18} & 53.82 & SR wins \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Why variant E recovers the consistent ranking.}
+Variant E interprets a failing trajectory as ``the router burned its own (cheap) budget \emph{and} the user paid the full \texttt{high} bill to recompute.'' Formally, the user-side bill on a failing trajectory is $\sum_i \mathrm{cost}(\tilde{t}_i;i) + \sum_i \mathrm{cost}(3;i)$, so savings against always-\texttt{high} equal $-\sum_i \mathrm{cost}(\tilde{t}_i;i)$, which is exactly what $N$ encodes. The $\sum_i \mathrm{cost}(3;i)$ retry term is absorbed by $D$ rather than double-counted, keeping \textsc{CostSave} $\in [-\infty, 100]$ with $0$ representing always-\texttt{high} routing. On the full benchmark, ClawRouter (rule-based) has 649 up-one errors (near-free in absolute terms) that can no longer compensate for its 38 failing SWE-bench trajectories, and its \textsc{CostSave} aligns with its \textsc{RowPass}/\textsc{RowExact}/\textsc{TrajPass} figures.
+
+\subsection{Opus 4.6 Confusion Matrix}
+\label{app:opus-confusion}
+
+For reference, the Opus 4.6 routing run recorded under an earlier three-metric accounting protocol reports an overall of 84.05, with row pass $=$85.77, row exact $=$82.88, and cost savings $=$83.48. This is not directly comparable to the static scores in Table~\ref{tab:main-results} because the earlier accounting does not apply the failure-aware trajectory penalty in \S\ref{sec:static-scoring} and does not report a trajectory-pass metric; we therefore treat it as a historical data point rather than a ranked baseline.
+
+Table~\ref{tab:opus-confusion} shows the full confusion matrix summarized in \S\ref{sec:opus}.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Opus 4.6 routing predictions vs.\ verified tiers on the 300 valid SWE-bench rows
+(36 malformed outputs excluded). Diagonal cells are highlighted. Opus rarely commits to
+\texttt{high}, even when the verified tier is \texttt{high}.}
+\label{tab:opus-confusion}
+\begin{tabular}{lrrrrr}
+\toprule
+ & $\tilde{t}=\texttt{low}$ & $\tilde{t}=\texttt{mid}$ & $\tilde{t}=\texttt{mid\_high}$ & $\tilde{t}=\texttt{high}$ & row total \\
+\midrule
+$\hat{t}=\texttt{low}$       & \textbf{52 (61\%)} & 15 & 17 & 1 & 85 \\
+$\hat{t}=\texttt{mid}$       & 13 & \textbf{7 (23\%)} & 10 & 0 & 30 \\
+$\hat{t}=\texttt{mid\_high}$ & 8  & 13 & \textbf{16 (42\%)} & 1 & 38 \\
+$\hat{t}=\texttt{high}$      & 34 & 43 & 63 & \textbf{7 (5\%)} & 147 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{mtRAG Row Example}
+\label{app:mtrag-example}
+
+A second row format, complementing the SWE-bench example in \S\ref{sec:benchmark-overview}, illustrates how \texttt{low}-tier labels arise: after several retrieval turns, a short follow-up query can be answered by the cheapest tier in the pool.
+
+\begin{center}
+\begin{minipage}{0.95\linewidth}
+\scriptsize
+\begin{verbatim}
+{
+  "id": "mtrag_..._turn_3_step_1",
+  "benchmark": "mtrag",
+  "step_index": 1, "total_steps": 1,
+  "messages": [
+    {"role": "system", "content": "Answer based on the retrieved passages..."},
+    {"role": "user",   "content": "[Passage] Major.minor update... [Passage] ..."},
+    {"role": "assistant", "content": "..."},
+    ...multi-turn history...
+    {"role": "user",   "content": "Major.minor update."}
+  ],
+  "target_tier": "low", "target_tier_id": 0
+}
+\end{verbatim}
+\end{minipage}
+\end{center}

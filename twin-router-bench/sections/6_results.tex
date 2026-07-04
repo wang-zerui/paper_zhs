@@ -1,0 +1,116 @@
+\subsection{Static-Track Diagnostic Results}
+\label{sec:main-results}
+
+Table~\ref{tab:main-results} reports static-track scores on all 970 rows.
+SR-KNN~\citep{liu2026vllmsemanticrouter} is an in-sample upper-bound reference and ranks first on
+\textsc{Combined} among the three data-driven routers above the separator (the
+Opus~4.6 (always-\texttt{high}) row is a tier-\texttt{high} cost-envelope reference, not a
+held-out supervised baseline). Dynamic-track results
+are reported separately in \S\ref{sec:dynamic-results}.
+
+\begin{table}[t]
+\centering
+\small
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrc}
+\toprule
+Router & \textsc{RowPass}\,$\uparrow$ & \textsc{RowExact}\,$\uparrow$ & \textsc{TrajPass}\,$\uparrow$ & \textsc{CostSave}\,$\uparrow$ & \textbf{\textsc{Combined}}\,$\uparrow$ \\
+\midrule
+SR-KNN (in-sample ub.)       & \textbf{91.86} & \textbf{78.76} & \textbf{84.74} & \textbf{56.18} & \textbf{77.89} \\
+ClawRouter (rule-based)      & 80.82 & 11.75 & 64.64 & 53.82 & 52.76 \\
+UncommonRoute (rule-based)   & 88.35 & 61.13 & 62.37 & 15.99 & 56.96 \\
+\midrule
+Opus~4.6 (always-\texttt{high}) & 100.00 & 17.53 & 100.00 & 0.00 & 54.38 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Static-track diagnostic results (970 rows, all percentages). SR-KNN
+is an in-sample upper bound. The Opus~4.6 (always-\texttt{high}) row is the tier-\texttt{high}
+envelope used by the static \textsc{CostSave} denominator: \textsc{RowPass} and
+\textsc{TrajPass} are $100\%$ because $\tilde{t}=\texttt{high}\ge\hat{t}$ on every
+row; \textsc{RowExact} is $170/970$ (only the $170$ verified-\texttt{high} rows match);
+\textsc{CostSave} is $0$ by construction (\S\ref{sec:static-scoring}). Opus~4.6 as
+an LLM-as-router is analyzed separately in \S\ref{sec:opus} because that run predates
+the failure-aware scoring formulation.}
+\label{tab:main-results}
+\end{table}
+
+ClawRouter (rule-based) has only 11.75\% \textsc{RowExact} but 53.82 \textsc{CostSave}:
+it routes one tier above the verified label on most non-\texttt{high} rows,
+which destroys exact match but stays far cheaper than always-\texttt{high}.
+The cost is trajectory failure on SWE-bench (38/40 failed). UncommonRoute
+(rule-based) has much higher \textsc{RowExact} yet only 15.99
+\textsc{CostSave} because it jumps to \texttt{high} 217 times on
+non-\texttt{high} rows and still fails 39/40 SWE trajectories, pulling the
+SWE slice to $-86.08$ \textsc{CostSave}. SR-KNN achieves similar
+\textsc{CostSave} as ClawRouter (rule-based) but with much stronger trajectory
+preservation. The failure-aware \textsc{CostSave} formula
+(\S\ref{sec:static-scoring}) ensures that cheap calls on failed trajectories
+are charged rather than credited; the ablation in
+Appendix~\ref{app:cost-ablation} confirms that looser formulas would
+incorrectly reward ClawRouter (rule-based) for its one-tier upgrades.
+
+A per-workload breakdown of static-track results is in
+Appendix~\ref{app:static-breakdown}.
+
+\paragraph{Opus-as-router case study.}
+\label{sec:opus}
+
+We ran Claude Opus 4.6 over the full benchmark with a prompt describing the
+11-model pool and their SWE-bench resolve rates. On the 300 valid SWE-bench
+rows, Opus predicts \texttt{high} for only 7 of 147 verified-\texttt{high}
+steps and fails all 40 SWE trajectories. This is a case study of one frontier
+model under one prompt template, not a general claim about all LLM routers,
+but it illustrates that frontier-model prompting does not substitute for
+execution-verified step-level supervision. The full prediction breakdown is in
+Appendix~\ref{app:opus} (Table~\ref{tab:opus-high}).
+
+\subsection{Dynamic Held-out SWE Execution}
+\label{sec:dynamic-results}
+
+Because each dynamic run executes a full SWE-bench agent end-to-end with live
+API calls, cost scales linearly with the number of instances. To keep
+evaluation affordable while still testing generalization, we randomly sample
+100 SWE-bench Verified instances that do not overlap with any static-track
+SWE-bench case and run all policies on this shared held-out set.
+Table~\ref{tab:dynamic-heldout} reports the results.
+Routing supervision differs across policies: Opus and UncommonRoute (rule-based) use no
+offline routing labels; SR-KNN uses the upstream \texttt{semantic-router}
+defaults~\citep{liu2026vllmsemanticrouter}; only UncommonRoute (trained) is fit
+on static-track labels (\S\ref{sec:baselines}).
+
+\begin{table}[t]
+\centering
+\small
+\begin{adjustbox}{max width=\linewidth}
+\begin{tabular}{lrrrrr}
+\toprule
+Policy & Resolved\,$\uparrow$ & Avg.\ API cost\,$\downarrow$ & API cost\,$\downarrow$ & Penalty cost\,$\downarrow$ & Leaderboard bill\,$\downarrow$ \\
+\midrule
+SR-KNN router & \textbf{75}/100 & \$0.56 & \$55.61 & \$15.00 & \$70.61 \\
+UncommonRoute (trained) & \textbf{75}/100 & \textbf{\$0.26} & \textbf{\$25.66} & \$15.00 & \textbf{\$40.66} \\
+UncommonRoute (rule-based) & 73/100 & \$1.73 & \$172.56 & \$16.20 & \$188.76 \\
+\midrule
+Opus 4.6 (no routing) & 74/100 & \$0.55 & \$54.73 & \$15.60 & \$70.33 \\
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Dynamic-track results on a 100-case held-out SWE-bench Verified
+split. API cost is the realized routed API spend; Penalty cost is
+\$0.60$\times$ the number of unresolved instances, where $\gamma{=}0.60$
+is the per-case price of a hypothetical perfect solver
+(\S\ref{sec:dynamic-scoring}); Leaderboard bill (sort key, lower is better)
+is API cost $+$ Penalty cost. The penalty applies uniformly to every
+policy. The unrouted Opus~4.6 baseline is separated below the routing policies,
+mirroring the cost-envelope row in Table~\ref{tab:main-results}.}
+\label{tab:dynamic-heldout}
+\end{table}
+
+At comparable resolve rate, trained UncommonRoute reduces API cost
+by $1-25.66/54.73=53.1\%$ relative to unrouted Opus, and costs $6.7\times$
+less than the rule-based variant (Table~\ref{tab:dynamic-heldout}). Because
+the static corpus is small, we validate the trained router through
+end-to-end dynamic execution rather than reporting static held-out scores.
+This provides initial evidence that the static labels can train a router
+that substantially reduces cost while maintaining SWE-bench resolution on
+this 100-case held-out split.

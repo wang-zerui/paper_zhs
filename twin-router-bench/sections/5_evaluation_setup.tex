@@ -1,0 +1,148 @@
+\subsection{Static scoring protocol}
+\label{sec:static-scoring}
+
+A per-request tier label alone does not capture the downstream cost of choosing
+the wrong tier at step $k$ of an $N$-step trajectory. We score each router on
+four metrics that combine a step-level view with a trajectory-level view:
+\textsc{RowPass}, \textsc{RowExact}, \textsc{TrajPass}, and \textsc{CostSave}.
+The first two operate per row. \textsc{TrajPass} requires every routed step in
+a trajectory to pass. \textsc{CostSave} measures savings relative to the
+always-\texttt{high} baseline but only credits savings on passing trajectories;
+API cost on failed trajectories is charged as burned. The detailed
+derivation is in the appendix.
+
+Let $\hat{t}_i$ be the released target tier for row $i$ and $\tilde{t}_i$ the
+router prediction. A row passes if $\tilde{t}_i \ge \hat{t}_i$ and is exact if
+$\tilde{t}_i=\hat{t}_i$. A trajectory passes only if every routed row passes.
+Let $c_i(t)$ be the tier-accounting cost for row $i$ at tier $t$ and $T_3$
+denote \texttt{high}. For workload $b$, the always-\texttt{high} bill is
+$D_b=\sum_{i\in b} c_i(T_3)$. The numerator $N_b$ accumulates at the
+trajectory level: passing trajectories contribute
+$\sum_i[c_i(T_3)-c_i(\tilde{t}_i)]$; failing trajectories contribute
+$-\sum_i c_i(\tilde{t}_i)$. The grader reports
+\[
+\textsc{CostSave} = \sum_b w_b \frac{N_b}{D_b}, \qquad
+w_b = \frac{n_b}{970},
+\]
+where $n_b$ is the number of rows in workload $b$, so workloads are row-weighted after each cost ratio is computed. An
+always-\texttt{high} policy scores $\textsc{CostSave}=0$ by construction,
+since $N_b=0$ for every workload.
+
+\paragraph{Headline score.}
+\[
+\begin{aligned}
+\textsc{Combined} = \tfrac{1}{4}(&\textsc{RowPass} +
+\textsc{RowExact} + \textsc{TrajPass} + \textsc{CostSave}).
+\end{aligned}
+\]
+The four components are the primary reporting unit; \textsc{Combined} is a
+single operating point under equal weighting. We justify the failure-aware cost
+accounting with an ablation in Appendix~\ref{app:cost-ablation}.
+
+\paragraph{Pricing and token accounting.}
+The \texttt{high} tier is 10--50$\times$ more expensive than the lower tiers
+(Appendix Table~\ref{tab:pricing}), so naive per-step cost accounting overrates
+conservative routers. These are static tier-level constants; dynamic-pool
+model prices are in Appendix~\ref{app:pricing}. Prompt tokens are split into
+\texttt{cache\_read}, \texttt{cache\_write}, and fresh \texttt{input}; output
+tokens are counted from the recorded transcript. Token counting uses native
+vendor tokenizers where available and \texttt{cl100k\_base} as fallback. For
+row $i$ and tier $t$, the scorer uses the same four-bucket form as real API
+billing:
+\[
+c_i(t)=
+\frac{
+n_i^{\mathrm{in}}p_t^{\mathrm{in}}+
+n_i^{\mathrm{cr}}p_t^{\mathrm{cr}}+
+n_i^{\mathrm{cw}}p_t^{\mathrm{cw}}+
+n_i^{\mathrm{out}}p_t^{\mathrm{out}}
+}{10^6},
+\]
+where the token counts $n_i^{\cdot}$ and the per-tier rates $p_t^{\cdot}$
+follow Appendix Table~\ref{tab:pricing}. The static grader enables prompt-cache
+modeling throughout: prompt tokens are billed as cache\_write on cold starts,
+tier switches, TTL expiry (5 minutes, matching provider defaults such as
+Anthropic's prompt-cache policy), or prefix deltas, and as cache\_read on
+valid same-tier prefix hits; the fresh-input term is retained to match the
+four-bucket dynamic accounting interface.
+
+\paragraph{Accounting for routing-specific effects.}
+Mid-trajectory model switching raises three common concerns: cache misses on
+tier changes, out-of-distribution behavior under mixed-model histories, and
+tool-format mismatch across model families. Our evaluation prices each in
+rather than assuming them benign. Cache writes on tier switch are charged
+at the \emph{incoming} tier's rate (cache\_write at \texttt{high} is
+$12.5\times$ its cache\_read in Appendix Table~\ref{tab:pricing}), so a policy that
+churns into expensive tiers incurs the cache\_write cost at list price; the dynamic
+track then reports realized OpenRouter cost rather than simulated cost, and a
+router selecting a model per-step still reduces realized API cost by 53.1\%
+relative to unrouted Opus despite those switches
+(Table~\ref{tab:dynamic-heldout}). Out-of-distribution behavior in mixed-model
+trajectories is handled by execution-verified labels
+(\S\ref{sec:dataset-construction}) and the failure-aware numerator: unresolved
+trajectories are billed at API cost plus a flat penalty cost, so OOD
+failures cannot appear as savings. Tool-format heterogeneity
+(e.g.\ structured \texttt{apply\_patch} calls versus interleaved
+\texttt{str\_replace\_editor} edits) is contained by the shared
+\texttt{mini-swe-agent} harness, which derives every final patch via
+\texttt{git diff} at termination; residual stylistic drift surfaces as
+trajectory failure under the same cost formula.
+
+\subsection{Dynamic SWE-bench scoring}
+\label{sec:dynamic-scoring}
+
+The dynamic track is scored independently from the static proxy. A dynamic run
+executes SWE-bench Verified instances end-to-end using
+\texttt{mini-swe-agent}~v2.2.8 as the agent harness; at each LLM call the
+router selects a concrete model id from the locked pool. Per-step cost uses the same
+four-bucket formula, but $p$ values are live per-model OpenRouter prices
+(Appendix~\ref{app:pricing}) and token buckets come from provider usage logs
+normalized to \texttt{input}, \texttt{cache\_read}, \texttt{cache\_write}, and
+\texttt{output}. Let $A_j=\sum_{i\in\tau_j} c_i(m_i)$ denote the realized API
+cost on instance $j$, where $m_i$ is the model selected at step $i$, and let
+$\mathrm{resolved}_j\in\{0,1\}$ follow the official SWE-bench predicate. The
+per-instance leaderboard bill is
+\[
+\mathrm{bill}_j = A_j + (1-\mathrm{resolved}_j)\,\gamma,
+\]
+where $\gamma$ is a fixed USD add-on per unresolved instance (release default
+$\gamma{=}0.60$, set slightly above the observed per-instance average API
+cost of the unrouted Opus~4.6 baseline, \$0.55). We model $\gamma$ as the
+per-case price of a hypothetical perfect solver that resolves any SWE-bench
+instance; this applies uniformly to
+every policy including the unrouted baseline, so the leaderboard bill reflects
+both realized API cost and the remediation cost of failures. Resolved
+instances incur only $A_j$. The leaderboard sort key (lower is better) is $\sum_j \mathrm{bill}_j$
+(\texttt{total\_leaderboard\_bill\_usd}); \texttt{total\_router\_cost\_usd}
+and \texttt{total\_penalty\_cost\_usd} report the API cost and penalty cost
+portions separately. Instances excluded as infra failures (optional flag in the scorer)
+carry no add-on in headline totals. Static and dynamic scores are never
+averaged: the static track covers five workloads while the dynamic track covers
+SWE-bench Verified only.
+
+\subsection{Baselines}
+\label{sec:baselines}
+
+We report initial static reference points: SR-KNN~\citep{liu2026vllmsemanticrouter}, an in-sample
+1-nearest-neighbor upper bound over question-bank embeddings; ClawRouter~\citep{clawrouter}, an
+open rule-based router with LLM fallback disabled; and
+UncommonRoute~\citep{uncommonroute}, a public rule-based router whose
+upstream defaults we adopt as the rule-based baseline; the trained variant
+below is trained on top of its interface. Predictions are produced offline
+and scored by the public grader. We also run Claude Opus 4.6 as a separate
+LLM-as-router diagnostic with \texttt{max\_tokens}$=1$ and prompt caching;
+malformed non-digit responses count as errors.
+
+For the trained UncommonRoute variant, we train only the routing policy,
+not the underlying language models. The latest user request is encoded
+with a frozen \texttt{BAAI/bge-small-en-v1.5} sentence embedding and
+concatenated with routing-time metadata (message count, tool-call
+presence, tool-message count, request length, code/question indicators).
+A multinomial logistic regression classifier with L2 regularization is
+trained on the training split, with regularization strength selected by
+5-fold cross-validation; the embedding model is not fine-tuned. A
+separate calibration split fits confidence parameters, and performance
+is reported on a held-out split not used for training or calibration
+(Table~\ref{tab:dynamic-heldout}). The appendix gives the rule-based
+configuration; the release package contains the locked data and scoring
+code to reproduce all tables.

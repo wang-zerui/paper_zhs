@@ -1,0 +1,95 @@
+\section{Introduction}
+\label{sec:intro}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig1.pdf}
+\caption{Overview of TwinRouterBench. The benchmark provides a fast
+static track for offline router development and a live dynamic track
+for end-to-end validation. The static track covers 970 step-level rows
+from 520 instances across five workloads, each with an
+execution-verified target tier; the dynamic track runs routers on
+SWE-bench Verified with realized API cost.}
+\label{fig:overview}
+\end{figure}
+
+LLM routers select which model should handle each
+call~\citep{feng2024graphrouter,stripelis2024tensoropera}. In production
+multi-turn agents, each call carries a rich prefix---chat history, retrieved
+passages, shell logs, tool outputs, and partial code edits---and a cheaper
+choice at step $i$ may only fail downstream. Existing benchmarks evaluate
+routing on isolated one-shot prompts; they do not expose these prefixes or
+test whether a per-step decision breaks a later step.
+
+The expensive unit in modern applications is rarely a one-shot query. Coding
+agents solve GitHub issues through many rounds of exploration, patching, and
+verification \citep{jimenez2023swebench}; tool systems maintain state over
+serial and parallel calls \citep{patil2025bfcl}; retrieval and summarization
+workloads carry long multi-turn context
+\citep{katsis2025mtrag,zhong2021qmsum}. A cheap model may suffice for a file
+lookup, while a later patch-writing step may require the strongest tier. A
+useful step-level benchmark must cover these workloads, ground labels in
+execution outcomes rather than model-based judgement alone, and support both
+cheap deterministic offline scoring and end-to-end execution with realized
+API cost as the definitive validation. We therefore maintain two distinct
+tracks.
+
+RouterBench, LLMRouterBench, and RouterArena evaluate query-level routing on
+complete one-shot prompts
+\citep{hu2024routerbench,li2026llmrouterbench,lu2025routerarena}. Such a
+router can still be applied mid-trajectory by feeding the full conversation
+history as a single query, but its training and evaluation data are one-shot
+prompts, so neither tells us whether a cheap choice at step $i$ breaks a
+later step. We expose the full prefix a router observes before each LLM call (chat
+history, retrieved passages, tool outputs, shell traces, and code diffs)
+as a first-class input, and we verify each label by running the task to
+completion: if the trajectory still passes with the same number of steps
+after downgrading, we infer the replaced step was handled correctly.
+TRIM studies reasoning-step escalation in math
+\citep{kapoor2026trim}; our setting is agentic and multi-turn.
+
+Building such a benchmark faces two main challenges.
+First, using a frontier model as the router is unreliable: in our
+Claude Opus 4.6 diagnostic, a single-template LLM router predicts
+\texttt{high} for only 7 of 147 verified-\texttt{high} SWE-bench steps and
+fails every SWE trajectory.
+Second, multi-turn trajectories create combinatorial label complexity: with
+$n$ candidate models and $m$ steps, exhaustive verification requires $n^{m}$
+runs even when the trajectory length is fixed, because the prefix at step
+$i{+}1$ depends on the model chosen at step~$i$. Practical label
+construction must therefore approximate this space with
+affordable protocols.
+
+We introduce \textbf{TwinRouterBench}, a step-level routing benchmark with a
+fast static track for offline development and a live dynamic track for
+end-to-end validation.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=*, itemsep=1pt, topsep=2pt]
+\item \textbf{A fast static track for realistic routing supervision.}
+The static track covers the workloads where step-level routing pays off
+most (long-context, multi-turn, tool-use, RAG, summarization, and
+code-repair) and exposes the exact prefix a router observes before each LLM
+call. Its
+970 labels are execution-verified estimates under a fixed
+downgrade-and-cascade protocol with tier-pool cascade verification,
+mixed-prefix reconstruction, and manual audit on multi-step executable
+workloads. Scoring is deterministic arithmetic over labels, trajectory
+membership, and token costs: evaluation takes milliseconds and requires no
+online evaluator-side LLM judge. The same data also supports training; a
+logistic router trained on the static labels achieves the best cost--success
+trade-off among the policies we evaluate.
+\item \textbf{A live dynamic track for software-agent routing.}
+The dynamic harness supports the full 500-case SWE-bench Verified suite; this
+paper reports a 100-case held-out evaluation disjoint from the static SWE
+supervision split. At each LLM request the router selects a concrete model
+from a locked pool; scoring uses the official SWE-bench resolution predicate,
+realized provider spend, cache accounting, and a flat unresolved-instance
+penalty in the leaderboard bill (\S\ref{sec:dynamic-scoring}), with no
+evaluator-side LLM judge.
+\item \textbf{A two-track development and validation loop.}
+The static track provides cheap, trainable supervision for rapid iteration.
+The dynamic track tests whether the resulting policy survives live execution.
+We report them side by side so that offline and end-to-end evidence remain
+distinguishable.
+\end{itemize}

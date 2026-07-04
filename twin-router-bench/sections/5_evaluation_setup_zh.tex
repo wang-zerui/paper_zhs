@@ -1,0 +1,52 @@
+\subsection{静态评分协议}
+\label{sec:static-scoring}
+
+单条请求的层级标签，无法体现一个 $N$ 步轨迹在第 $k$ 步选错层级所带来的下游成本。我们以四个结合步级视角和轨迹级视角的指标来评估每个路由器：\textsc{RowPass}、\textsc{RowExact}、\textsc{TrajPass} 和 \textsc{CostSave}。前两个按记录计算。\textsc{TrajPass} 要求轨迹中每一个被路由的步骤均通过。\textsc{CostSave} 衡量相对于始终使用 \texttt{high} 基线的节省，但只对通过轨迹记入节省；失败轨迹上的 API 成本被视为已消耗的成本。详细推导见附录。
+
+令 $\hat{t}_i$ 为记录 $i$ 已发布的目标层级，$\tilde{t}_i$ 为路由器预测。当 $\tilde{t}_i \ge \hat{t}_i$ 时，该记录通过；当 $\tilde{t}_i=\hat{t}_i$ 时，该记录精确匹配。只有每条被路由记录都通过时，一条轨迹才通过。令 $c_i(t)$ 为记录 $i$ 在层级 $t$ 下的层级计费成本，$T_3$ 表示 \texttt{high}。对于工作负载 $b$，始终使用 \texttt{high} 的账单为 $D_b=\sum_{i\in b} c_i(T_3)$。分子 $N_b$ 在轨迹层面累积：通过的轨迹贡献 $\sum_i[c_i(T_3)-c_i(\tilde{t}_i)]$；失败的轨迹贡献 $-\sum_i c_i(\tilde{t}_i)$。评分器报告
+\[
+\textsc{CostSave} = \sum_b w_b \frac{N_b}{D_b}, \qquad
+w_b = \frac{n_b}{970},
+\]
+其中 $n_b$ 是工作负载 $b$ 中的记录数，因此在每个成本比率计算后，工作负载按记录数加权。始终使用 \texttt{high} 的策略按构造得到 $\textsc{CostSave}=0$，因为对于每个工作负载均有 $N_b=0$。
+
+\paragraph{主指标。}
+\[
+\begin{aligned}
+\textsc{Combined} = \tfrac{1}{4}(&\textsc{RowPass} +
+\textsc{RowExact} + \textsc{TrajPass} + \textsc{CostSave}).
+\end{aligned}
+\]
+这四个分量是主要报告单元；\textsc{Combined} 是在等权重下的一个单一运行点。我们在附录~\ref{app:cost-ablation}中通过消融说明考虑失败的成本计费是合理的。
+
+\paragraph{定价与 token 计费。}
+\texttt{high} 层级的成本比低层级高 10--50$\times$（附录表~\ref{tab:pricing}），因此朴素的逐步成本计费会高估保守路由器。这些是静态的层级常数；动态模型池的模型价格见附录~\ref{app:pricing}。提示词 token 被拆分为 \texttt{cache\_read}、\texttt{cache\_write} 和新输入 \texttt{input}；输出 token 从记录的转录文本中统计。token 计数尽可能使用提供商原生 tokenizer，并以 \texttt{cl100k\_base} 作为后备。对于记录 $i$ 和层级 $t$，评分器使用与真实 API 计费相同的四桶形式：
+\[
+c_i(t)=
+\frac{
+n_i^{\mathrm{in}}p_t^{\mathrm{in}}+
+n_i^{\mathrm{cr}}p_t^{\mathrm{cr}}+
+n_i^{\mathrm{cw}}p_t^{\mathrm{cw}}+
+n_i^{\mathrm{out}}p_t^{\mathrm{out}}
+}{10^6},
+\]
+其中 token 计数 $n_i^{\cdot}$ 和各层级费率 $p_t^{\cdot}$ 遵循附录表~\ref{tab:pricing}。静态评分器始终启用提示词缓存建模：在冷启动、层级切换、TTL 到期（5 分钟，与 Anthropic 等提供商的提示词缓存策略默认值一致）或前缀变化时，提示词 token 按 \texttt{cache\_write} 计费；在同层级有效前缀命中时按 \texttt{cache\_read} 计费；保留新输入项以匹配四桶的动态计费接口。
+
+\paragraph{计入路由特有的影响。}
+轨迹中途切换模型会带来三类常见担忧：层级切换时的缓存未命中、混合模型历史下的分布外行为，以及不同模型族之间的工具格式不匹配。我们的评估会为每一项计费，而不是假设它们无害。层级切换时的缓存写按\emph{进入}层级的费率收费（\texttt{high} 的 \texttt{cache\_write} 是其 \texttt{cache\_read} 的 $12.5\times$，见附录表~\ref{tab:pricing}），因此频繁切入昂贵层级的策略会按标价承担缓存写成本；动态赛道随后报告实际 OpenRouter 成本而非模拟成本。即便有这些切换，逐步选模型的路由器相对未路由的 Opus 仍将实际 API 成本降低 53.1\%（表~\ref{tab:dynamic-heldout}）。混合模型轨迹中的分布外行为由经执行验证的标签（\S\ref{sec:dataset-construction}）和考虑失败的分子处理：未解决轨迹需支付 API 成本及固定惩罚成本，因此 OOD 失败无法表现为节省。工具格式异质性（例如结构化的 \texttt{apply\_patch} 调用与交错的 \texttt{str\_replace\_editor} 修改）由共享的 \texttt{mini-swe-agent} harness 收敛处理；该 harness 在终止时通过 \texttt{git diff} 得到每个最终补丁，残余的风格偏差将在同一成本公式下表现为轨迹失败。
+
+\subsection{动态 SWE-bench 评分}
+\label{sec:dynamic-scoring}
+
+动态赛道独立于静态代理评分。一次动态运行以 \texttt{mini-swe-agent}~v2.2.8 作为智能体 harness，端到端执行 SWE-bench Verified 实例；每次 LLM 调用中，路由器从锁定池中选择一个具体模型 ID。逐步成本使用同一四桶公式，但 $p$ 的值是实时的逐模型 OpenRouter 价格（附录~\ref{app:pricing}），而 token 桶来自归一化为 \texttt{input}、\texttt{cache\_read}、\texttt{cache\_write} 和 \texttt{output} 的提供商用量日志。令 $A_j=\sum_{i\in\tau_j} c_i(m_i)$ 表示实例 $j$ 的实际 API 成本，其中 $m_i$ 是第 $i$ 步选择的模型，$\mathrm{resolved}_j\in\{0,1\}$ 遵循官方 SWE-bench 谓词。每个实例的排行榜账单为
+\[
+\mathrm{bill}_j = A_j + (1-\mathrm{resolved}_j)\,\gamma,
+\]
+其中 $\gamma$ 是每个未解决实例固定增加的美元成本（发布默认 $\gamma{=}0.60$，略高于未路由 Opus~4.6 基线观测到的每实例平均 API 成本 \$0.55）。我们将 $\gamma$ 建模为一个假想完美求解器解决任意 SWE-bench 实例的每样例价格；它统一适用于包括未路由基线在内的所有策略，因此排行榜账单同时反映实际 API 成本和失败后的补救成本。已解决实例只产生 $A_j$。排行榜排序键（越低越好）是 $\sum_j \mathrm{bill}_j$（\texttt{total\_leaderboard\_bill\_usd}）；\texttt{total\_router\_cost\_usd} 和 \texttt{total\_penalty\_cost\_usd} 分别报告 API 成本与惩罚成本。作为基础设施失败排除的实例（评分器中的可选标志）不在主结果中附加成本。静态与动态评分从不取平均：静态赛道覆盖五类工作负载，动态赛道只覆盖 SWE-bench Verified。
+
+\subsection{基线}
+\label{sec:baselines}
+
+我们报告初始的静态参考点：SR-KNN~\citep{liu2026vllmsemanticrouter}，即基于题库嵌入的样本内 1-最近邻上界；ClawRouter~\citep{clawrouter}，一个禁用 LLM 后备的开放规则路由器；以及 UncommonRoute~\citep{uncommonroute}，一个公开的规则路由器，我们将其上游默认配置作为规则基线；下文的训练变体在其接口之上训练。预测均在离线生成，并由公开评分器打分。我们还以 \texttt{max\_tokens}$=1$ 和提示词缓存运行 Claude Opus 4.6，作为单独的 LLM-as-router 诊断；格式错误的非数字响应被计作错误。
+
+对于训练的 UncommonRoute 变体，我们只训练路由策略，而不训练底层语言模型。最新用户请求由冻结的 \texttt{BAAI/bge-small-en-v1.5} 句子嵌入编码，再与路由时元数据（消息数量、是否有工具调用、工具消息数量、请求长度、代码/问题指示符）拼接。带 L2 正则的多项逻辑回归分类器在训练切分上训练，正则强度通过 5 折交叉验证选择；嵌入模型不进行微调。独立的校准切分拟合置信度参数，并在未用于训练或校准的留出切分上报告性能（表~\ref{tab:dynamic-heldout}）。附录给出规则配置；发布包包含锁定的数据与评分代码，能够复现全部表格。
