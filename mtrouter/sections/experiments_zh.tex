@@ -1,0 +1,107 @@
+我们在两个具有挑战性的多轮基准上评测 \method，并分析学习到的路由模式。除非另有说明，每个实验均重复三次并报告均值。匿名代码仓库见 \github。
+
+\subsection{实验设置}
+
+\paragraph{基准。}
+我们在两个多轮基准上评测：\textbf{ScienceWorld}~\citep{wang2022scienceworld} 和 \textbf{HLE（Humanity's Last Exam）}~\citep{phan2025humanitysexam}。ScienceWorld 是一个要求程序化科学推理的文本交互环境，其终止得分为 $S_{\text{final}} \in [-100, 100]$。HLE 是跨学术领域的长上下文基准，问题需要借助工具进行多步推理，成功为二元结果。我们同时考察分布内（ID）和分布外（OOD）切分。我们并非依靠随机重采样，而是通过为 OOD 留出完整任务类型/学科类别，构建与训练和 ID 测试语义不相交（无重叠）的评测。对于 ScienceWorld，我们使用 13 个任务类型作为 ID，并留出 12 个任务类型作为 OOD；完整任务类型切分见表~\ref{tab:sw_tasks}。在 ID 任务类型内，我们进一步将任务\emph{变体}以 60\%/20\%/20\% 切分为训练/验证/测试（附录~\ref{app:data}）。对于 HLE，我们使用 6 个学科类别作为 ID，并留出 2 个类别作为 OOD；详细类别切分见表~\ref{tab:hle_categories}。我们通过将基准的测试问题划分到选定的学科组来报告 ID 与 OOD 性能（表~\ref{tab:hle_categories}）。
+
+\paragraph{工具配置。}
+对于 HLE，我们遵循 \texttt{TongYi-DeepResearch}~\citep{team2025tongyi} 的工具使用设置，启用四种工具：\texttt{search}、\texttt{browse}、\texttt{python} 和 \texttt{answer}。\texttt{search} 使用 Serper 的 Google Search API；\texttt{browse} 获取网页内容（启用时通过 Jina Reader），并可选择性地摘要长网页以控制上下文长度（附录~\ref{app:prompts:browse}）；\texttt{python} 支持确定性计算，\texttt{answer} 用于提交最终响应。ScienceWorld 不需要外部网页工具；智能体每一轮通过单条文本动作命令与模拟器交互，并使用内置查询命令（如 \texttt{?navigation}、\texttt{?object}）枚举有效动作。工具 schema 在运行时注入 HLE 系统提示词，列于附录~\ref{app:tool_schemas}。
+
+\paragraph{错误检测。}
+我们从环境观察中检测错误，以计算训练时退火错误成本。表~\ref{tab:error_categories}按基准汇总错误类别。HLE 错误涵盖格式违规、Python 执行失败和工具特定问题；ScienceWorld 只惩罚无法解析的动作（“door is not open”之类的环境反馈属于正常探索，而非错误）。严重程度（高/中/低）决定 AEC 计算中的惩罚系数。完整规则规范见附录~\ref{app:error_rules}。除非另有说明，全文使用高=1.0、中=0.8、低=0.2 的严重程度系数。
+
+\input{tables/error_categories_zh}
+
+\paragraph{模型池。}
+我们使用跨越 $20\times$ 成本区间的 6 个前沿 LLM 进行评测（见表~\ref{tab:model_pool}）。
+
+\input{tables/model_pool_zh}
+
+\paragraph{实现细节。}
+我们使用 AdamW 优化器（学习率 $10^{-3}$、权重衰减 0.01）和余弦退火训练 100 个 epoch，并采用早停（patience=3）。批量大小为 64。我们使用冻结的 \texttt{Qwen/Qwen3-Embedding-0.6B} 编码器对历史编码，它产生 1024 维嵌入，并将最大输入长度设为 8192 token。模型编码器将 8 维元数据特征向量映射为 32 维属性嵌入，与 16 维逐模型残差嵌入拼接后，通过线性投影得到 64 维模型嵌入。为防止过早收敛，我们对可学习残差嵌入施加 $L_2$ 惩罚（$\lambda=0.001$）。对于式~\ref{eq:error}中的错误惩罚，我们使用 $p_0{=}0.3$、$p_1{=}0.7$、$w_{\min}{=}0.3$ 和 $w_{\max}{=}1.0$ 的分段线性 warmup 实例化进度权重 $w(\cdot)$（附录~\ref{app:error_rules}）。评测时，ScienceWorld 的最大时程为 50 步，HLE 为 30 步，两个基准的每条 episode 成本上限均为 \$2.0。
+
+\input{tables/combined_results_zh}
+
+\paragraph{基线。}
+我们比较三组基线：
+\begin{itemize}[nolistsep, noitemsep, leftmargin=*]
+\item \textbf{单模型}：模型池中的每个候选模型独占处理完整 episode。
+\item \textbf{单轮路由器（episode 级）}：\textbf{RouterDC}~\citep{chen2024routerdc}、\textbf{EmbedLLM}~\citep{wang2024embedllm} 和 \textbf{AvengersPro}~\citep{zhang2025avengers, zhang2025beyond}。这些路由器根据初始查询上下文在 episode 开始时作出一次路由决策，再在其余轮次保持所选模型不变。
+\item \textbf{多轮路由器（轮级）}：\textbf{随机路由器}（每轮均匀随机选择）、\textbf{Router-R1}~\citep{zhang2025router}（按 Router-R1 方案训练 \texttt{Qwen2.5-7B-Instruct} 路由模型）、\textbf{LLM 路由器}（与 Router-R1 使用相同提示词，但直接以 \texttt{DeepSeek-V3.2} 作为路由模型、不训练），以及 \textbf{OpenRouter}~\citep{openrouter}（经由 OpenRouter 自动路由 API 的代表性商用路由器）。纳入 OpenRouter 是为了将 \method 与现成的生产路由系统置于同一语境；但其路由 API 不允许我们定制候选模型池，且它从远大于固定 6 模型设置的池中选择（附录~\ref{app:openrouter}）。
+\end{itemize}
+
+\subsection{MTRouter 有效吗？}
+\label{sec:main_results}
+表~\ref{tab:combined_results}展示 MTRouter 与其他基线在分布内（测试）和分布外（OOD）上的结果。
+
+\paragraph{测试集。}
+在 ScienceWorld 上，\method 获得最高平均得分（53.8），同时相对 GPT-5 将总成本降低 58.7\%；相较 Router-R1，它得分提高 +11.7 点，且总成本低 54.4\%。每条 episode 固定一个模型的 episode 级（单轮）路由器始终落后，支持了如下必要性：在阶段与错误会随时间演化的交互设置中，需要\emph{多轮}路由。值得注意的是，OpenRouter 在 ScienceWorld 上产生负分，因为它低估任务难度，过度依赖轻量模型（附录~\ref{app:openrouter}）。在 HLE 上，MTRouter 取得最高准确率（26.0\%），并保持成本效率（相对 GPT-5 总成本低 43.4\%，相对 Router-R1 低 32.7\%）；Router-R1 和 LLM 路由器达到相近准确率，但成本更高。总体而言，\method 在两个基准上均比强单模型基线和既有路由基线获得更优的准确率--成本权衡。
+
+\input{tables/ablation_zh}
+
+\paragraph{OOD。}
+接下来考察表~\ref{tab:combined_results}的 OOD 列，它评测语义分布偏移（留出的 ScienceWorld 任务类型和 HLE 学科类别）。在 ScienceWorld OOD 上，\method 比 GPT-5 高 +5.0 点，同时总成本低 65.8\%；在 HLE OOD 上，它达到 38.57\% 准确率，且总成本比 GPT-5 低 52.3\%。这些结果表明，\method 不仅能在分布偏移下泛化，也能保持成本效率，并在所比较方法中建立最强的整体表现。
+
+\paragraph{消融研究。}
+表~\ref{tab:ablation}汇总 ScienceWorld 与 HLE 上的消融。当以更简单的回归器替换 MLP、移除随机路由器数据或移除错误惩罚调整时，性能均下降，表明每个组件都有助于从离线轨迹中学习可靠的路由偏好。最大的性能下降来自移除路由历史，或以硬编码特征替换学习到的模型编码器，突出了同时建模演化的交互上下文和模型行为的重要性。我们使用 Ridge 作为标准的正则化线性基线，以检验性能收益是否来自非线性建模，而非仅来自特征构造。关于预算敏感性、候选池大小和历史 token 预算的额外稳健性检查见附录~\ref{app:more_experiments}。
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\columnwidth]{figures/cost_switches.pdf}
+\caption{成功 episode 中的累计成本与累计模型切换次数：比较 ScienceWorld 和 HLE 上的 \method 与 Router-R1（通过重放记录的轨迹构建）。}
+\label{fig:cost_switches}
+\vspace{-1.0em}
+\end{figure}
+
+\subsection{\method 为什么有效？}
+\label{sec:analysis}
+尽管分布内和分布外结果（表~\ref{tab:combined_results}）以及消融（表~\ref{tab:ablation}）证明了 \method 的有效性，接下来我们提出一个更具诊断性的问题：它为何有效？我们采用一系列互补分析，将性能收益与具体的路由行为联系起来。
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\columnwidth]{figures/error_switch_recovery.pdf}
+\caption{错误触发的切换与恢复。\textbf{左：}错误（格式错误/无效动作）后切换模型的概率。\textbf{右：}以错误为条件时，下一轮恢复（无错误）的概率。}
+\label{fig:error_switch_recovery}
+\vspace{-1.0em}
+\end{figure}
+
+\paragraph{从简单诊断开始：切换与成本。}
+若多轮路由“只是更频繁地切换”，那么频繁切换的路由器应当占优。我们发现事实相反。图~\ref{fig:cost_switches}在\emph{成功}episode 上绘制：随着路由器进行额外模型切换，累计 API 成本如何增长。每条曲线均由重放 \method 和 Router-R1 的记录轨迹构建，沿 episode 累积逐轮成本并计数切换。尽管 \method 获得更好的最终性能（表~\ref{tab:combined_results}），其轨迹通常以\emph{更少}切换和\emph{更低}累计成本取得成功（例如 ScienceWorld 上：\method 约 5 次切换，Router-R1 约 20 次）。
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/model_usage_by_turn.pdf}
+\caption{ScienceWorld 和 HLE 上按轮次划分的模型使用。\method 呈现结构化、基准特定的路由行为，而不是在各轮均匀切换模型。在 HLE 中，GPT-OSS-120B 主要用于早期轮次，随后在后期衰减至近零，因此其带状区域在视觉上不易察觉。}
+\label{fig:phase_usage}
+\vspace{-1.0em}
+\end{figure}
+
+\begin{figure*}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/action_by_model_combined.pdf}
+\caption{按模型划分的工具/动作专长，以\emph{提升度}衡量（$\mathrm{Lift}=P(\text{model}\mid \text{tool})/P(\text{model})$）。数值 $>1$ 表示模型在某工具/动作上占比过高（专长），数值 $<1$ 表示使用不足。}
+\label{fig:action_by_model}
+\vspace{-1.0em}
+\end{figure*}
+
+除逐 token 定价差异外，多轮设置中的频繁切换也会降低提示词缓存的有效性，降低缓存命中率并提高长历史服务的有效成本~\citep{hu2025hands}。这立即引出一个更具体的问题：Router-R1 何时选择切换，这些切换是否确有帮助？
+
+\paragraph{通过更能容忍错误来减少切换。}
+图~\ref{fig:error_switch_recovery}显示，Router-R1 在错误后激进切换，而 \method 的反应性较低：它常保持当前模型并尝试继续。关键在于，这并非“忽略”错误：右图显示 \method 在下一轮恢复的概率更高。与之相符，发生错误后，\method 在 ScienceWorld 上约 90.2\% 的时间、在 HLE 上约 80.9\% 的时间保持同一模型，显著高于 Router-R1（分别为 38.3\% 和 66.4\%）。结合图~\ref{fig:cost_switches}，这些趋势表明 \method 避开了很大一部分看似低收益的、由错误触发的切换，从而在不牺牲性能的前提下控制累计成本。我们推测该差异源自学习信号：Router-R1 主要依靠自然语言路由提示来推断切换何时有帮助，而 \method 直接在轨迹结果（终止得分加退火错误惩罚）上训练，为有效切换提供了更直接的监督。
+
+\paragraph{并非“永不切换”，而是结构化地切换。}
+人们可能担心上述结果只反映一个极少换模型的保守路由器。图~\ref{fig:phase_usage}排除了这一可能：\method 在整条 episode 中使用多个模型，但呈现稳定、基准特定的方式，而非将切换作为对错误的条件反射。这表明路由器学习的是一种\emph{策略}（依赖哪些模型、何时依赖），而不只是通用的“失败就升级”启发式。例如，在 ScienceWorld 上，GPT-5 占早期轮次的 50.8\%，而 GPT-OSS 在最后轮次升至 24.3\%；相比之下，Router-R1 在各阶段大致各以 $\sim$45\% 的比例集中于 DeepSeek 和 Gemini，表现出结构化多样性明显更弱的模式。
+
+\paragraph{策略的一种具体形式：涌现专长。}
+为使这种结构显式化，图~\ref{fig:action_by_model}测量\emph{提升度}：模型相对其总体频率在某工具/动作上被过度使用的程度。我们观察到明显、与互补能力一致的专长模式（提升度 $>1$）：例如在 HLE 中，DeepSeek 在 \texttt{search} 上被过度使用（提升度 1.66），GPT-5 在 \texttt{python} 上为 1.51，Kimi 在 \texttt{browse} 上为 1.98。在 ScienceWorld 上，我们也观察到跨动作类型的类似专长，如 MiniMax 在观察密集型动作上为 1.62，Gemini 在对象交互上为 1.58，GPT-OSS 在查询命令上为 1.81。这些发现联系回主结果：\method 的胜因不是更多切换，而是\emph{有选择地}切换，并在 episode 过程中为模型分配稳定角色。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/model_embeddings.png}
+\caption{模型编码器所学模型嵌入的 t-SNE 可视化。嵌入按身份区分模型，并形成清晰的成本层级结构；低成本模型（如 GPT-OSS、Gemini）与高成本前沿模型（如 GPT-5）分离。}
+\label{fig:model_embeddings}
+\end{figure}
+
+\paragraph{学习到的模型嵌入。}
+图~\ref{fig:model_embeddings}可视化训练后的学习模型嵌入。编码器学会区分候选模型，并按成本层级组织它们，说明它捕获了超越原始属性的、有意义的能力--成本结构。

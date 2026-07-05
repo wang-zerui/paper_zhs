@@ -1,0 +1,78 @@
+\subsection{问题形式化}
+\label{sec:formalization}
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=\linewidth]{figures/main-figure.pdf}
+\caption{\method 概览。}
+\label{fig:method_overview}
+\vspace{-1.0em}
+\end{figure*}
+
+单轮（episode 级）路由在 episode 开始时作出一次模型选择，并始终保持不变。我们研究\emph{多轮}模型路由，其中模型选择可随时间变化。一条 episode 由以 $t$ 为索引的轮次组成。在每一轮，路由器选择模型 $a_t \in \mathcal{A}$ 来生成智能体的下一个输出（路由器本身也可以由 LLM 实现）。一个\textbf{轮次}是一轮交互，且恰好包含一次对所选模型的调用：给定\textbf{历史} $h_t$（任务描述、对话上下文和最新观察），所选模型产生 $y_t \sim p_{a_t}(\cdot \mid h_t)$，\textbf{解析器}将 $y_t$ 映射为可执行动作 $u_t=\text{parse}(y_t)$；执行 $u_t$ 得到下一条观察 $o_{t+1}$。
+
+当任务完成（由环境或智能体提交指示）、达到轮数上限，或成本预算耗尽时，episode 结束。环境提供终止得分 $S_{\text{final}}$。
+
+\paragraph{目标。}
+我们在每条 episode 的成本预算下优化任务性能：
+\begin{equation}
+\max \; \mathbb{E}\left[S_{\text{final}}\right] \quad \text{s.t.} \quad \sum_{t=0}^{T-1} c_t \le B
+\label{eq:objective}
+\end{equation}
+其中 $c_t$ 是第 $t$ 轮成本（由 token 使用量和模型定价计算），$B$ 是每条 episode 的成本预算，$T\le T_{\max}$ 是 episode 长度（受最大轮数上限约束）。当预算耗尽或达到轮数上限时，episode 终止。
+
+\subsection{联合历史--模型表征}
+\label{sec:representations}
+
+路由决策既取决于交互历史，也取决于所选模型（即二元组 $(h_t,a_t)$）。因此，我们分别嵌入历史和候选模型，再将它们组合为路由器使用的联合表征。
+
+\paragraph{历史编码。}
+我们将路由历史表示为任务块加上累积交互上下文。具体而言，使用固定模板序列化每个示例：
+\begin{equation}
+{\textstyle h_t = [q,\langle u_0,o_1\rangle,\ldots,\langle u_{t-1},o_t\rangle]}
+\end{equation}
+实现时，我们不保留固定数量的历史轮次 $K$。相反，我们采用最大长度 8192 token 的 token 预算截断：始终保留任务块，在剩余预算内保留最新交互上下文，并首先截断最早上下文。随后，冻结的文本编码器 $\phi$ 对序列化历史编码，得到 $z_x=\phi(h_t)\in\mathbb{R}^d$。
+
+\paragraph{模型编码。}
+每个候选模型 $a \in \mathcal{A}$ 由可学习嵌入 $z_a=\psi(a)$ 表示；它结合 (i) 结构化属性向量 $\text{attr}_a$（包括上下文长度上限、知识截止日期和定价），以及 (ii) 捕获元数据无法解释的模型特定行为的可学习残差 $e_a$。最终模型嵌入通过线性投影拼接这些成分：
+\begin{equation}
+z_a = W_{\text{proj}} \cdot [\text{MLP}(\text{attr}_a); e_a] + b_{\text{proj}}
+\end{equation}
+其中 $e_a$ 是经正则化以防止过拟合的残差嵌入。
+
+\paragraph{联合表征。}
+我们通过拼接两个嵌入构成联合特征向量 $[z_x;z_a]$，并将其输入共享前馈骨干网络，以支持模型条件化预测。为高效地对多个候选项打分，我们只对当前历史计算一次 $z_x$，再将其批量地与每个候选模型嵌入拼接。
+
+\subsection{学习结果估计器}
+\label{sec:learning}
+
+我们学习结果估计器 $\hat{s}_\theta(h_t,a)$，将历史--模型对 $(h_t,a)$ 映射为在第 $t$ 轮选择模型 $a$ 时的期望终止结果。我们将 $\hat{s}_\theta$ 参数化为轻量前馈网络（采用 ReLU 非线性和可选 dropout 的 MLP）；它接收联合表征 $[z_x;z_a]$ 并输出单个标量：
+\begin{equation}
+\hat{s}_\theta(h_t,a)=f_\theta([z_x;z_a])\in\mathbb{R}.
+\end{equation}
+我们用终止结果而非稠密的逐轮奖励监督该估计器，原因有二：(i) 在复杂智能体环境中，忠实的中间奖励通常不可得；(ii) 为稠密反馈训练稳定的奖励模型可能很脆弱。在我们的设置中，episode 同时受成本预算 $B$ 和最大轮数 $T_{\max}$ 约束，因此昂贵选择和浪费轮次（例如触发重试的错误）已反映在记录的终止得分中；我们因而不为目标额外加入单独的成本惩罚。
+
+\paragraph{带错误惩罚的结果目标。}
+对于已记录轨迹的每一轮，我们通过以累计错误惩罚调整终止得分 $S_{\text{final}}$，构成一个轮次条件化目标。具体而言，我们从轨迹日志中检测错误（例如无效动作、解析/格式违规），并按严重程度和轮次进度进行惩罚：
+\begin{align}
+    \label{eq:error}
+\tilde{S}_t &= S_{\text{final}} - \sum_{i=t}^{T-1} \rho_i, \\
+\rho_i &= \mathbf{1}[\mathcal{E}_i\neq\emptyset]\cdot \beta_{\mathrm{sev}(\mathcal{E}_i)}\cdot w\!\left(\tfrac{i+1}{T_{\max}}\right),
+\end{align}
+其中 $\mathcal{E}_i$ 是第 $i$ 轮检测到的错误类型集合，$\mathrm{sev}(\mathcal{E}_i)$ 取该轮错误中的最高严重程度，$\beta$ 是相应的严重程度系数。进度权重 $w(\cdot)$ 单调递增（我们使用简单的分段线性日程），因此后期错误受到更强惩罚。这体现了一个简单的设计直觉：智能体仍在收集信息时，早期错误可能可恢复；而后期错误会更直接地危及任务完成，因此我们对接近 episode 末尾的错误施加更低容忍度。我们训练 $\hat{s}_\theta(h_t,a)$ 近似 $\mathbb{E}[\tilde{S}_t \mid h_t,a]$。
+
+\paragraph{训练目标。}
+我们在由随机路由器收集的离线轨迹上训练。对于轨迹 $k$ 中的每一步 $(h_t^{(k)}, a_t^{(k)})$，使用监督目标 $y^{(k)}_t=\tilde{S}^{(k)}_t$，并最小化平方误差损失：
+\begin{equation}
+\mathcal{L} = \sum_{k,t} \left( \hat{s}_\theta(h_t^{(k)}, a_t^{(k)}) - y^{(k)}_t \right)^2
+\end{equation}
+
+\paragraph{数据收集。}
+我们将每条 episode 记录为一条轨迹（一系列轮级元组），并从两个来源收集训练轨迹：(i) 在每一轮从模型池采样模型的\textbf{均匀（随机）路由器}；(ii) 在训练任务上由一个候选模型处理整条 episode 的\textbf{单模型}运行。随机路由器数据提供模型选择的广泛覆盖，单模型数据则以一致的逐模型行为锚定估计器。在两个基准上，离线训练集包含 1,291 个训练实例、29,693 条轨迹和 515,221 个总轮次，估计一次性收集成本约为 \$1,620。
+
+\paragraph{推理。}
+部署时，路由器选择预测结果最高的模型：
+\begin{equation}
+a_t^* = \arg\max_{a \in \mathcal{A}} \hat{s}_\theta(h_t, a),
+\end{equation}
+并在每条 episode 的预算 $B$ 和轮数限制 $T_{\max}$ 下执行（任一限制达到时终止）。
