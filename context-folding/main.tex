@@ -1,0 +1,389 @@
+\section{Introduction}
+Large language model (LLM) agents have shown remarkable capabilities in tackling complex, long-horizon problems that require extensive interaction with an environment, such as deep research~\citep{OpenAI2025a,Google2025b,Jin2025SearchR1TL,Wei2025BrowseCompAS,Li2025WebThinkerEL} and agentic coding~\citep{Jimenez2023SWEbenchCL,AnthropicClaudeCode2025,Wang2024OpenHandsAO}. 
+% Moreover, it has been argued that the length of tasks AI agents can complete has been \textit{increasing exponentially, with a doubling time of around 7 months}~\citep{METR2025a}.
+The length of tasks agents can complete is argued to be \textit{growing exponentially, with a doubling time of about 7 months}~\citep{METR2025a}.
+
+However, scaling LLM agents to even longer horizons is fundamentally constrained by the design of agentic frameworks~\citep{Yao2022ReAct}. 
+These frameworks linearly accumulate the entire interaction history (reasoning, tool calls, and observations) into a single, ever-expanding context, which incurs long-context challenges as horizons scale: (1) degraded performance, as LLMs struggle to utilize relevant information in exceedingly long contexts~\citep{Liu2023LostIT,Comanici2025Gemini2P,Leng2024LongCR}; and (2) poor efficiency, stemming from the quadratic scaling of attention mechanisms and the growing overhead of managing the KV-cache~\citep{Katharopoulos2020TransformersAR}.
+
+Existing approaches to scale long-horizon LLM agents largely fall into two classes: 
+(1) \textit{Summary-based methods}, which trigger a post-hoc summarization stage when the working context is full~\citep{OpenHands2025,Yu2025MemAgentRL,Qiao2025WebResearcherUU,Wu2025ReSumUL,Zhou2025MEM1LT,lu2025scaling}. While this compresses the context, it can abruptly disrupt the agent’s working context and reasoning flow, which may lead to sub-optimal results. 
+(2) \textit{Multi-agent systems}, which distribute tasks across specialized agents to manage context length~\citep{Zhao2024LongAgentSL,Zhang2024ChainOA,Anthropic2025c,Wong2025WideSearchBA}. Yet, these systems typically depend on handcrafted, problem-specific workflows that are difficult to generalize and resist end-to-end optimization. 
+
+
+In this paper, we propose \textbf{Context Folding}: an agentic mechanism that allows the model to actively manage its working context. 
+%Specifically, the agent manages context with two actions: a \texttt{branch} to creates a temporary sub-trajectory for a localized subtask; and a \texttt{return} it with a summary of the outcome, after which the intermediate steps within the branch are ``folded''—removed from the context—leaving only a concise summary from the \texttt{return} call. 
+Specifically, the agent manages its context using two special actions:
+(i) a \texttt{branch} action to create a temporary sub-trajectory for a localized subtask; and
+(ii) a \texttt{return} action to summarize the outcome and rejoin the main thread,
+after which the intermediate steps within the branch are ``folded''---removed from the context —leaving only a concise summary from the \texttt{return} call. 
+Figure~\ref{fig:example} illustrates this process on deep research and agentic coding tasks, where the agent offloads token-intensive actions (e.g., web search or codebase exploration) into branches and preserves only key findings and insights for high-level reasoning.
+Compared with existing methods, context folding enables an agentic approach to active context management, where the agent’s short-term context remains undisrupted and long-term context is automatically managed.
+% Compared with heuristic summarization, which discards details at arbitrary points, 
+% context folding can be viewed as a learnable summarization mechanism aligned with subtask boundaries. 
+% This ensures reasoning is preserved during execution and only compacted once its utility is realized, 
+% allowing reinforcement learning to assign rewards more effectively across completed subtasks.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/fold_example.png}
+    \vspace{-0.3cm}
+    \caption{Examples of context folding in long-horizon tasks: deep research (left) and agentic coding (right).}\label{fig:example}
+\end{figure}
+
+Based on the context-folding framework, we propose a novel end-to-end reinforcement learning algorithm for training LLM agents on complex, long-horizon tasks. 
+The key innovation is \textbf{FoldGRPO}, which augments the standard GRPO by incorporating (i) dynamic folded LLM contexts and (ii) dense, token-level process rewards that directly guide context folding behavior.
+Specifically, our RL algorithm teaches the model how to effectively decompose a problem into localized sub-tasks for branching, guided by an \textit{Unfolded Token Penalty} that discourages token-heavy operations in the main context. Furthermore, it learns to maintain focus within a sub-task via an \textit{Out-of-Scope Penalty}, and to preserve crucial information in its summaries to aid the final objective. 
+By mastering these skills, the agent can handle vastly longer interaction histories, allowing our framework to scale the agent's effective horizon and improve overall system efficiency.
+
+We evaluate our approach on two long-horizon benchmarks, BrowseComp-Plus~\citep{Chen2025BrowseCompPlusAM} and SWE-Bench Verified~\citep{Jimenez2023SWEbenchCL}, where our agent achieves strong performance with remarkable efficiency. 
+Despite using a compact 32K active token budget managed with maximum of 10 branches, our agent, the \textbf{Folding Agent}, achieves pass@1 scores of 62.0\% and 58.0\% respectively, surpassing baselines that require a massive 327K context window and significantly outperforming methods based on context summarization. 
+The effectiveness of our method is rooted in reinforcement learning, which provides absolute improvements of 20.0\% on BrowseComp-Plus and 8.8\% on SWE-Bench. 
+Further analysis reveals that our agent learns to invoke more tool calls and generate longer outputs to handle complex problems, and can scale to larger token budgets at inference time to tackle even more challenging tasks. 
+Together, these results indicate that learning to \textit{actively manage} context, rather than merely extending or heuristically compressing it, is a principled path toward scalable long-horizon agency.
+
+In summary, our contributions are threefold: 
+\begin{enumerate}[label=(\roman*),leftmargin=20pt]
+\item We introduce \textbf{Context Folding}, a mechanism that enables agents to actively manage their context and mitigate the challenge of linear history growth.
+\item We present \textbf{FoldGRPO}, a reinforcement learning framework with dynamic folded LLM contexts and dense process rewards that trains agents to effectively acquire the capability of context folding.
+\item We demonstrate promising performance on long-horizon benchmarks, highlighting our approach as a scalable and extensible path toward stronger LLM agents.
+\end{enumerate}
+
+
+
+\section{Methodology}
+% We introduce context folding to enable agentic context management for long-horizon tasks. Figure~\ref{fig:example} shows two examples of agent behavior, where the agent conducts token-heavy subtasks in sub-trajectories that are folded after the subtask is completed.
+
+\subsection{Vanilla Formulation}
+Given a question $q$, an agent generates a multi-turn interaction trajectory denoted as
+\begin{equation}
+    \tau := (a_1, o_1, a_2, o_2, \ldots, a_T, o_T),
+\end{equation}
+where $a_i$ is the LLM output at step $i$ (including \textit{reasoning} and \textit{tool call}), and $o_i$ is the corresponding tool-call result.
+% We write $\tau_{<i} = (\ldots, a_{i-1}, o_{i-1})$.
+The vanilla ReAct-style agent \citep{Yao2022ReAct} models the interaction as following,
+\begin{equation}
+   p^{\mathrm{ReAct}}_{\theta}(\tau \mid q) = \prod_{i\in[T]} \pi_{\theta}\big(a_i \mid q, (a_1,o_1,\ldots, a_{i-1}, o_{i-1})\big),
+\end{equation}
+which appends the entire interaction history to the context at each time of LLM generation. 
+However, in long-horizon agentic tasks like deep research and agentic coding, $\tau$ can accumulate rapidly due to extensive interactions and become prohibitively long which exceeds the working context limit.
+Also, when the context is expanding, the reasoning and instruction following capability of the model may drop, posing further challenges for the agent to complete the long-horizon task.
+
+
+
+\subsection{Our Method: Context Folding}
+To address the challenge, we introduce context folding, a mechanism that allows the agent to \textit{actively} manage its working context via \textit{branching and folding}. 
+Specifically, we design two tools that the agent can call for context management.
+Starting from a main thread to solve question $q$, it can:
+\begin{enumerate}[label=(\roman*),leftmargin=20pt]
+    \item \code{\textcolor{red}{branch}(description, prompt)}: \textit{branch from main thread to use a separate working context to complete a sub-task $q'$ for solving $q$}. 
+    Here \code{description} is a brief summary of the sub-task, and \code{prompt} is a detailed instruction for this branch. 
+    The tool returns a template message indicating that the branch was created. 
+    % Upon calling this tool, the agent context switches to only containing the \code{description}, the \code{prompt}, and the interaction accumulated afterwards, until the following \code{return} tool is called.
+    \item \code{\textcolor{blue}{return}(message)}: \textit{fold the context generated in this branch and return to the main thread}. The \code{message} describes the outcome of this branch.
+    Upon calling this tool, the agent context then switches back to the main thread, appended with the templated \code{message} from the branch.
+\end{enumerate}
+With these two tools, the agent can actively manage its context by (i) branching a separate working context to solve an independent sub-task, and (ii) folding the intermediate steps in the branch, and resuming back to the main thread by appending only the result of the branch.
+To put it formal, the context-folding agent is modeled as following,
+\begin{align}
+    p^{\text{Context Fold}}_{\theta}(\tau \mid q):= \prod_{i\in[T]} \pi_{\theta}\big(a_i\mid q, \mathcal{F}(\tau_{<i})\big).\label{eq: context fold model}
+    % \cdot \prod_{\mathcal{B}\in \text{branches}}\prod_{i'\in\mathcal{B}} \pi_{\theta}\big(a_{i'}\mid q'_{\mathcal{B}},\mathcal{F}_{\mathrm{sub}}(\tau_{<i'})\big)
+\end{align}
+Here $\tau_{<i} = (a_1,o_1,\ldots, a_{i-1}, o_{i-1})$ denotes the complete history of all the action-observation pairs before step $i$, 
+$\mathcal{F}$ is the context manager that folds the interaction history between \code{\textcolor{red}{branch}} and \code{\textcolor{blue}{return}} tool calls.
+We illustrate the process using the following example, where the context manager folds all the action-observation pairs in previous branches:
+\begin{align}
+\mathcal{F}\big(
+a_1, o_1,
+\textcolor{red}{a_2},
+\underbrace{\textcolor{red}{o_2}, a_3, o_3, \textcolor{blue}{a_4}}_{\displaystyle{\small\text{branch 1}}},
+\textcolor{blue}{o_4},
+\textcolor{red}{a_5},&
+\underbrace{\textcolor{red}{o_5}, a_6, o_6, a_7,o_7,\textcolor{blue}{a_8}}_{\displaystyle{\small\text{branch 2}}},
+\textcolor{blue}{o_8}, a_9, o_9, \textcolor{red}{a_{10}}, o_{10}
+\big) \\
+& \to
+\big(
+a_1, o_1, \textcolor{red}{a_2}, \textcolor{blue}{o_4}, \textcolor{red}{a_5}, \textcolor{blue}{o_8}, a_9, o_9, \textcolor{red}{a_{10}}, o_{10}
+\big),
+\end{align}
+so the segments between $\textcolor{red}{a_2}$ and $\textcolor{blue}{a_4}$ and between $\textcolor{red}{a_5}$ and $\textcolor{blue}{a_8}$ are folded.
+ 
+\textbf{Inference efficiency.} 
+During inference, the agent manages a context KV-cache: when \textcolor{blue}{\code{return}} action is called, it rolls back the KV-cache to the corresponding \textcolor{red}{\code{branch}} position, where the context prefix matches that before calling the \textcolor{red}{\code{branch}} action.
+This makes our context folding approach efficient in terms of inference.
+
+\textbf{Instantiation: plan-execution.}
+To instantiate context folding for long-horizon tasks, we adopt a \textit{plan–execution} framework, where the agent alternates between two states:  
+\textit{(i) Planning State}: The agent performs high-level reasoning in the main thread, decomposes the task, and decides when to initiate a branch for a sub-task. 
+In this state, token-intensive tool use is discouraged to keep the main context focused on high-level strategies.
+\textit{(ii) Execution State}: The agent operates within an active branch to complete its assigned sub-task. To maintain a clear structure and prevent nested complexity, creating new branches is disabled while in execution state.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/model_main.png}
+    \vspace{-0.5cm}
+    \caption{\textbf{(a) Context Folding:} a mechanism that enables the agent to actively manage its context through branching and return. \textbf{(b) FoldGRPO:} end-to-end optimization of context folding agent.}
+    % \miao{Update the GRPO-Fold caption here. Also maybe less bold font?}}
+    \label{fig:model-main}
+\end{figure}
+
+\subsection{FoldGRPO: End-to-End RL for Context-Folding Agent}
+To optimize the context folding agent, in this section, we introduce an end-to-end RL training framework, namely, \underline{Fold}ed-context \underline{G}roup \underline{R}elative \underline{P}olicy \underline{O}ptimization (FoldGRPO). 
+FoldGRPO jointly optimizes the entire interaction trajectory including the main thread and those sub-task branches, while it folds the rollout history according to the context folding modeling \eqref{eq: context fold model} to maintain \textit{a compact working context} during training.
+Moreover, FoldGRPO features a novel \textit{process reward design} to efficiently guide the training of the branching behavior of the agent. 
+We first introduce the overall algorithm design in Section~\ref{subsubsec: overall} and we present the process reward design in Section~\ref{subsubsec: prm}.
+
+
+
+\subsubsection{Overall Algorithm Design}\label{subsubsec: overall}
+% We introduce an end-to-end reinforcement learning (RL) framework to optimize agent on long-horizon tasks. 
+In each training step of FoldGRPO, for task $q$ from training dataset $\mathcal{D}$, $G$ trajectories $(\tau_1, \tau_2, \cdots, \tau_G)$ are sampled from the old policy $\pi_{\text{old}}$ according to the context folding model \eqref{eq: context fold model}.
+Each complete trajectory, e.g., $\tau_i = (a_{i,1}, o_{i,1}, \cdots,a_{i,T},o_{i,T})$, is a sequence of tokens defined as $\tau_i = [\tau_{i,1}, \cdots, \tau_{i,|\tau_i|}]$.
+Each trajectory $\tau_i$ has a final reward $R_i \in \{0, 1\}$, following the recipe of RL from verifiable rewards (RLVR).
+
+
+\textbf{Learning objective.}
+The learning objective of FoldGRPO is defined as:
+\begin{equation}\small
+\mathcal{J}_{\text{FoldGRPO}} = \mathbb{E}_{\substack{q\sim \mathcal{D},\\ \{\tau_i\}_{i=1}^{G}\sim \pi_{\text{old}}(\cdot|q)} }
+\left[
+\frac{1}{\sum_{i=1}^{G} |{\tau}_i|}
+\sum_{i=1}^{G} \sum_{t=1}^{|{\tau}_i|}
+\min\Big\{
+r_{i,t}(\theta) \widehat{A}_{i,t},
+\ \mathrm{clip}\big(r_{i,t}(\theta), 1-\epsilon_{\text{low}}, 1+\epsilon_{\text{high}}\big)\widehat{A}_{i,t}
+\Big\}
+\right],
+\end{equation}
+where the importance sampling ratio and the group relative advantage estimator \citep{shao2024deepseekmath} are given by
+\begin{equation}
+r_{i,t}(\theta) =
+\frac{\pi_{\theta}({\tau}_{i,t}\mid q, \mathcal{\textcolor{red}{F}}({\tau}_{i, <t}))}
+     {\pi_{\theta_{\text{old}}}({\tau}_{i,t}\mid q, \mathcal{\textcolor{red}{F}}({\tau}_{i, <t}))}\cdot
+     \mathbf{1}_{\tau_{i,t}}^{\mathrm{LLM}},
+\quad
+\widehat{A}_{i,t} =
+\frac{\mathrm{clip}(R_i + \textcolor{red}{Q_{i, t}}, 0, 1) - \mathrm{mean}(\{R_i\}_{i=1}^{G})}
+     {\mathrm{std}(\{R_i\}_{i=1}^{G})}.
+\end{equation}
+Here $\mathbf{1}_{\tau_{i,t}}^{\mathrm{LLM}}$ ensures that only those LLM generated tokens are optimized and the tokens from tool observations are masked.
+In the following, we explain two key features of FoldGRPO highlighted in red.
+
+\begin{enumerate}[label=(\roman*),leftmargin=20pt]
+\item \textbf{Context folding.}
+Unlike vanilla multi-turn LLM RL algorithms that append the entire interaction history to context when optimizing the policy, FoldGRPO
+applies context manager $\mathcal{F}(\cdot)$ to the history ${\tau}_{i,<t}$ which folds the context for token ${\tau}_{i,t}$ based on the branch-return actions.
+
+\item \textbf{Process reward signal.}
+In the calculation of advantage $\widehat{A}_{i,t}$, a token-level process reward $Q_{i,t}$ is added to regularize the model’s branch-return behavior, which is detailed in the next section.
+\end{enumerate}
+
+\subsubsection{Process Reward Design}\label{subsubsec: prm}
+
+In RLVR, the agent is typically optimized through a standard binary \textit{outcome reward} based on task success or failure.
+However, we empirically observe that this sparse reward signal is insufficient for learning effective context folding. 
+Specifically, two critical failure modes emerge:
+(i) The agent fails to plan strategically, leaving token-intensive operations unfolded in the main context, which quickly exhausts the available token budget.
+(ii) The agent struggles with proper branch management, often failing to return from a sub-branch after a sub-task is completed and instead continuing the subsequent work within that same branch.
+To effectively optimize the folding agent, we introduce token-level process rewards separately to main-trajectory tokens and branch-trajectory tokens.
+
+\noindent \textbf{Unfolded token penalty.} When total context length of the main thread exceeds 50\% of the working context limit, we apply $Q_{i,t}=-1$ to all the tokens in the main thread, except those tokens in the turns that create a branch. This penalizes the agent for performing token-heavy actions outside a branch in the main thread, and encourages the agent to perform those actions in separate branches.
+
+\noindent \textbf{Out-scope penalty.} For each branch, we employ GPT-5-nano to judge — based on the branch prompt and the returned message — whether the agent has conducted actions outside the specified sub-tasks. If so, we apply $Q_{i,t}=-0.2$ to all the tokens in this branch to penalize such out of scope behavior.
+This encourages the agent to only perform the exact sub-task given to the current branch.
+
+\textbf{Failure penalty.} We apply $Q_{i,t}=-1$ to all the tokens in a failed tool call turn. 
+In all other cases, $Q_{i,t}=0$.
+
+
+
+\subsection{How does Context Folding Connect to Other Methods?}
+\textbf{Relationship to multi-agent systems.}
+Context folding can be interpreted as a specific formulation of a general multi-agent system, where the main agent delegates sub-tasks to sub-agents.
+Compared to popular multi-agent systems~\citep{Hadfield2025}, our design differs in the following ways:
+(i) Context folding does not adopt predefined sub-agents; instead, sub-agents are created by the main agent on the fly;
+(ii) All the agents share the same context prefix, making it KV-cache friendly,
+(iii) The main and the sub agents interleave rather than operating in parallel.
+
+
+\textbf{Relationship to context-summarization-based method.}
+Compared with heuristic summarization-based context management~\citep{Yu2025MemAgentRL,OpenAI2025a}, which discards details at arbitrary points, context folding can be viewed as a learnable summarization mechanism aligned with sub-task boundaries. 
+This ensures that reasoning is preserved during execution and is only compacted once its utility is realized.
+
+
+
+\section{Experiment}
+
+\subsection{Datasets}
+We conduct experiment on two representative long-horizon agent tasks: deep research, and agentic software engineering:
+
+\noindent \textbf{Deep Research.}
+We use BrowseComp-Plus (BC-Plus)~\citep{Chen2025BrowseCompPlusAM}, which supplements the original BrowseComp data with a verified corpus. 
+We use Qwen3-Embed-8B as the retriever.
+Since the quality of training data is crucial for the BrowseComp task but existing datasets are typically not open-sourced~\citep{Qiao2025WebResearcherUU,Li2025WebSailorV2BT}, we split BrowseComp-Plus into training and evaluation sets to decouple the effect of data distribution. 
+Our split includes 680 instances for training and 150 for evaluation. 
+For deep research, the tools are \code{search(query, topk)} and \code{open\_page(url)}, and the reward is based on official LLM-based judger~\citep{Chen2025BrowseCompPlusAM}.
+
+
+
+\noindent \textbf{Agentic SWE.} 
+We use SWE-Bench Verified (SWEB-V)~\citep{Jimenez2023SWEbenchCL} as the evaluation set. 
+To collect training data, we roll out the baseline agent\footnote{Seed-OSS-36B-Instruct with OpenHands and a response length of 65,536.} eight times on a subset of the open-source datasets SWE-Gym~\citep{Pan2024TrainingSE} and SWE-Rebench~\citep{Badertdinov2025SWErebenchAA}, and retain the instances where the success rate is between 0 and $87.5\%$, resulting in 740 instances. 
+In SWE, the tools are \code{execute\_bash}, \code{str\_replace\_editor}, and \code{think}~\citep{Wang2024OpenHandsAO}, and the reward is based on running unit test in instance-specific sandbox environment.
+
+We classify test instances for both tasks into three difficulty levels: \textit{easy}, \textit{medium}, and \textit{hard}. For BrowseComp-Plus, classification is determined by running a ReAct agent 8 times on each instance. An instance is labeled \textit{easy} if its acc@8 score is $\geq87.5\%$, \textit{hard} if its score is 0\%, and \textit{medium} otherwise, resulting in 50 instances for each level. For SWE-Bench Verified, classification is based on the original dataset's time-to-resolve metric: \textit{easy} ($\le$15 min, 194 instances), \textit{medium} (15 min -- 1 hour, 261 instances), and \textit{hard} ($\ge$1 hour, 45 instances).
+
+See Appendix \ref{sec:pe} for the details of system prompt of each datasets.
+
+\subsection{Implementation}
+We use Seed-OSS-36B-Instruct\footnote{\url{https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct}} as the base LLM and conduct RL training on it.  
+For RL training, we build on VeRL and set the rollout batch size to 32, group size to 8, ppo batch size of 128, learning rate to $1 \times 10^{-6}$, no KL term, clip high to 0.28, and clip low to 0.2.  
+We employ asynchronous rollout with a maximum off-policy step of 5.  
+During training, we implement the context folding operation $\mathcal{F}$ by constructing separate causally conditioned contexts for each branch to improve training efficiency (See Appendix~\ref{sec:algo-impl} for more details.). 
+We train model for 50 steps (about 2 epochs).
+For the fold agent, we set the LLM maximum context length to 32,768.
+We allow up to 10 branches, resulting in a theoretical maximum of 327,680 tokens.
+During inference we employ greedy decoding (i.e, temperature = 0).
+
+\input{table/main}
+
+\subsection{Baselines}
+We compare against the following baselines:
+
+\noindent \textbf{ReAct Agent}~\citep{Yao2022ReActSR}, which keeps all context. We consider different context lengths for comparison: (a) \textit{short-context}, which has 32,768 tokens, equivalent to our context length; (b) \textit{medium-context}, which has intermediate lengths, e.g., 65,536 and 131,072; (c) \textit{long-context}, which has 327,680 tokens, equivalent to our maximum total token cost.
+
+\noindent  \textbf{Summary Agent}~\citep{Yu2025MemAgentRL,Wu2025ReSumUL}, which invokes a summary when the context is full. We set the maximum context length to 32,768 and allow for 10 summary session for a fair comparison.
+
+For both two baselines, we employ the same base model (i.e., Seed-OSS-36B-Instruct), data, infrastructure, and hyperparameters for RL training.
+In addition to these directly comparable baselines, we compare our method against previous closed-source and open-source systems on both tasks, including GPT-5, GPT-4.1, DeepSeek-V3.1 (2509), GLM-4.5-Air, and Qwen3-235B-A22B-Instruct-2507. 
+
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/diff.png}
+    \vspace{-0.5cm}
+    \caption{Agent performance on different data difficulty group. RL training yields consistent performance gains across easy, medium, and hard instances.}
+    \label{fig:diff}
+\end{figure}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.98\linewidth]{figs/tool_num.png}
+    \vspace{-0.2cm}
+    \caption{With RL training, we observe an increase in the number of tool calls, branching behavior, total number of tokens, and the number of searched pages.}
+    \label{fig:tool_call}
+\end{figure}
+
+
+\section{Experimental Results}
+
+\subsection{Main Results}
+Table~\ref{tab:main} summarizes our main results on the BrowseComp-Plus and SWE-Bench Verified datasets. Our findings highlight the critical role of reinforcement learning in unlocking the capabilities of context folding.
+
+Initially, without performing RL, the context folding agent already surpasses the 32K-context ReAct and context summarization baselines, though it does not yet match the performance of the long-context ReAct agent. 
+After RL training, our agent's performance improves significantly, with a $pass@1$ of \textbf{0.620 on BrowseComp-Plus (+20\%)} and \textbf{0.580 on SWE-Bench Verified (+8.8\%)}. Our agent not only outperforms all baselines, including the long-context ReAct agent with same 327K max length, but also achieves performance comparable to agents built on much larger 100B+ parameter models.
+
+Further analysis reveals two key insights. 
+First, an ablation study confirms that our proposed \textbf{FoldGRPO is crucial}, yielding significantly better performance than the baseline GRPO algorithm (eg, +7.7\% on BrowseComp and +1.6\% on SWE-Bench). Second, the performance gains correlate with an increased frequency of tool calls, which RL training further encourages. This suggests our framework enables the agent to conduct a more thorough exploration of the environment to discover more robust solutions.
+
+
+% \vspace{-5em}
+\subsection{Performance by Task Difficulty}
+Figure~\ref{fig:diff} breaks down agent performance by task difficulty, comparing scores before and after reinforcement learning. The results clearly show that RL training yields consistent performance gains across easy, medium, and hard instances. Most notably, the improvements are significantly larger for the medium and hard subsets. This finding underscores our agent's enhanced capability to handle complex problems that require more sophisticated long-context management.
+
+Figure~\ref{fig:tool_call} shows the agent’s learning dynamics during RL training on BrowseComp-Plus. As training progresses, the agent steadily increases its tool calls, branch creation, response tokens, and number of pages searched. This growth is most pronounced on harder instances. For example, on the hard subset, response length rises from about 100K to over 160K tokens. These results show that the agent learns to allocate more interaction and computation to complex problems, adopting a more adaptive and effective problem-solving strategy.
+
+
+
+\subsection{Ablation of RL Algorithm}
+To understand how our proposed FoldGRPO shapes agent behavior, we analyze the key statistics in Table~\ref{tab:action}. These metrics include the task completion rate within the context limit (Finish), main trajectory length (Main Len), the accuracy of sub-trajectories staying on-topic (Scope), and the number of branches created (\# Branch).
+We can see that, training with a standard GRPO baseline produces poor behaviors: agents show a lower Finish rate, generate overly long trajectories, and lose focus in sub-tasks, reflected in reduced Scope accuracy. This indicates a failure to manage context effectively.
+
+By contrast, our FoldGRPO corrects these issues. It encourages focused branching, sharply boosting both Scope accuracy and Finish rate. Most notably, it cuts the main trajectory to about 8K tokens while processing over 100K in total—achieving over \textbf{90\% context compression} and demonstrating the agent’s ability to condense long interactions into a compact, useful history.
+
+
+\input{table/ablation}
+
+
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figs/multiq.png}
+    \vspace{-0.2cm}
+    \caption{\textbf{Left:} Pass@1 vs. agent max context length. \textbf{Right:} Pass@1 vs. number of combined questions. Multiple easy questions are combined into a single harder question to increase problem complexity; a higher number of combined questions indicates more required actions and a longer context to answer them correctly. See Section~\ref{sec:multiq} for details.}
+    \label{fig:multiq}
+\end{figure}
+
+
+
+\subsection{Performance by Context Length}
+
+\subsubsection{Effect of Context Length}
+To examine how performance scales with context length, we evaluated our method on BrowseComp while varying the number of branches from 0 to 16. As shown in Figure~\ref{fig:multiq} (left), our method consistently surpasses ReAct, and reinforcement learning provides further gains. However, performance plateaus beyond 320K tokens because most task instances are already completed, and additional context provides limited benefit.
+
+\subsubsection{Effect of Task Complexity}\label{sec:multiq}
+Following \citet{Zhou2025MEM1LT}, we increase task complexity by combining multiple questions into a single compound query that the agent must answer \textit{in one session} (see Figure~\ref{fig:multiq-exp} for an example). Figure~\ref{fig:multiq} (right) shows the results for tasks with 1 to 50 combined questions. For this setting, we allow unlimited branching and set the context limit for ReAct to 1M tokens. As task complexity increases, the benefit of context folding becomes more apparent, demonstrating strong length generalization. Notably, although our agent was trained on tasks requiring at most 10 branches, it adaptively uses an average of 32.6 branches to solve tasks with 50 questions.
+
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=1\columnwidth]{figs/multiq-exp.png}
+% \vspace{-0.2cm}
+\caption{An example of the model's input and output for the combined-questions experiment described in Section~\ref{sec:multiq}. In this example, 3 easy questions are combined to form a harder question.}
+\label{fig:multiq-exp}
+\end{figure}
+
+
+\subsection{Further Analysis}
+\subsubsection{Case Study}
+Figure~\ref{fig:case} shows qualitative examples of our context folding agent on BrowseComp-Plus. Given a query about finding a research publication with specific conditions, the agent first explores the high-level topic and identifies a candidate. It then searches to verify conditions, gaining key insights but failing to confirm all requirements. Next, it expands the search scope and finds the correct answer. In this process, 4 branches compress the full 107K-token context to just 6K.
+
+
+\begin{figure}[t!]
+\centering\includegraphics[width=1.0\linewidth]{figs/case.pdf}
+\vspace{-0.6cm}
+\caption{Example of an agent's tool call history and context length. on BrowseComp-Plus.}\label{fig:case}
+\end{figure}
+
+
+\subsubsection{Training Speed}
+Figure~\ref{fig:speed} shows the stepwise average time for rollout and for each training step. We observe that the 327K ReAct model requires a longer training time per step.
+Note that we employ async rollout (Appendix~\ref{sec:async-rollout}), and the rollout time shown here measures only the main thread’s time cost on rollout.
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.4\columnwidth]{figs/time.pdf}
+    \vspace{-0.2cm}
+    \caption{Training time cost. The figure shows the stepwise average time for rollout and for each training step.}
+    \label{fig:speed}
+\end{figure}
+
+
+
+\subsubsection{Parallel Branching}
+Whether the folding agent can benefit from parallel branching — i.e., creating multiple sub-branches that run simultaneously — remains an open question.
+We experimented on BrowseComp-Plus by training an agent that utilizes parallel branching under the same setup as the single-branch agent.
+The parallel-branch version achieved a 0.6133 Pass@1 on BrowseComp-Plus, outperforming the baseline but performing similarly to the single-branch version.
+Moreover, after training, the parallel-branch agent created about 2.3 parallel branches on average and read more web pages (110 vs. ~80 for the single-branch version).
+However, it did not achieve a higher score, possibly because the task characteristics are more depth-first in nature. Other tasks with a breadth-first structure (eg WideSearch~\citep{Wong2025WideSearchBA}) may be more promising for studying parallelism in LLM agents.
+
+
+\section{Related Work}
+The rapid evolution of LLM agents is driven by a push toward greater autonomy in complex, long-horizon tasks~\citep{Jimenez2023SWEbenchCL,openai2025chatgptAgent,Zhou2023WebArenaAR,METR2025a,Li2025TowardsCA}. Built on agentic architectures that integrate planning, memory, and tool use~\citep{Wang2023ASO}, research has advanced from simple sequential reasoning to dynamic, multi-path strategies for exploration and problem-solving~\citep{Yao2023TreeOT,Besta2023GraphOT,Huang2022LanguageMA,Sun2025COBenchBL}. Yet this progress has revealed a key bottleneck: the finite and costly nature of an agent’s working context~\citep{Yao2022ReAct,OpenHands2025}.
+
+Context management strategies fall into two main paradigms: context summarization, where agents offload and retrieve information from external memory stores~\citep{Wang2023VoyagerAO,Tang2025AgentKL,Yu2025MemAgentRL,Wu2025ReSumUL,Zhou2025MEM1LT}, and multi-agent collaboration, where tasks are divided among specialized agents with focused contexts~\citep{Zhao2024LongAgentSL,Zhang2024ChainOA,Anthropic2025c,Wong2025WideSearchBA}.
+Both paradigms frame context management as an architectural or retrieval problem, leaving a gap for an integrated approach where it becomes a learned cognitive skill rather than an external feature.
+
+Reinforcement learning (RL) effectively grounds agents through environmental or human feedback~\citep{Zhang2025TheLO,Qiao2025WebResearcherUU}, but has focused mainly on extrinsic task success~\citep{DeepSeekAI2025DeepSeekR1IR}. 
+The training of intrinsic skills—such as how an agent manages its own working memory—remains a underexplored research area. Our work contributes to this emerging frontier by framing context management as a learnable skill and using process-level rewards to teach it directly.
+
+\section{Conclusions and Future Work}
+In this paper, we introduced \textbf{context folding}, an agentic mechanism for managing long-horizon trajectories by selectively folding ephemeral sub-trajectories while preserving only essential decision-relevant information. Coupled with our reinforcement learning framework, context folding enables efficient credit assignment across tree-structured trajectories and achieves significant improvements in long-horizon coding and deep-research tasks. Empirical results on two long-context tasks demonstrate that folding allows agents to match or exceed the performance of baselines with larger context windows, while improving efficiency and stability relative to summary-based condensation. 
+Several promising future directions include multi-layer context folding, which develops hierarchical folding strategies where folds themselves can be further folded for deeper compression.
+
+
+\section*{Acknowledgments}
+The authors would thank Weihua Du, Guanghao Ye, Joey Hong, Bowen Xiao, Ting-Han Fan, Lingfeng Shen for valuable discussions and feedback during the preparation of this work.
+

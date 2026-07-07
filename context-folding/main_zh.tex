@@ -1,0 +1,266 @@
+\section{引言}
+大语言模型（LLM）智能体已展现出解决复杂长程问题的显著能力；这类问题需要与环境进行广泛交互，例如深度研究~\citep{OpenAI2025a,Google2025b,Jin2025SearchR1TL,Wei2025BrowseCompAS,Li2025WebThinkerEL}和智能体式编码~\citep{Jimenez2023SWEbenchCL,AnthropicClaudeCode2025,Wang2024OpenHandsAO}。有观点认为，智能体可完成任务的长度正呈\textit{指数式增长}，其翻倍时间约为 7 个月~\citep{METR2025a}。
+
+然而，将 LLM 智能体扩展到更长时间跨度，根本上受限于智能体框架的设计~\citep{Yao2022ReAct}。这类框架将完整交互历史（推理、工具调用和观察）线性累积到一个持续扩张的上下文中。随着时间跨度增长，由此产生长上下文挑战：（1）性能下降，因为 LLM 难以在极长上下文中利用相关信息~\citep{Liu2023LostIT,Comanici2025Gemini2P,Leng2024LongCR}；（2）效率低下，源于注意力机制的二次复杂度，以及管理 KV-cache 日益增加的开销~\citep{Katharopoulos2020TransformersAR}。
+
+现有扩展长程 LLM 智能体的方法大致分为两类：（1）\textit{基于摘要的方法}：当工作上下文已满时触发事后摘要阶段~\citep{OpenHands2025,Yu2025MemAgentRL,Qiao2025WebResearcherUU,Wu2025ReSumUL,Zhou2025MEM1LT,lu2025scaling}。尽管这会压缩上下文，却可能突然打断智能体的工作上下文和推理流，导致次优结果。（2）\textit{多智能体系统}：将任务分配给专门智能体以管理上下文长度~\citep{Zhao2024LongAgentSL,Zhang2024ChainOA,Anthropic2025c,Wong2025WideSearchBA}。但这些系统通常依赖手工设计、面向特定问题的工作流，难以泛化，也难以端到端优化。
+
+本文提出\textbf{上下文折叠}（Context Folding）：一种使模型能够主动管理工作上下文的智能体机制。具体而言，智能体使用两种特殊动作管理上下文：（i）\texttt{branch} 动作，为局部子任务创建临时子轨迹；（ii）\texttt{return} 动作，总结结果并重新并入主线程。此后，分支中的中间步骤被“折叠”---即从上下文中移除---只保留 \texttt{return} 调用中的简洁摘要。图~\ref{fig:example}展示了该过程在深度研究和智能体式编码任务中的应用：智能体将词元密集型操作（如网页搜索或代码库探索）卸载至分支，只为高层推理保留关键发现与洞见。与现有方法相比，上下文折叠实现了主动上下文管理：智能体的短期上下文不被打断，长期上下文则自动管理。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/fold_example.png}
+    \vspace{-0.3cm}
+    \caption{长程任务中的上下文折叠示例：深度研究（左）和智能体式编码（右）。}\label{fig:example}
+\end{figure}
+
+基于上下文折叠框架，我们提出一种新颖的端到端强化学习算法，用于在复杂长程任务上训练 LLM 智能体。核心创新是\textbf{FoldGRPO}：它在标准 GRPO 的基础上加入（i）动态折叠的 LLM 上下文；（ii）直接引导上下文折叠行为的稠密、词元级过程奖励。具体而言，RL 算法通过\textit{未折叠词元惩罚}，教导模型将问题有效分解为可在分支中处理的局部子任务，避免在主上下文中执行词元密集型操作。此外，模型通过\textit{越界惩罚}学习在子任务内保持聚焦，并在摘要中保留有助于最终目标的关键信息。掌握这些技能后，智能体能够处理远得多的交互历史，使框架扩展智能体的有效时间跨度并提升整体系统效率。
+
+我们在两个长程基准 BrowseComp-Plus~\citep{Chen2025BrowseCompPlusAM}和 SWE-Bench Verified~\citep{Jimenez2023SWEbenchCL}上评估方法，智能体以显著效率取得强劲性能。尽管使用由最多 10 个分支管理的紧凑 32K 活跃词元预算，我们的\textbf{折叠智能体}在两个基准上分别获得 62.0\% 和 58.0\% 的 pass@1，超过需要巨大 327K 上下文窗口的基线，并显著优于基于上下文摘要的方法。强化学习是方法有效性的根源：在 BrowseComp-Plus 上带来 20.0\% 的绝对提升，在 SWE-Bench 上带来 8.8\% 的绝对提升。进一步分析表明，智能体学会调用更多工具并生成更长输出以处理复杂问题，并能在推理时扩展至更大词元预算来应对更具挑战性的任务。总体而言，这些结果表明，学习\textit{主动管理}上下文，而非仅仅扩展或启发式压缩上下文，是通向可扩展长程智能体的一条有原则路径。
+
+总之，本文有三项贡献：
+\begin{enumerate}[label=(\roman*),leftmargin=20pt]
+\item 提出\textbf{上下文折叠}机制，使智能体能够主动管理上下文，并缓解历史线性增长的挑战。
+\item 提出\textbf{FoldGRPO}强化学习框架，结合动态折叠 LLM 上下文和稠密过程奖励，训练智能体有效获得上下文折叠能力。
+\item 在长程基准上展示有前景的性能，说明该方法为构建更强 LLM 智能体提供了一条可扩展、可延展的路径。
+\end{enumerate}
+
+\subsubsection{过程奖励设计}\label{subsubsec: prm}
+在 RLVR 中，通常依据任务成功或失败，以标准二值\textit{结果奖励}优化智能体。但我们实证发现，这种稀疏奖励信号不足以学习有效的上下文折叠。具体而言，出现两种关键失败模式：（i）智能体无法进行策略性规划，将词元密集型操作留在主上下文中未折叠，迅速耗尽可用词元预算；（ii）智能体难以妥善管理分支：子任务完成后往往没有从子分支返回，而是在同一分支中继续之后的工作。为有效优化折叠智能体，我们分别为主轨迹词元和分支轨迹词元引入词元级过程奖励。
+
+\noindent \textbf{未折叠词元惩罚。}主线程总上下文长度超过工作上下文上限的 50\% 时，我们对主线程内的全部词元施加 $Q_{i,t}=-1$，创建分支的轮次中的词元除外。这会惩罚智能体在主线程中执行词元密集型操作，并鼓励智能体在独立分支中执行这些操作。
+
+\noindent \textbf{越界惩罚。}对于每个分支，我们使用 GPT-5-nano 根据分支提示和返回消息判断智能体是否进行了指定子任务之外的操作。若有，则对此分支内全部词元施加 $Q_{i,t}=-0.2$，惩罚此类越界行为。这会鼓励智能体仅执行当前分支所给出的精确子任务。
+
+\textbf{失败惩罚。}我们对失败工具调用轮次中的全部词元施加 $Q_{i,t}=-1$。其他情形下，$Q_{i,t}=0$。
+
+\subsection{上下文折叠与其他方法的关系}
+\textbf{与多智能体系统的关系。}
+上下文折叠可解释为一般多智能体系统的一种特定形式：主智能体将子任务委派给子智能体。相较流行多智能体系统~\citep{Hadfield2025}，我们的设计有如下不同：（i）上下文折叠不采用预定义子智能体，子智能体由主智能体按需创建；（ii）所有智能体共享相同的上下文前缀，因此对 KV-cache 友好；（iii）主智能体与子智能体交替运行，而非并行运行。
+
+\textbf{与基于上下文摘要方法的关系。}
+相较启发式的摘要式上下文管理~\citep{Yu2025MemAgentRL,OpenAI2025a}，后者在任意位置丢弃细节，上下文折叠可视为与子任务边界对齐的可学习摘要机制。这确保推理在执行期间被保留，只有在其效用实现后才被压缩。
+
+\section{实验}
+
+\subsection{数据集}
+我们在两个代表性长程智能体任务上开展实验：深度研究和智能体式软件工程。
+
+\noindent \textbf{深度研究。}
+我们使用 BrowseComp-Plus（BC-Plus）~\citep{Chen2025BrowseCompPlusAM}，它在原始 BrowseComp 数据的基础上补充了经过验证的语料库。检索器使用 Qwen3-Embed-8B。鉴于训练数据质量对 BrowseComp 任务至关重要，而现有数据集通常未开源~\citep{Qiao2025WebResearcherUU,Li2025WebSailorV2BT}，我们将 BrowseComp-Plus 划分为训练集与评估集，以解耦数据分布的影响。划分后有 680 个训练样本和 150 个评估样本。深度研究任务使用 \code{search(query, topk)} 与 \code{open\_page(url)} 工具，奖励由官方基于 LLM 的评审器给出~\citep{Chen2025BrowseCompPlusAM}。
+
+\noindent \textbf{智能体式软件工程。}
+我们使用 SWE-Bench Verified（SWEB-V）~\citep{Jimenez2023SWEbenchCL}作为评估集。为收集训练数据，我们在开源数据集 SWE-Gym~\citep{Pan2024TrainingSE}和 SWE-Rebench~\citep{Badertdinov2025SWErebenchAA}的子集上，对基线智能体\footnote{使用 OpenHands 的 Seed-OSS-36B-Instruct，响应长度为 65,536。}进行八次 rollout，保留成功率介于 0 和 $87.5\%$ 之间的样本，最终得到 740 个样本。SWE 任务使用 \code{execute\_bash}、\code{str\_replace\_editor} 和 \code{think}~\citep{Wang2024OpenHandsAO}工具，奖励通过在样本特定的沙箱环境中运行单元测试获得。
+
+对于两项任务，我们将测试样本划为\textit{简单}、\textit{中等}和\textit{困难}三个难度等级。BrowseComp-Plus 的分类方法是对每个样本运行 ReAct 智能体 8 次：acc@8 分数 $\geq87.5\%$ 标为\textit{简单}，分数为 0\% 标为\textit{困难}，其余标为\textit{中等}，每个等级各有 50 个样本。SWE-Bench Verified 的分类依据原始数据集的 time-to-resolve 指标：\textit{简单}（$\le$15 分钟，194 个样本）、\textit{中等}（15 分钟至 1 小时，261 个样本）和\textit{困难}（$\ge$1 小时，45 个样本）。
+
+各数据集的系统提示细节见附录~\ref{sec:pe}。
+
+\subsection{实现}
+我们使用 Seed-OSS-36B-Instruct\footnote{\url{https://huggingface.co/ByteDance-Seed/Seed-OSS-36B-Instruct}}作为基础 LLM，并在其上进行 RL 训练。RL 训练基于 VeRL，rollout batch size 设为 32，组大小设为 8，PPO batch size 设为 128，学习率为 $1\times10^{-6}$，不使用 KL 项，clip high 为 0.28，clip low 为 0.2。我们采用异步 rollout，最大 off-policy step 为 5。训练期间，我们通过为每个分支构建独立、因果条件化的上下文来实现上下文折叠操作 $\mathcal{F}$，以提高训练效率（详见附录~\ref{sec:algo-impl}）。模型训练 50 步（约 2 个 epoch）。对于折叠智能体，LLM 最大上下文长度设为 32,768，最多允许 10 个分支，理论最大词元数为 327,680。推理时采用贪婪解码（即 temperature = 0）。
+
+\input{table/main_zh}
+
+\subsection{基线}
+我们与以下基线比较：
+
+\noindent \textbf{ReAct 智能体}~\citep{Yao2022ReActSR}，它保留全部上下文。我们考虑不同上下文长度：（a）\textit{短上下文}：32,768 个词元，与本方法上下文长度相同；（b）\textit{中等上下文}：中间长度，例如 65,536 和 131,072；（c）\textit{长上下文}：327,680 个词元，与最大总词元成本相同。
+
+\noindent \textbf{摘要智能体}~\citep{Yu2025MemAgentRL,Wu2025ReSumUL}，当上下文已满时调用摘要。为公平比较，我们将最大上下文长度设为 32,768，并允许 10 次摘要会话。
+
+对于两个直接可比基线，我们均使用相同的基础模型（Seed-OSS-36B-Instruct）、数据、基础设施和 RL 训练超参数。除此之外，还在两项任务上将方法与先前的闭源和开源系统比较，包括 GPT-5、GPT-4.1、DeepSeek-V3.1（2509）、GLM-4.5-Air 和 Qwen3-235B-A22B-Instruct-2507。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/diff.png}
+    \vspace{-0.5cm}
+    \caption{不同数据难度组上的智能体性能。RL 训练在简单、中等和困难样本上均带来一致性能增益。}
+    \label{fig:diff}
+\end{figure}
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.98\linewidth]{figs/tool_num.png}
+    \vspace{-0.2cm}
+    \caption{经过 RL 训练后，工具调用次数、分支行为、总词元数和已搜索页面数均有所增加。}
+    \label{fig:tool_call}
+\end{figure}
+
+\section{实验结果}
+
+\subsection{主要结果}
+表~\ref{tab:main}汇总了 BrowseComp-Plus 和 SWE-Bench Verified 上的主要结果。结果凸显强化学习对于释放上下文折叠能力的关键作用。
+
+起初，在未进行 RL 时，上下文折叠智能体已超过 32K 上下文 ReAct 和上下文摘要基线，但尚未匹配长上下文 ReAct 智能体的性能。经过 RL 训练，智能体性能显著提升：BrowseComp-Plus 的 $pass@1$ 达到\textbf{0.620（+20\%）}，SWE-Bench Verified 达到\textbf{0.580（+8.8\%）}。它不仅超过包括最大长度同为 327K 的长上下文 ReAct 智能体在内的所有基线，还取得与基于大得多的 100B+ 参数模型构建的智能体相当的性能。
+
+进一步分析得到两项关键洞见。第一，消融研究确认所提出的\textbf{FoldGRPO 至关重要}：比基础 GRPO 算法显著更优（例如 BrowseComp 上 +7.7\%，SWE-Bench 上 +1.6\%）。第二，性能增益与工具调用频率增加相关，而 RL 训练会进一步鼓励工具调用。这表明框架使智能体能够更彻底地探索环境，从而发现更稳健的解决方案。
+
+\subsection{按任务难度划分的性能}
+图~\ref{fig:diff}按任务难度拆解了智能体性能，比较强化学习前后的得分。结果清楚表明，RL 训练在简单、中等和困难样本上均带来一致的性能提升；尤其是中等和困难子集上的改善明显更大。这一发现凸显了智能体处理复杂问题的增强能力，而这些问题需要更精细的长上下文管理。
+
+图~\ref{fig:tool_call}展示了 BrowseComp-Plus 上 RL 训练期间智能体的学习动态。随着训练推进，智能体的工具调用、分支创建、响应词元数和搜索页面数均稳步增加；这种增长在更困难样本上最为显著。例如，困难子集的响应长度从约 100K 上升至超过 160K 词元。这些结果说明智能体学会为复杂问题分配更多交互与计算，采用更具适应性且更有效的问题求解策略。
+
+\subsection{RL 算法消融}
+为理解所提出的 FoldGRPO 如何塑造智能体行为，我们分析表~\ref{tab:action}中的关键统计量。这些指标包括上下文限制内的任务完成率（Finish）、主轨迹长度（Main Len）、子轨迹保持主题相关的准确率（Scope）和创建的分支数量（\# Branch）。可看到，使用标准 GRPO 基线训练会产生较差行为：智能体有较低的 Finish 率，生成过长轨迹，并在子任务中失去聚焦，体现为 Scope 准确率下降。这表明其未能有效管理上下文。
+
+相反，FoldGRPO 修正了这些问题。它鼓励聚焦分支，显著提高 Scope 准确率和 Finish 率。最值得注意的是，在处理超过 100K 总词元的同时，它将主轨迹压缩到约 8K 词元，实现超过\textbf{90\% 的上下文压缩}，展示了智能体将长交互压缩为紧凑且有用历史的能力。
+
+\input{table/ablation_zh}
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figs/multiq.png}
+    \vspace{-0.2cm}
+    \caption{\textbf{左：}Pass@1 与智能体最大上下文长度的关系。\textbf{右：}Pass@1 与组合问题数量的关系。将多个简单问题合并为一个更难的问题以提高问题复杂度；组合问题越多，正确回答所需的动作越多、上下文越长。细节见第~\ref{sec:multiq}节。}
+    \label{fig:multiq}
+\end{figure}
+
+\subsection{按上下文长度划分的性能}
+
+\subsubsection{上下文长度的影响}
+为考察性能如何随上下文长度扩展，我们在 BrowseComp 上评估方法，并将分支数从 0 变化到 16。如图~\ref{fig:multiq}（左）所示，方法始终超过 ReAct，强化学习带来进一步增益。然而，超过 320K 词元后性能趋于平台，因为多数任务样本已被完成，额外上下文的收益有限。
+
+\subsubsection{任务复杂度的影响}\label{sec:multiq}
+遵循 \citet{Zhou2025MEM1LT}，我们将多个问题合并为智能体必须\textit{在一次会话中}回答的复合查询，以提高任务复杂度（示例见图~\ref{fig:multiq-exp}）。图~\ref{fig:multiq}（右）展示 1 至 50 个组合问题时的结果。该设置下，我们允许无限制分支，并将 ReAct 的上下文限制设为 1M 词元。随着任务复杂度增加，上下文折叠的优势更为明显，展示了强大的长度泛化能力。值得注意的是，尽管智能体训练时的任务最多需要 10 个分支，它在解决包含 50 个问题的任务时，能自适应地平均使用 32.6 个分支。
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=1\columnwidth]{figs/multiq-exp.png}
+\caption{第~\ref{sec:multiq}节所述组合问题实验中模型输入和输出的示例。本例将 3 个简单问题合并为一个更难的问题。}
+\label{fig:multiq-exp}
+\end{figure}
+
+\subsection{进一步分析}
+\subsubsection{案例研究}
+图~\ref{fig:case}展示了上下文折叠智能体在 BrowseComp-Plus 上的定性案例。给定一个需要寻找满足特定条件的研究出版物的查询，智能体先探索高层主题并识别候选项；随后搜索以验证条件，获得关键洞见但未确认所有要求；接着扩大搜索范围，找到正确答案。在此过程中，4 个分支将完整的 107K 词元上下文压缩到仅 6K。
+
+\begin{figure}[t!]
+\centering\includegraphics[width=1.0\linewidth]{figs/case.pdf}
+\vspace{-0.6cm}
+\caption{BrowseComp-Plus 上智能体工具调用历史和上下文长度的示例。}\label{fig:case}
+\end{figure}
+
+\subsubsection{训练速度}
+图~\ref{fig:speed}展示 rollout 和每个训练步骤的逐步平均时间。我们观察到，327K ReAct 模型每步需要更长训练时间。注意，我们采用异步 rollout（附录~\ref{sec:async-rollout}）；这里的 rollout 时间仅度量主线程在 rollout 上的时间成本。
+
+\begin{figure}[t!]
+    \centering
+    \includegraphics[width=0.4\columnwidth]{figs/time.pdf}
+    \vspace{-0.2cm}
+    \caption{训练时间成本。图中展示 rollout 和每个训练步骤的逐步平均时间。}
+    \label{fig:speed}
+\end{figure}
+
+\subsubsection{并行分支}
+折叠智能体能否从并行分支中获益仍是开放问题；这里的并行分支是指同时创建多个并行运行的子分支。我们在 BrowseComp\allowbreak-Plus 上训练了一个使用并行分支的智能体，其他设置与单分支智能体相同。并行分支版本在 BrowseComp\allowbreak-Plus 上达到 0.6133 Pass@1，超过基线但与单分支版本表现相近。此外，训练后，并行分支智能体平均创建约 2.3 个并行分支，并阅读更多网页（110 对单分支版本的约 80）。但它未取得更高分数，可能是因为任务特征更偏向深度优先。对具有广度优先结构的其他任务（例如 WideSearch~\citep{Wong2025WideSearchBA}）而言，研究 LLM 智能体的并行性可能更有希望。
+
+\section{相关工作}
+LLM 智能体的快速演进，源于对复杂长程任务中更高自主性的追求~\citep{Jimenez2023SWEbenchCL,openai2025chatgptAgent,Zhou2023WebArenaAR,METR2025a,Li2025TowardsCA}。建立在集成规划、记忆和工具使用的智能体架构之上~\citep{Wang2023ASO}，研究已从简单顺序推理发展到用于探索和问题求解的动态多路径策略~\citep{Yao2023TreeOT,Besta2023GraphOT,Huang2022LanguageMA,Sun2025COBenchBL}。但这种进展也揭示了一项关键瓶颈：智能体工作上下文是有限且昂贵的~\citep{Yao2022ReAct,OpenHands2025}。
+
+上下文管理策略主要有两种范式：上下文摘要，即智能体从外部记忆存储中卸载和检索信息~\citep{Wang2023VoyagerAO,Tang2025AgentKL,Yu2025MemAgentRL,Wu2025ReSumUL,Zhou2025MEM1LT}；以及多智能体协作，即在具备聚焦上下文的专门智能体之间划分任务~\citep{Zhao2024LongAgentSL,Zhang2024ChainOA,Anthropic2025c,Wong2025WideSearchBA}。两种范式都将上下文管理表述为架构或检索问题，而缺少一种集成方法：让它成为可学习的认知技能，而不是外部功能。
+
+强化学习（RL）可通过环境或人类反馈有效地锚定智能体~\citep{Zhang2025TheLO,Qiao2025WebResearcherUU}，但主要关注外在任务成功~\citep{DeepSeekAI2025DeepSeekR1IR}。如何训练智能体管理自身工作记忆等内在技能，仍是探索不足的研究方向。本文通过将上下文管理表述为可学习技能，并使用过程级奖励直接教授该技能，为这一新兴前沿作出贡献。
+
+\section{结论与未来工作}
+本文提出\textbf{上下文折叠}：一种通过选择性折叠短暂子轨迹、仅保留与决策相关的必要信息来管理长程轨迹的智能体机制。结合强化学习框架，上下文折叠能够在树状轨迹间进行高效信用分配，并在长程编码和深度研究任务中取得显著改善。两项长上下文任务上的实证结果表明，折叠使智能体能匹配或超过具有更大上下文窗口的基线性能，同时相较基于摘要的压缩提高效率和稳定性。一个有前景的未来方向是多层上下文折叠，即发展层次化折叠策略，使折叠本身可进一步折叠，从而获得更深度压缩。
+
+\section*{致谢}
+作者感谢 Weihua Du、Guanghao Ye、Joey Hong、Bowen Xiao、Ting-Han Fan 和 Lingfeng Shen 在本工作准备期间提供的宝贵讨论与反馈。
+
+\section{方法}
+
+\subsection{基础建模}
+给定问题 $q$，智能体生成一条多轮交互轨迹：
+\begin{equation}
+    \tau := (a_1, o_1, a_2, o_2, \ldots, a_T, o_T),
+\end{equation}
+这里，$\mathbf{1}_{\tau_{i,t}}^{\mathrm{LLM}}$ 确保只优化 LLM 生成的词元，并掩蔽工具观察产生的词元。下文解释以红色标示的 FoldGRPO 两项关键特征。
+
+\begin{enumerate}[label=(\roman*),leftmargin=20pt]
+\item \textbf{上下文折叠。}
+不同于基础多轮 LLM RL 算法在优化策略时将完整交互历史追加到上下文，FoldGRPO 将上下文管理器 $\mathcal{F}(\cdot)$ 应用于历史 $\tau_{i,<t}$，根据分支--返回动作折叠用于词元 $\tau_{i,t}$ 的上下文。
+
+\item \textbf{过程奖励信号。}
+在计算优势 $\widehat{A}_{i,t}$ 时，加入词元级过程奖励 $Q_{i,t}$ 来正则化模型的分支--返回行为，详细说明见下一节。
+\end{enumerate}
+其中 $a_i$ 是第 $i$ 步的 LLM 输出（包括\textit{推理}和\textit{工具调用}），$o_i$ 是对应的工具调用结果。基础 ReAct 风格智能体~\citep{Yao2022ReAct}将交互建模为：
+\begin{equation}
+   p^{\mathrm{ReAct}}_{\theta}(\tau \mid q) = \prod_{i\in[T]} \pi_{\theta}\big(a_i \mid q, (a_1,o_1,\ldots, a_{i-1}, o_{i-1})\big),
+\end{equation}
+即每次生成 LLM 输出时都将完整交互历史追加到上下文。可是，在深度研究和智能体式编码等长程任务中，$\tau$ 会因广泛交互快速积累，长到超出工作上下文限制。上下文扩张时，模型的推理和指令遵循能力也可能下降，给完成长程任务带来进一步挑战。
+
+\subsection{我们的方法：上下文折叠}
+为应对上述挑战，我们引入上下文折叠，使智能体能够通过\textit{分支与折叠}主动管理工作上下文。具体而言，我们设计了供智能体调用的两种上下文管理工具。从解决问题 $q$ 的主线程开始，智能体可以：
+\begin{enumerate}[label=(\roman*),leftmargin=20pt]
+    \item \code{\textcolor{red}{branch}(description, prompt)}：\textit{从主线程分支出一个独立工作上下文，以完成为解决 $q$ 所需的子任务 $q'$}。其中 \code{description} 是对子任务的简短概述，\code{prompt} 是该分支的详细指令。该工具返回一条表明分支已创建的模板消息。
+    \item \code{\textcolor{blue}{return}(message)}：\textit{折叠在该分支中生成的上下文并返回主线程}。其中 \code{message} 描述此分支的结果。调用该工具后，智能体上下文切回主线程，并追加来自分支的模板化 \code{message}。
+\end{enumerate}
+借助这两种工具，智能体可通过（i）分支出独立工作上下文来解决独立子任务；（ii）折叠分支中的中间步骤，仅将分支结果追加到主线程以恢复执行，从而主动管理上下文。形式化地，上下文折叠智能体建模为：
+\begin{align}
+    p^{\text{Context Fold}}_{\theta}(\tau \mid q):= \prod_{i\in[T]} \pi_{\theta}\big(a_i\mid q, \mathcal{F}(\tau_{<i})\big).\label{eq: context fold model}
+\end{align}
+其中 $\tau_{<i}=(a_1,o_1,\ldots,a_{i-1},o_{i-1})$ 表示步骤 $i$ 前所有动作--观察对的完整历史，$\mathcal{F}$ 是上下文管理器，它折叠 \code{\textcolor{red}{branch}} 与 \code{\textcolor{blue}{return}} 工具调用之间的交互历史。下例中，上下文管理器折叠之前分支内的全部动作--观察对：
+\begin{align}
+\mathcal{F}\big(
+a_1, o_1,
+\textcolor{red}{a_2},
+\underbrace{\textcolor{red}{o_2}, a_3, o_3, \textcolor{blue}{a_4}}_{\text{\small 分支 1}},
+\textcolor{blue}{o_4},
+\textcolor{red}{a_5},&
+\underbrace{\textcolor{red}{o_5}, a_6, o_6, a_7,o_7,\textcolor{blue}{a_8}}_{\text{\small 分支 2}},
+\textcolor{blue}{o_8}, a_9, o_9, \textcolor{red}{a_{10}}, o_{10}
+\big) \\
+& \to
+\big(
+a_1, o_1, \textcolor{red}{a_2}, \textcolor{blue}{o_4}, \textcolor{red}{a_5}, \textcolor{blue}{o_8}, a_9, o_9, \textcolor{red}{a_{10}}, o_{10}
+\big),
+\end{align}
+因此，$\textcolor{red}{a_2}$ 与 $\textcolor{blue}{a_4}$ 之间，以及 $\textcolor{red}{a_5}$ 与 $\textcolor{blue}{a_8}$ 之间的片段被折叠。
+
+\textbf{推理效率。}
+推理期间，智能体管理一个上下文 KV-cache：调用 \textcolor{blue}{\code{return}} 动作时，它会将 KV-cache 回滚到对应的 \textcolor{red}{\code{branch}} 位置，因为该位置的上下文前缀与调用 \textcolor{red}{\code{branch}} 动作前相同。这使上下文折叠在推理上具有效率。
+
+\textbf{实例化：规划--执行。}
+为将上下文折叠实例化到长程任务中，我们采用\textit{规划--执行}框架，智能体在两种状态间交替：
+\textit{（i）规划状态：}智能体在主线程中执行高层推理、分解任务，并决定何时为子任务创建分支。在该状态中，不鼓励词元密集型工具使用，使主上下文专注于高层策略。
+\textit{（ii）执行状态：}智能体在活跃分支中完成已分配的子任务。为保持清晰结构并防止嵌套复杂性，执行状态中禁用创建新分支。
+
+\begin{figure}
+    \centering
+    \includegraphics[width=1.0\linewidth]{figs/model_main.png}
+    \vspace{-0.5cm}
+    \caption{\textbf{（a）上下文折叠：}通过分支和返回使智能体能够主动管理上下文的机制。\textbf{（b）FoldGRPO：}上下文折叠智能体的端到端优化。}
+    \label{fig:model-main}
+\end{figure}
+
+\subsection{FoldGRPO：上下文折叠智能体的端到端 RL}
+为优化上下文折叠智能体，本节引入端到端 RL 训练框架，即\underline{Fold}ed-context \underline{G}roup \underline{R}elative \underline{P}olicy \underline{O}ptimization（FoldGRPO）。FoldGRPO 联合优化完整交互轨迹，包括主线程和子任务分支；同时依据上下文折叠模型~\eqref{eq: context fold model}折叠 rollout 历史，从而在训练时维持\textit{紧凑的工作上下文}。此外，FoldGRPO 采用新颖的\textit{过程奖励设计}，高效引导智能体分支行为的训练。我们先在第~\ref{subsubsec: overall}节介绍整体算法设计，再在第~\ref{subsubsec: prm}节给出过程奖励设计。
+
+\subsubsection{整体算法设计}\label{subsubsec: overall}
+在 FoldGRPO 的每个训练步骤中，对训练数据集 $\mathcal{D}$ 中的任务 $q$，根据上下文折叠模型~\eqref{eq: context fold model}从旧策略 $\pi_{\text{old}}$ 采样 $G$ 条轨迹 $(\tau_1,\tau_2,\cdots,\tau_G)$。每条完整轨迹，例如 $\tau_i=(a_{i,1},o_{i,1},\cdots,a_{i,T},o_{i,T})$，均可视为由词元构成的序列：$\tau_i=[\tau_{i,1},\cdots,\tau_{i,|\tau_i|}]$。遵循基于可验证奖励的强化学习（RLVR）配方，每条轨迹 $\tau_i$ 拥有最终奖励 $R_i\in\{0,1\}$。
+
+\textbf{学习目标。}
+FoldGRPO 的学习目标定义为：
+{\small
+\begin{equation}
+\mathcal{J}_{\text{FoldGRPO}} = \mathbb{E}_{\substack{q\sim \mathcal{D},\\ \{\tau_i\}_{i=1}^{G}\sim \pi_{\text{old}}(\cdot|q)} }
+\left[
+\frac{1}{\sum_{i=1}^{G} |{\tau}_i|}
+\sum_{i=1}^{G} \sum_{t=1}^{|{\tau}_i|}
+\min\Big\{
+r_{i,t}(\theta) \widehat{A}_{i,t},
+\ \mathrm{clip}\big(r_{i,t}(\theta), 1-\epsilon_{\text{low}}, 1+\epsilon_{\text{high}}\big)\widehat{A}_{i,t}
+\Big\}
+\right],
+\end{equation}
+}
+其中，重要性采样比率和组相对优势估计器~\citep{shao2024deepseekmath}为：
+\begin{equation}
+r_{i,t}(\theta) =
+\frac{\pi_{\theta}({\tau}_{i,t}\mid q, \mathcal{\textcolor{red}{F}}({\tau}_{i, <t}))}
+     {\pi_{\theta_{\text{old}}}({\tau}_{i,t}\mid q, \mathcal{\textcolor{red}{F}}({\tau}_{i, <t}))}\cdot
+     \mathbf{1}_{\tau_{i,t}}^{\mathrm{LLM}},
+\quad
+\widehat{A}_{i,t} =
+\frac{\mathrm{clip}(R_i + \textcolor{red}{Q_{i, t}}, 0, 1) - \mathrm{mean}(\{R_i\}_{i=1}^{G})}
+     {\mathrm{std}(\{R_i\}_{i=1}^{G})}.
+\end{equation}
