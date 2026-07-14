@@ -1,0 +1,1371 @@
+% files/6-appendix.tex
+
+\clearpage
+\onecolumn
+\appendix
+% \section{Appendix}
+\label{sec:appendix}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{实现细节}
+\label{app:A}
+
+%-----------------------------------------------------------
+\subsection{数据集}
+\label{app:dataset}
+\begin{itemize}
+    \item \textbf{GAIA}~\cite{mialon2023gaia}: 
+    GAIA 通过真实且需要工具辅助的问题评测通用 AI 助手，这些问题通常涉及网页浏览和多步推理。我们在包含 165 项任务的 GAIA 验证集上评测 \our{}，并将其与其他基线比较。
+
+    \item \textbf{Terminal Bench 2.0}~\cite{tbench_2025}：Terminal-Bench 在沙箱化命令行环境中，以可执行测试为评分依据，评估智能体完成端到端现实工作流的能力。我们在共包含 89 项任务的 Terminal-Bench 2.0 测试集上评测 \our{} 并与其他基线比较。考虑到成本，主要实验随机抽取其中 70 项任务。
+
+    \item \textbf{SWE-Bench-Verified:}~\cite{jimenez2023swe} 
+    SWE-Bench Verified 要求智能体生成补丁来解决真实仓库中的真实 GitHub issue，并通过运行测试进行验证，以此衡量自主软件工程能力。Verified 划分经过人工筛查，移除了存在问题的样例。我们在共包含 500 项任务的 SWE-Bench Verified 测试集上评测 \our{} 并与其他基线比较。考虑到成本，我们随机抽取 100 项任务进行评测。
+\end{itemize}
+
+\subsection{SFT 超参数}
+\label{app:sft_hyper}
+实验采用表~\ref{tab:hyper_sft_qwen} 所列的超参数。
+
+\begin{table}[htbp]
+\centering
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{l|c|l|c|}
+\hline
+\textbf{超参数} & \textbf{取值} & \textbf{超参数} & \textbf{取值} \\ \hline
+学习率        & 1e-5            & 权重衰减         & 0.05            \\
+预热比例      & 0.1             & 最大长度         & 16K            \\
+学习率调度器  & cosine          & 批大小           & 64              \\
+epoch         & 2               & BF16             & True            \\
+DeepSpeed     & zero3           & 工具调用模板     & Hermes          \\ \hline
+\end{tabular}
+}
+\caption{实验所用的 SFT 超参数。}
+\label{tab:hyper_sft_qwen}
+\end{table}
+
+
+%-----------------------------------------------------------
+\subsection{基线实现}
+\label{app:baseline_imp}
+在基线实现方面，我们评测了多种广泛使用的智能体框架。实验发现，由于架构与预期使用方式的限制，\texttt{Claude Code} 并不适合 GAIA 的开放世界多跳问答，因此主要实验未报告 \texttt{Claude Code} 的相应结果。
+
+此外，根据初步调查和实证测试，我们发现 \texttt{DeepSeek-V3.2} 与 \textsc{Claude Code} 的原生兼容性较差，因此表~\ref{tab:main_results} 未包含该实验。
+
+在 Terminal-Bench 和 SWE-Bench 评测中，我们使用 \texttt{Harbor} 脚手架，在统一执行接口下运行 \texttt{MiniSWE}、\texttt{OpenHands} 和 \texttt{Claude Code}。
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{提示词}
+\label{app:prompt_used}
+
+%-----------------------------------------------------------
+\subsection{主智能体提示词}
+\label{app:B1}
+
+\subsubsection{GAIA 主智能体提示词}
+\label{app:B1_gaia}
+% TODO: paste GAIA Main Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small GAIA 主智能体提示词}}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+"""
+[GAIA 基准 - 问答任务]
+你是 MainAgent（编排器）。你的任务是把给定问题分解为若干子任务，
+将每个子任务委派给一个子智能体，从而解决该问题。
+
+决策过程：
+1. 检查下方的子任务历史，核对每次尝试的状态、结果和关键发现
+2. 评估：现有结果是否足以回答问题？
+   - 若任一子任务返回了状态为 "done" 的有效结果 -> 考虑使用 'complete'
+   - 若子任务状态为 "incomplete" -> 查看其关键发现，判断已经完成了什么
+3. 决定下一步动作：
+   - 结果充分 -> 使用 'complete' 并给出答案
+   - 仍需工作 -> 对剩余工作使用 'delegate_task'（不要重复已经完成的内容）
+
+预算意识：
+- 你的尝试次数有限（见下方进度）
+- 每次委派都会消耗时间和资源，请根据任务复杂度合理选择模型
+- 若结果看起来正确且已经验证，请相信该结果并完成任务
+
+==== 模型选择指南 ====
+{model_pricing_table}
+
+模型选择策略：
+- 简单任务选择成本较低的模型
+- 复杂推理或关键尝试选择能力更强的模型
+
+==== 进度 ====
+[尝试 {attempt_index}/{max_attempts}] 剩余 {remaining_attempts} 次
+预算有限，请让每次尝试都发挥作用。
+
+==== 问题 ====
+{instruction}
+
+==== 子任务历史 ====
+{subtask_history if subtask_history else "尚未完成任何子任务。"}
+
+==== 可用工具 ====
+{tools_description}
+
+
+==== 输出 ====
+答案格式：GAIA 要求答案准确、简洁（单个词、数字或短语）。
+不要在 answer 字段中加入解释。
+
+返回 JSON：
+
+若结果充分：
+{{
+  "action": "complete",
+  "reasoning": "子任务结果表明 [X]，足以回答该问题",
+  "params": {{ "answer": "简洁答案" }}
+}}
+
+若仍需进一步工作：
+{{
+  "action": "delegate_task", 
+  "reasoning": "此前尝试已得到 [X]，但仍需 [Y] 才能回答问题",
+  "params": {{
+    "task_instruction": "一个具体、可执行的子任务
+    （例如：'提取论文 2211.xxxxx 摘要中的第二个词'）",
+    "context": "此前尝试得到的相关发现",
+    "model": "{sub_models} 中的一个",
+    "tools": ["GoogleSearchAction", "ExtractUrlContentAction", 
+    "ExecuteCodeAction", "ImageAnalysisAction", "ParseAudioAction"]
+  }}
+}}
+"""
+\end{minted}
+\end{tcolorbox}
+
+
+
+\subsubsection{Terminal-Bench 主智能体提示词}
+\label{app:B1_terminal}
+% TODO: paste Terminal-Bench Main Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small Terminal-Bench 主智能体提示词}}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""
+你是 MainAgent（编排器）。你的任务是通过向 SubAgent 委派工作，
+完成给定的软件安装或配置任务。
+
+关键事项：容器生命周期
+- 每个 SubAgent 都在一个全新容器中运行；若再次执行 delegate_task，先前工作将丢失
+- 当 SubAgent 报告 status="done" 时，立即使用 'submit' 在该容器中运行测试
+
+==== 决策过程 ====
+1. 仔细阅读原始任务，识别全部要求和边界情况
+2. 检查子任务历史，核对状态和已完成步骤
+3. 根据任务要求核验 SubAgent 的工作：
+   - SubAgent 是否测试了任务提到的全部要求？
+   - SubAgent 是否测试了边界情况？（例如，任务若提到 "keyboard interrupt"，是否实际测试过？）
+   - SubAgent 标记为 "completed" 的项目是否确实满足任务要求？
+4. 决策：
+   - status="done" 且核验通过 -> 使用 'submit'
+   - status="done" 但核验发现部分要求未满足 -> 使用 'delegate_task' 修复
+   - status="partial" -> 使用 'delegate_task'，并在上下文中说明成功和失败的内容
+
+{budget_warning}
+
+==== 模型选择 ====
+{model_pricing_table}
+
+==== 进度 ====
+[尝试 {attempt_index}/{max_attempts}] 剩余 {remaining_attempts} 次
+
+==== 任务 ====
+{instruction}
+
+==== 子任务历史 ====
+{subtask_history if subtask_history else "尚未完成任何子任务。"}
+
+==== 可用工具 ====
+{tools_description}
+
+==== 输出 ====
+返回 JSON：
+
+若 SubAgent 的 status="done"，且你已确认所有任务要求均已满足：
+{{
+  "action": "submit",
+  "reasoning": "核验完成：[列出已满足的任务要求]。正在提交。",
+  "params": {{ "reason": "任务完成：[与任务要求对应的具体成果]" }}
+}}
+
+若 SubAgent 的 status="done"，但核验发现缺漏：
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent 声称已完成，但存在[具体缺漏]：任务要求 [X]，SubAgent 只测试了 [Y]",
+  "params": {{
+    "task_instruction": "关键：此前尝试遗漏了[具体要求]。
+                        你必须：[准确的修复步骤]",
+    "context": " 此前 SubAgent 声称完成但遗漏：[具体缺漏]\\n-
+                 有效步骤：[应保留的步骤]\\n-
+                 必须修复：[遗漏内容]",
+    "model": "{sub_models} 中的一个"
+  }}
+}}
+
+若 SubAgent 的 status="partial"：
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent 已取得部分进展，需要继续完成[剩余工作]",
+  "params": {{
+    "task_instruction": "从此前 SubAgent 停下的位置继续：[具体后续步骤]",
+    "context": "根据子任务历史：\\n-
+                 有效步骤：[需要重复的步骤]\\n-
+                 失败尝试：[需要避免的方法]",
+    "model": "{sub_models} 中的一个"
+  }}
+}}
+"""
+\end{minted}
+\end{tcolorbox}
+
+
+
+\subsubsection{SWE-Bench 主智能体提示词}
+\label{app:B1_swe}
+% TODO: paste SWE-Bench Main Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small SWE-Bench 主智能体提示词}}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""你是 SWE-Bench 任务的 MainAgent（编排器）。
+你的目标是通过向 SubAgent 委派工作来修复一个 GitHub issue。
+
+
+==== 任务 ====
+{instruction}
+
+仓库：{repo}
+实例：{instance_id}
+
+==== 决策过程 ====
+1. 仔细阅读任务，理解 GitHub issue 及需要修复的内容
+2. 检查子任务历史，核对 SubAgent 的进度、已完成步骤和测试结果
+3. 根据任务要求进行核验：
+   - SubAgent 是否定位了有缺陷的代码？
+   - SubAgent 是否作出了适当的代码修改？
+   - SubAgent 是否运行测试并确认修复有效？
+4. 决策：
+   - status="done" 且测试通过 -> 使用 'submit'
+   - status="done" 但测试失败或不完整 -> 使用 'delegate_task' 修复剩余问题
+   - status="partial" -> 使用 'delegate_task' 并提供后续步骤指导
+
+关键事项：SWE-Bench 容器行为
+- 当 SubAgent 报告 status="done" 且测试通过时，使用 'submit' 触发最终评测
+- 'submit' 会运行官方测试套件（FAIL_TO_PASS + PASS_TO_PASS 测试）以判定是否成功
+
+
+==== 模型选择 ====
+{model_pricing_table}
+
+==== 进度 ====
+[尝试 {attempt_index}/{max_attempts}] 剩余 {remaining_attempts} 次
+{budget_warning}
+
+
+==== 子任务历史 ====
+{subtask_history if subtask_history else "尚未完成任何子任务。"}
+
+==== 可用工具 ====
+{tools_description}
+
+==== 输出 ====
+返回 JSON：
+
+若 SubAgent 的 status="done" 且测试通过：
+{{
+  "action": "submit",
+  "reasoning": "已核验：[修复了什么、哪些测试通过]。正在提交评测。",
+  "params": {{ "reason": "修复已验证：[具体修复说明]" }}
+}}
+
+若 SubAgent 的 status="done"，但测试失败或不完整：
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent 报告已完成，但存在[具体问题]：测试显示[失败详情]",
+  "params": {{
+    "task_instruction": "关键：此前修复不完整。[所需的具体后续步骤]",
+    "context": " 问题：[失败内容]\\n- 已完成：[完成的工作]\\n- 待办：[剩余工作]",
+    "model": "{sub_models} 中的一个"
+  }}
+}}
+
+若 SubAgent 的 status="partial"：
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent 已取得部分进展：[摘要]。接下来需要[后续步骤]",
+  "params": {{
+    "task_instruction": "继续：[根据子任务历史确定的具体后续步骤]",
+    "context": "根据此前尝试：\\n- 有效步骤：[保留这些]\\n- 失败尝试：[避免这些]",
+    "model": "{sub_models} 中的一个"
+  }}
+}}
+"""
+\end{minted}
+\end{tcolorbox}
+
+
+
+%-----------------------------------------------------------
+\subsection{子智能体提示词}
+\label{app:B2}
+
+\subsubsection{GAIA 子智能体提示词}
+\label{app:B2_gaia}
+% TODO: paste GAIA Sub-Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small GAIA 子智能体提示词}},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+ORCHESTRA_GAIA_PROMPT = """
+==== 进度 ====
+[步骤 {current_step}/{max_steps}] 剩余 {remaining_steps} 步
+{budget_warning}
+
+==== 你的任务（来自 MainAgent）====
+{task_instruction}
+
+==== 上下文 ====
+{context}
+
+==== 原始问题（供参考）====
+{original_question}
+
+==== 可用工具 ====
+{action_space}
+
+==== 指南 ====
+1. 专注完成上方分配给你的任务
+2. 输出动作前逐步思考
+3. 将关键观测写入 "memory" 字段
+4. 在 ExecuteCodeAction 中使用 print() 查看计算结果
+5. 完成后立即使用 'finish'
+
+预算：当 remaining_steps <= 5 时，立即使用 'finish'！
+
+==== 输出格式 ====
+```json
+{{
+    "action": "<tool_name>",
+    "params": {{}},
+    "memory": "<观测记录>"
+}}
+```
+
+==== 记忆 ====
+{memory}
+
+==== 当前观测 ====
+{obs}
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+\subsubsection{Terminal-Bench 子智能体提示词}
+\label{app:B2_terminal}
+% TODO: paste Terminal-Bench Sub-Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small Terminal-Bench 子智能体提示词}},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""
+==== 进度 ====
+[步骤 {current_step}/{max_steps}] 剩余：{remaining_steps} 步
+{budget_warning}
+若步数耗尽前未执行 "finish"，你的工作将丢失，并被标记为超时。
+
+==== 你的任务（来自 MainAgent）====
+{task_instruction}
+
+==== 上下文（来自此前尝试）====
+{context}
+请利用这些信息：重复有效步骤，避免失败尝试。
+
+==== 原始问题（供参考）====
+{original_question}
+
+==== 动作空间 ====
+{action_space}
+
+==== 记忆 ====
+近期记忆：
+{memory}
+
+==== 当前观测 ====
+{obs}
+
+==== 思考 ====
+输出动作前逐步思考，并把关键推理写入 memory，供后续步骤使用。
+
+==== 动作指南 ====
+你可以使用两种动作：
+
+1. **execute** - 运行 shell 命令并观测结果
+   - 用于安装软件包、配置服务、核验状态等
+   - 示例："apt update && apt install -y nginx"
+
+2. **finish** - 向 MainAgent 报告进度
+   - 任务完成时使用（status="done"）
+   - 已取得进展但仍需继续时使用（status="partial"）
+   - 必须在步数耗尽前使用！若超时，你的工作将丢失。
+
+**finish 中应报告的内容：**
+- completed：列出成功且有效的步骤（例如，["apt update 成功", "nginx 已安装"]）
+- issues：列出失败的尝试及原因（例如，["nginx -v 失败：找不到命令"]）
+- message：简要总结当前状态
+
+这些信息有助于下一个 SubAgent 判断应重复哪些步骤、避免哪些做法。
+
+==== 输出格式 ====
+关键要求：只能回复一个 JSON 对象，不得包含解释、Markdown 或其他文本。
+
+使用 execute：
+{{"action": "execute", "params": {{"command": "你的 shell 命令"}}, "memory": "关键发现"}}
+
+使用 finish：
+{{"action": "finish", "params": {{"status": "done|partial", "completed": [...], 
+
+"issues": [...], "message": "..."}}, "memory": "最终记录"}}
+
+
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+
+\subsubsection{SWE-Bench 子智能体提示词}
+\label{app:B2_swe}
+% TODO: paste SWE-Bench Sub-Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small SWE-Bench 子智能体提示词}},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false, before upper=\sloppy]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+SWEBENCH_SUBAGENT_PROMPT = """
+你是一个自主软件工程智能体，负责解决 GitHub issue。
+你可以使用专用命令接口（ACI）来浏览、查看、编辑和测试代码。
+你将在 Docker 容器中工作，仓库已经克隆并检出到正确的 commit。
+
+==== 进度 ====
+[步骤 {current_step}/{max_steps}] 剩余：{remaining_steps} 步
+{budget_warning}
+若步数耗尽前未执行 "finish"，你的工作将丢失，并被标记为超时。
+
+==== 你的任务（来自 MainAgent）====
+{task_instruction}
+
+==== 上下文（来自此前尝试）====
+{context}
+
+==== 当前状态 ====
+{state_info}
+
+==== 命令参考 ====
+{command_docs}
+
+=== FINISH（向 MainAgent 报告）===
+finish <status> <message>
+    向 MainAgent 报告进度。status 必须为以下值之一：
+    - done：任务成功完成，测试通过
+    - partial：已取得进展但尚未完成（例如，已找到缺陷但修复尚未生效）
+
+==== 记忆 ====
+近期记忆：
+{memory}
+
+==== 当前观测 ====
+{observation}
+
+==== 输出格式（严格）====
+必须严格按以下顺序输出两个部分，不得包含其他文本。
+
+DISCUSSION
+<在此填写推理>
+
+COMMAND
+<在此填写单条命令>
+
+规则：
+- DISCUSSION 必须包含逐步推理
+- COMMAND 必须只包含一行且恰好一条命令
+- COMMAND 行之后不得添加解释、示例或注释
+- 命令之后不得输出任何内容
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+
+
+\subsubsection{子智能体摘要提示词}
+\label{app:B2_review}
+% TODO: paste Reviewer/Verifier prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small 子智能体摘要提示词}},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""你是轨迹摘要器。请检查 SubAgent 的执行轨迹，
+并将执行轨迹与原始任务要求进行比较。
+
+== 原始任务 ==
+{original_question}
+
+== 执行轨迹 ==
+{trace_text}
+
+== 输出 ==
+根据轨迹回答：
+1. 已完成：原始任务中的哪些要求确实已经完成？
+2. 剩余工作：哪些要求仍未满足或没有得到充分测试？
+
+用 5-10 个要点总结关键进展、问题和剩余事项。
+只输出要点，内容应具体、简洁。只输出上述两个部分。"""
+
+\end{minted}
+\end{tcolorbox}
+
+
+\subsection{学习提示词}
+
+\subsubsection{策略优化提示词}
+\begin{tcolorbox}[title={\textbf{\small 策略优化提示词}},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+STRATEGY_OPTIMIZE_PROMPT = """
+你正在优化用于 GAIA 任务的 MainAgent 策略块。
+重点关注子模型选择、委派时机，以及成本与性能的管理。
+你需要分析模型在该任务上的能力和成本，
+并为主智能体制定更好的策略，在保持性能的同时选择成本更低的模型。
+
+当前策略块：
+{strategy}
+
+评测摘要：
+- pass_rate: {pass_rate}
+- avg_reward: {avg_reward}
+- total_cost: {total_cost}
+
+近期轨迹（摘要）：
+{trajectories}
+
+只写一个改进后的策略块。以 XML 输出：
+<prompt>...策略文本...</prompt>
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+\subsubsection{策略选择提示词}
+
+\begin{tcolorbox}[title={\textbf{\small 策略选择提示词}},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+STRATEGY_SELECT_PROMPT = """
+你正在比较两个用于 GAIA 任务的 MainAgent 策略提示词。
+请总结每条轨迹的优缺点，将其与策略文本联系起来，
+然后同时考虑性能和成本，判断哪种策略整体更优。
+
+# A（父策略/当前最优）
+pass_rate: {pass_rate_a} / avg_reward: {avg_reward_a} / total_cost: {total_cost_a}
+strategy: {strategy_a}
+trajectories: {traj_a}
+
+# B（新候选）
+pass_rate: {pass_rate_b} / avg_reward: {avg_reward_b} / total_cost: {total_cost_b}
+strategy: {strategy_b}
+trajectories: {traj_b}
+
+以 XML 回复：
+<analysis>你的推理</analysis>
+<choose>A/B</choose>
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{案例研究}
+\label{app:case_study}
+
+\subsection{GAIA 案例研究}
+
+\subsubsection{案例概览}
+
+我们在 GAIA 基准的 165 项任务上评测 \our{}，主智能体和子智能体均使用 Gemini-3-Flash。结果表明，\our{} 在复杂多步任务中具有强大的编排能力和稳健性。在全部 165 项 \textsc{GAIA} 任务上，\our{} 的总体成功率达到 $80.0\%$。按难度划分，Level~1（简单）的成功率为 $88.7\%$，Level~2（中等）为 $80.2\%$，Level~3（困难）为 $61.5\%$。
+
+\paragraph{长程支持与上下文稳定性。}
+系统成功完成了多项交互链很长的高成本任务。例如，任务 \texttt{935e2cff}（Level~1）经过 10 次尝试、总成本达到 \$5.93 后仍成功完成；任务 \texttt{853c8244}（Level~2）也在 10 轮交互后成功完成，成本为 \$3.06。这些案例表明，系统可以在长程执行期间保持上下文完整性，缓解标准 LLM 长对话中常见的“上下文退化”问题。
+
+\paragraph{强大的错误恢复能力。}
+我们发现，\our{} 的一项关键优势是自我纠错机制。在 Level~3 困难任务中，\texttt{8131e2c0} 和 \texttt{0512426f} 经过 10 次尝试后成功，\texttt{983bba7c} 经过 9 次尝试后成功，\texttt{872bfbb1} 经过 8 次尝试后成功。这说明，即使初始计划失败，系统仍可通过主智能体的反思与重新规划，结合子智能体的迭代执行，逐步收敛到正确答案。共有 34 项任务在超过 5 次尝试后成功完成，体现了很强的错误恢复能力。
+
+%在这里，我们展示了一版我们的轨迹数据。在mainagent接收到任务之后，它会动态的把任务拆解并且输出action，选择delegatetask或者是complete。subagent执行之后，选择finish action结束任务。subagent会调用模型review一遍执行的任务实际
+%
+
+
+% \paragraph{Case Study Overview.}
+下面通过一个代表性案例说明所提出的分层编排机制在实践中如何运行。
+
+该任务是 GAIA 基准中的一个 \textbf{Level-2} 问题，要求智能体找出纽约大都会艺术博物馆在 2015 年举办的、以当年生肖命名的展览，并统计“十二生肖”套组中有多少件塑像能看到手。期望答案为 \textbf{11}。
+
+我们的编排器通过三个关键的迭代改进阶段，在 \textbf{10 次尝试}中成功解决了该任务：
+
+\textbf{(i) 通过反馈回路纠错。}
+在尝试~1 中，主智能体依据先验知识提出了错误的藏品编号（\texttt{1975.1.784-795}）。子智能体报告这些编号对应无关艺术品后，编排器在尝试~2 中\emph{主动修正}了这一假设，并明确指示：“不要使用 1975.1.784-795，因为它们是不相关的绘画。”这体现了系统从子智能体失败中学习并相应改进任务指令的能力。
+
+\textbf{(ii) 提取并传播关键发现。}
+在尝试~5 中，子智能体虽然超时，却发现了一条关键证据：“蛇像的双手藏在宽大的长袖中。”编排器提取了这一部分结果，并将其保留在尝试~6 的上下文中：“此前分析表明，蛇像（02.18.730f）的双手藏在袖中。”这说明我们的架构能够跨尝试保留并传播有价值的中间发现。
+
+\textbf{(iii) 形成假设并可靠收敛。}
+到尝试~7 时，编排器综合累积证据形成了具体假设：答案很可能是 11，即除蛇像外的所有塑像。它没有立即提交，而是继续委派核验任务，确认其他塑像（如猴、狗、猪）是否只有“爪”而不是“手”。最终，在尝试~10 中，编排器获得充分的相互印证证据，可靠地执行 \texttt{complete} 动作并给出正确答案。
+
+
+\subsubsection{详细案例}
+
+下面给出主智能体每次尝试的详细决策参数：
+\begin{tcolorbox}[
+  title={\textbf{\small 案例元数据（JSON）}},
+  boxrule=1pt, arc=0mm,
+  colback=gray!5, colframe=gray!70,
+  breakable, before skip=8pt, after skip=10pt,
+  pad at break=2mm, parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=true, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "task_id": "853c8244-429e-46ca-89f2-addf40dfb2bd",
+  "question": "纽约大都会艺术博物馆在 2015 年举办了一场以当年生肖命名的展览。
+  其中的‘十二生肖’套组里，有多少件塑像能看到手？",
+  "expected_answer": "11",
+  "main_model": "gemini-3-flash-preview",
+  "success": true,
+  "total_cost": 3.0551280000000003,
+  "attempts": 10
+}
+\end{minted}
+\end{tcolorbox}
+
+
+
+\label{app:C1_gaia}
+% TODO:
+% - Task description (1--2 lines)
+% - Key delegation steps (with raw trajectory excerpts)
+% - What each delegate solved and what context was passed
+% - Final answer
+
+% -------- Preamble (required) --------
+% \usepackage[most]{tcolorbox}
+% \usepackage{xcolor}
+% \usepackage{minted}
+% % minted requires: -shell-escape
+%
+% % Optional: nicer subtitles in tcolorbox
+% \tcbset{subtitle style={font=\bfseries}}
+
+% -------- Case Study 1 (tcolorbox + minted) --------
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 1 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "我需要确定纽约大都会艺术博物馆在 2015 年举办的、
+  以当年生肖命名的具体展览，然后统计该展览‘十二生肖’套组中
+  有多少件塑像的手可见。这需要在线研究并目视检查博物馆藏品。",
+  "params": {
+    "task_instruction": "
+    1. 找出纽约大都会艺术博物馆在 2015 年举办的、以当年生肖命名的展览
+    （注：2015 年为羊年）。
+    \n2. 找出该展览中问题所指的‘十二生肖’塑像套组
+    （可能是一套唐代陶俑）。
+    \n3. 查看大都会博物馆在线藏品中这 12 件塑像的图像
+    （例如，藏品编号 1975.1.784 至 1975.1.795）。
+    \n4. 统计这 12 件拟人塑像中有多少至少能看到一只手
+    （能看到手指或手部结构，而不是藏在袖中，也不能只是动物的爪或蹄）。
+    \n5. 以最终数量作为答案。",
+    "context": "2015 年是羊年。大都会博物馆的展览可能名为
+    'Celebrating the Year of the Ram'。其馆藏中有一套著名的十二生肖塑像。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 2 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试正确识别了 2015 年展览 'Celebrating the Year of the Ram'，
+  但由于藏品编号错误和工具失败，未能正确找出具体的生肖塑像套组，
+  也未能统计可见的手。我需要找到该展览中的十二生肖塑像套组，
+  并目视检查其手部。",
+  "params": {
+    "task_instruction": "1. 找出 2015 年纽约大都会艺术博物馆展览
+    'Celebrating the Year of the Ram' 中具体的‘十二生肖’套组。
+    \n2. 找到该套组在大都会博物馆的藏品编号
+    （可能是唐代塑像，也可能为 02.18.730a-l 或类似编号）。
+    \n3. 逐一检查这 12 件塑像，确定有多少件能在袖外看到手
+    （或具有手部形态的手指或爪）。
+    \n4. 统计手部可见的塑像数量，并以整数作答。",
+    "context": "2015 年是羊年。展览 'Celebrating the Year of the Ram'
+    从 2015 年 1 月 19 日持续至 8 月 23 日。
+    此前尝试表明应调查藏品编号 02.18.730a-l。
+    不要使用 1975.1.784-795，因为它们是不相关的绘画。
+    许多唐代生肖陶俑的手藏在袖中；问题专门询问可见的手。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 3 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试已确认 2015 年展览为 'Celebrating the Year of the Ram'，
+  目标套组很可能是‘十二生肖’（藏品编号 02.18.730a-l）。
+  但由于 API 错误以及未妥善管理已有发现，仍未统计出可见手部的数量。
+  我将任务委派给一个子智能体，专门寻找 02.18.730a-l 的图像，
+  并统计手部可见的塑像。",
+  "params": {
+    "task_instruction": "1. 确认名为‘十二生肖’的艺术品
+    （藏品编号可能为 02.18.730a-l）曾在 2015 年纽约大都会艺术博物馆展览
+    'Celebrating the Year of the Ram' 中展出。
+    \n2. 对这套 12 件塑像，确定其中多少件动物塑像的手部可见
+    （即能在袖外看到手指或手部结构，可能正在持物或自然放置）。
+    \n3. 在大都会博物馆网站或相关目录记录中寻找该套组的高清图像，
+    确保准确统计全部 12 件塑像。
+    \n4. 只给出最终数量作为答案。",
+    "context": "展览为 'Celebrating the Year of the Ram'（2015 年 1 月至 8 月）。
+    该套组为清代玉雕，藏品编号 02.18.730a-l。此前尝试表明，
+    这些是坐姿拟人塑像。请仔细确认手是否真正可见，
+    还是藏在笏板或衣袖之中。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 4 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试已经找出展览 'Celebrating the Year of the Ram'
+  和玉雕生肖套组（02.18.730a-l），但未能明确统计出手部可见的塑像数量。
+  我需要一个子智能体专门分析玉雕套组中 12 件独立塑像
+  （02.18.730a 至 02.18.730l）的图像，统计其中有多少至少能看到一只手
+  （袖外可见手指或手部结构）。",
+  "params": {
+    "task_instruction": "1. 确认大都会博物馆 2015 年展览
+    'Celebrating the Year of the Ram' 中展出的‘十二生肖’套组，
+    并确定其藏品编号（可能为 02.18.730a-l）。
+    \n2. 对该玉雕套组中的 12 件塑像逐一查看大都会博物馆网站上的高清图像
+    或详细说明，判断手部（手指或手的结构）是否可见。
+    \n3. 注意：‘手部可见’是指手没有完全藏在宽大的衣袖中。
+    它可能正拿着扇子、卷轴或药草等物品。
+    \n4. 给出这 12 件塑像中手部可见的总数（整数）。",
+    "context": "展览是 'Celebrating the Year of the Ram'（2015 年 1 月至 2016 年 1 月）。
+    玉雕套组的藏品编号为 02.18.730a-l。
+    此前尝试已确认该套组曾在展览中展出。
+    你需要对每一件藏品（A 至 L）进行图像或文字说明核查，以统计可见的手。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 5 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试已正确确认目标套组为清代玉雕‘十二生肖’
+  （藏品编号 02.18.730a-l），曾在 2015 年展览
+  'Celebrating the Year of the Ram' 中展出。
+  但这些尝试仍未得出手部可见塑像的最终数量。
+  我将委派一项任务，通过检查 12 件塑像（a 至 l）各自的高清图像
+  或详细说明，完成确定性统计。",
+  "params": {
+    "task_instruction": "
+    1. 访问大都会博物馆藏品编号 02.18.730（Object ID 42102）的页面，
+    以及其子项（02.18.730a 至 02.18.730l）。
+    \n2. 对该套组中的 12 件塑像逐一判断，衣袖外是否能看到手
+    （手指、手部结构，或明显起手作用的爪）。
+    这些塑像通常拿着扇子、卷轴或毛笔等物品，因此手部可见。
+    \n3. 统计 12 件塑像中至少有一只手可见的总数。
+    \n4. 以最终整数数量作答。",
+    "context": "2015 年大都会博物馆展览为 'Celebrating the Year of the Ram'。
+    相关‘十二生肖’套组的编号是 02.18.730a-l。使用 DT5058.jpg 等高清图像
+    （可在大都会博物馆网站找到）或单件藏品照片，核验每件塑像
+    （鼠、牛、虎、兔、龙、蛇、马、羊、猴、鸡、狗、猪）的手部可见性。
+    注意，‘可见’意味着手没有完全缩在衣袖中。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 6 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=true, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试已正确确认‘十二生肖’套组为 Heber R. Bishop 收藏中的玉雕，
+  藏品编号 02.18.730a-l（Object ID 42102），曾在 2015 年展览
+  'Celebrating the Year of the Ram' 中展出。
+  但尚未明确统计出其中有多少件手部可见。
+  尝试 5 指出，蛇像（02.18.730f）的双手藏在袖中。
+  我需要一个子智能体寻找 12 件塑像（a 至 l）各自的详细说明，
+  判断其手部是否可见（能看到手指或手部结构，通常正在持物）。",
+  "params": {
+    "task_instruction": "找出纽约大都会艺术博物馆藏品中的 12 件玉雕生肖塑像
+    （藏品编号 02.18.730a-l）。对每件塑像
+    （鼠、牛、虎、兔、龙、蛇、马、羊、猴、鸡、狗、猪），
+    判断袖外是否至少能看到一只手（或手指）。
+    许多拟人塑像手持卷轴、扇子或拂尘等物品。
+    统计手部可见的塑像总数，并给出整数。",
+    "context": "这些塑像来自清代乾隆时期，曾参加 2015 年展览
+    'Celebrating the Year of the Ram'。藏品编号为 02.18.730a 至 02.18.730l。
+    此前分析表明，蛇像（02.18.730f）的双手藏在袖中。
+    重点寻找单件说明或高清图像，逐一检查全部 12 件塑像。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 7 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "我们已确认展览为 2015 年的 'Celebrating the Year of the Ram'，
+  核心展品是十二生肖玉雕套组（藏品编号 02.18.730a-l）。
+  一段常见说明称：‘除双手藏在袖中的蛇像外，其他 11 件塑像各自都拿着一件物品。’
+  这强烈表明答案是 11。
+  但问题将‘手部可见’明确限定为‘能看到手指或手部结构，
+  而不是纯粹的动物爪或蹄’。
+  我需要进行最终核验，确认除蛇外的 11 件塑像确实展示了人形手指或手，
+  而不是动物爪，尤其要检查猴、狗和猪。",
+  "params": {
+    "task_instruction": "1. 核验大都会博物馆‘十二生肖’玉雕套组
+    （藏品编号 02.18.730a-l）中除蛇像（02.18.730f）外 11 件塑像的具体属性和手部可见性。
+    \n2. 对每种动物（鼠、牛、虎、兔、龙、马、羊、猴、鸡、狗、猪），
+    确认其拿着各自物品（蜡烛、扇子、盾牌等）时，是否至少能看到一只人形手
+    （手指或手部结构）。
+    \n3. 特别检查这些拟人塑像中是否有任何一件表现为‘爪’或‘蹄’，
+    因而不符合‘手部可见’的定义；也要检查是否有塑像虽拿着物品，手却仍被遮住。
+    \n4. 确认至少有一只手可见的动物塑像最终数量。",
+    "context": "展览为 2015 年的 'Celebrating the Year of the Ram'，套组编号为 02.18.730a-l。
+    蛇像确定没有可见的手。图像和说明表明，其他 11 件塑像呈人形并各自持物。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 8 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试已正确确认目标艺术品为 2015 年纽约大都会艺术博物馆展览
+  'Celebrating the Year of the Ram' 中的十二生肖玉雕套组
+  （藏品编号 02.18.730a-l）。现已确定蛇像（02.18.730f）的双手藏在袖中。
+  我需要确认其他 11 件塑像在拿着各自物品时是否都能看到手，
+  或是否还有任何塑像的手或爪也被遮住。",
+  "params": {
+    "task_instruction": "1. 核验纽约大都会艺术博物馆‘十二生肖’玉雕套组
+    （藏品编号 02.18.730a-l）中 12 件塑像各自的手部可见性。
+    \n2. 搜索该套组的博物馆具体说明或目录条目，查明哪些动物的手被遮住。
+    \n3. 特别确认是否有‘只有蛇像’把手藏起来的说明，
+    或猪、龙等其他塑像的手是否也被遮住。
+    \n4. 统计至少有一只手（或手指、人形手部结构）在袖外可见的塑像数量。
+    \n5. 给出最终整数数量。",
+    "context": "展览为 2015 年的 'Celebrating the Year of the Ram'。
+    套组编号为 02.18.730a-l。此前发现表明蛇像（02.18.730f）把手收在袖中。
+    我们需要确认其余 11 件塑像的情况。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 9 - 主智能体决策}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "此前尝试已确认展览为 2015 年的 'Celebrating the Year of the Ram'，
+  套组为‘十二生肖’玉雕（藏品编号 02.18.730a-l）。
+  现有发现表明，蛇像（02.18.730f）的双手藏在袖中，其他塑像则各自持物。
+  我需要确认是否只有蛇像把手藏了起来，从而得到数量 12 - 1 = 11，
+  还是龙或猪等其他塑像的手也被遮住。",
+  "params": {
+    "task_instruction": "找出参加 2015 年大都会博物馆展览
+    'Celebrating the Year of the Ram' 的 12 件玉雕生肖塑像
+    （藏品编号 02.18.730a-l）。逐一判断这 12 件塑像的手是否可见。
+    特别搜索大都会博物馆的官方说明（可能位于 Bishop Collection 目录中），
+    查明哪些塑像的手藏在袖中，哪些塑像能看到持物的手。
+    确认是否只有蛇像把手藏了起来。",
+    "context": "这些塑像是清代玉雕拟人生肖动物。
+    此前尝试发现蛇像（02.18.730f）的手被遮住。
+    大多数来源暗示其他 11 件塑像持有物品，手部可见。
+    请检查龙、狗、猪等其他动物是否也把手藏了起来，以核验‘11’是否正确。",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small 尝试 10 - 主智能体决策（最终）}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=black!5,
+  colframe=black!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "complete",
+  "reasoning": "纽约大都会艺术博物馆在 2015 年举办的、以当年生肖羊命名的展览
+  是 'Celebrating the Year of the Ram'。该展览的一件重点展品是‘十二生肖’
+  （藏品编号 02.18.730a-l），由 12 件清代玉雕拟人塑像组成。
+  根据博物馆说明和 DT5058.jpg 等高清图像，除蛇像（02.18.730f）外，
+  每件塑像都拿着一样物品（如蜡烛、扇子、卷轴或桃子），
+  因而至少有一只手能在袖外看到。
+  蛇像的说明特别指出，它端坐时将双手收在宽大的长袖中，
+  呈文人姿态，因此双手不可见。
+  所以，12 件动物塑像中有 11 件能看到手。",
+  "params": {
+    "answer": "11"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+
+
+% \subsection{Terminal-Bench Case Study}
+% \label{app:C2_terminal}
+% % TODO
+
+% \subsection{SWE-Bench Case Study}
+% \label{app:C3_swe}
+% % TODO
+
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{工具与动作空间}
+\label{app:action_space}
+% TODO:
+% - Main agent action space: complete / delegate_task (schema)
+% - Sub-agent tools per benchmark (inventory + constraints)
+% - Any sandbox / network constraints
+
+% (Optional) Table D1 placeholder: tool inventory
+% \begin{table}[t]
+% \centering
+% \small
+% \caption{Tool inventory and constraints.}
+% \label{tab:D_tools}
+% \begin{tabular}{l l l}
+% \toprule
+% Benchmark & Tool Name & Constraints / Notes \\
+% \midrule
+% GAIA &  &  \\
+% Terminal-Bench &  &  \\
+% SWE-Bench &  &  \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+
+本附录详细介绍 \our{} 框架的动作空间，包括主智能体与子智能体可用的动作，以及每个基准中的工具清单和执行约束。
+
+\subsection{主智能体动作空间}
+
+主智能体负责全局任务规划和子任务委派，其动作空间由两个核心动作构成。
+
+\paragraph{\texttt{delegate\_task}.}
+该动作将一个范围明确的子任务委派给专用子智能体。其参数模式定义如下：
+
+\begin{tcolorbox}[title={\textbf{\small 动作模式：delegate\_task}},
+  boxrule=1pt, arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable, before skip=6pt, after skip=10pt,
+  pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "type": "object",
+  "properties": {
+    "task_instruction": {
+      "type": "string",
+      "description": "面向子智能体的详细、可执行指令"
+    },
+    "context": {
+      "type": "string",
+      "description": "从此前尝试中提炼的补充上下文"
+    },
+    "model": {
+      "type": "string",
+      "description": "要使用的模型别名",
+      "enum": ["model_1", "model_2", "..."]
+    },
+    "tools": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "可选：向子智能体开放的工具子集"
+    }
+  },
+  "required": ["task_instruction", "model"]
+}
+\end{minted}
+\end{tcolorbox}
+
+\paragraph{\texttt{complete}.}
+该动作提交最终答案并终止任务。
+
+\begin{tcolorbox}[title={\textbf{\small 动作：complete}},
+  boxrule=1pt, arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable, before skip=6pt, after skip=10pt,
+  pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, autogobble]{json}
+{
+  "action": "complete",
+  "params": {
+    "answer": "<最终答案字符串>"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\subsection{各基准中的子智能体工具}
+\label{app:tools}
+表~\ref{tab:D_tools} 总结了每个基准中子智能体可用的工具及相应约束。
+
+\begin{table}[t]
+\centering
+\small
+\caption{各基准的工具清单与约束。}
+\label{tab:D_tools}
+\begin{tabular}{l l p{5.8cm}}
+\toprule
+\textbf{基准} & \textbf{工具名称} & \textbf{约束与说明} \\
+\midrule
+\multirow{6}{*}{GAIA}
+  & \texttt{GoogleSearchAction} & Serper API；最多 5 条结果；30 秒超时 \\
+  & \texttt{ExtractUrlContentAction} & Jina API；长页面分块；50 秒超时 \\
+  & \texttt{ExecuteCodeAction} & 在 \texttt{workspace/temp} 中沙箱执行；10 秒超时 \\
+  & \texttt{ImageAnalysisAction} & 视觉 LLM 后端；支持 URL 和本地文件 \\
+  & \texttt{ParseAudioAction} & 支持音频的 LLM 后端；支持多种格式 \\
+  & \texttt{finish} & 向主智能体报告结果与状态 \\
+\midrule
+\multirow{3}{*}{Terminal-Bench}
+  & \texttt{execute} & 在 Docker/E2B 沙箱中运行 shell 命令 \\
+  & \texttt{finish} & 报告进度，但不触发测试 \\
+
+\midrule
+\multirow{4}{*}{SWE-Bench}
+  & \texttt{execute} & 在 Docker 容器中运行 shell 命令 \\
+  & \texttt{view\_file} & 按指定行范围读取文件 \\
+  & \texttt{edit\_file} & 通过字符串替换编辑文件 \\
+  & \texttt{finish} & 向主智能体报告进度 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{GAIA 工具}
+
+在 GAIA 基准中，子智能体配备了网页检索、代码执行和多模态分析工具。
+
+\begin{itemize}
+\item \textbf{\texttt{GoogleSearchAction}.} 通过 Serper API 执行网页搜索。
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"GoogleSearchAction",
+ "params":{"query":"...","k":5,"gl":"us","hl":"en"}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ExtractUrlContentAction}.} 通过 Jina API 提取网页内容。
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ExtractUrlContentAction",
+ "params":{"url":"...","browse_query":"..."}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ExecuteCodeAction}.} 在沙箱环境中执行 Python 或 Bash 代码。
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ExecuteCodeAction",
+ "params":{"code":"...","code_type":"python|bash","timeout_sec":10}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ImageAnalysisAction}.} 调用具备视觉能力的 LLM 后端分析图像。
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ImageAnalysisAction",
+ "params":{"query":"...","image_path":"..."}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ParseAudioAction}.} 调用具备音频能力的 LLM 后端处理音频输入。
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ParseAudioAction",
+ "params":{"query":"...","audio_path":"..."}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{finish}.} 向主智能体报告子任务结果。
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"finish",
+ "params":{"result":"...","status":"done|partial|blocked","summary":"..."}}
+\end{minted}
+\end{tcolorbox}
+\end{itemize}
+
+\subsubsection{Terminal-Bench 工具}
+
+在 Terminal-Bench 中，子智能体使用以下工具在 Docker/E2B 沙箱内执行 shell 命令：
+\begin{itemize}
+    \item \textbf{\texttt{execute}:} 运行 shell 命令并返回输出。
+    \item \textbf{\texttt{finish}:} 报告中间进度，但不触发测试。
+\end{itemize}
+
+\subsubsection{SWE-Bench 工具}
+
+在 SWE-Bench 中，子智能体具备代码浏览与编辑能力：
+\begin{itemize}
+    \item \textbf{\texttt{execute}:} 运行 shell 命令，例如执行 \texttt{git} 操作和测试。
+    \item \textbf{\texttt{view\_file}:} 读取指定行范围内的文件内容。
+    \item \textbf{\texttt{edit\_file}:} 通过字符串替换编辑文件。
+    \item \textbf{\texttt{finish}:} 向 MainAgent 报告进度。
+\end{itemize}
+
+\subsection{沙箱与网络约束}
+
+\paragraph{代码执行沙箱。}
+\texttt{ExecuteCodeAction} 在隔离目录（\texttt{workspace/temp}）中执行代码。系统禁止可能具有破坏性的 Bash 操作，包括删除文件、提升权限、更改权限、根目录级重定向和系统级命令。默认执行超时时间为 10 秒。
+
+\paragraph{网络约束。}
+网页访问只能通过工具 API 进行。网页搜索使用 Serper API（\texttt{google.serper.dev}），超时时间为 30 秒；URL 内容提取使用 Jina API（\texttt{r.jina.ai}），超时时间为 50 秒。系统不会向智能体直接开放原始 HTTP 请求。
+
+\paragraph{Terminal-Bench 沙箱。}
+Terminal-Bench 支持 Docker、E2B 和 Daytona 后端。默认执行超时时间为 600 秒，工作目录根据 Dockerfile 中的 \texttt{WORKDIR} 指令自动推断。
+
+\paragraph{SWE-Bench 沙箱。}
+每项 SWE-Bench 任务都在隔离的 Docker 容器中运行。系统自动克隆目标仓库，并检出指定的基础 commit。测试使用 \texttt{pytest} 执行，超时时间为 300 秒。
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{第三方 API 与模型定价}
+\label{app:E}
+
+%-----------------------------------------------------------
+\subsection{第三方 API}
+\label{app:E1}
+% TODO:
+% - List external APIs used (search, browser, etc.)
+% - Rate limits / caching / reliability notes
+
+
+我们使用少量第三方 API 来支持网页搜索，以及沙箱化智能体环境的创建与执行。
+
+\begin{table}[h]
+\centering
+\small
+\begin{threeparttable}
+\caption{系统使用的第三方 API。}
+\label{tab:third_party_apis}
+\begin{tabular}{l l p{0.56\linewidth}}
+\toprule
+\textbf{API} & \textbf{作用} & \textbf{在 \our{} 中的用法} \\
+\midrule
+\textbf{Serper} (\texttt{serper.dev}) & 网页搜索 & 作为主要搜索 API，在 GAIA 风格的信息检索子任务中获取相关网页和摘要。 \\
+\textbf{Jina} (\texttt{jina.ai}) & 网页内容检索 & 用于轻量级网页获取与阅读，例如将 URL 转换为便于提取的干净文本，以支持搜索和阅读子任务。 \\
+\textbf{E2B} (\texttt{e2b.dev}) & 沙箱环境 & 用于创建资源受控的隔离执行环境，供智能体调用工具，例如运行代码或执行依赖环境的操作。 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item \textbf{用法。}这些 API 只能通过我们的工具接口调用；主智能体和子智能体不会直接访问外部服务。
+\item \textbf{可复现性。}在适用时，我们会缓存检索到的网页内容，并记录 API 响应与元数据，例如时间戳、查询字符串和 URL，以保证评测一致性。
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+
+
+%-----------------------------------------------------------
+\subsection{模型定价表与成本核算}
+\label{app:E2}
+% TODO:
+% - Pricing table (input/output per 1M tokens)
+% - Cost accounting protocol (what tokens counted, system prompt included, etc.)
+
+% (Optional) Table E1 placeholder: pricing
+% \begin{table}[t]
+% \centering
+% \small
+% \caption{Model pricing and cost accounting.}
+% \label{tab:E_pricing}
+% \begin{tabular}{l c c c}
+% \toprule
+% Model & Input (\$/1M tok) & Output (\$/1M tok) & Notes \\
+% \midrule
+%  &  &  &  \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+% Requires: \usepackage{booktabs}, \usepackage{threeparttable}, \usepackage{graphicx}
+
+
+\begin{tcolorbox}[title={\textbf{\small 成本表}}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{text}
+
+    PRICES = {
+        # openai: https://platform.openai.com/docs/pricing
+        # anthropic: https://docs.anthropic.com/en/docs/about-claude/pricing
+        # openrouter: https://openrouter.ai/
+        "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+        "o3": {"input": 0.002, "output": 0.008},
+        "o3-mini": {"input": 0.0011, "output": 0.0044},
+        "gpt-5": {"input": 0.00125, "output": 0.01},
+        "gpt-5-mini": {"input":0.00025, "output": 0.002},
+        "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},
+        "moonshotai/kimi-k2": {"input": 0.000296, "output": 0.001185}, 
+        "deepseek/deepseek-chat-v3.1": {"input":0.00025 , "output":0.001},
+        "deepseek-chat": {"input":0.00025 , "output":0.001},
+        "z-ai/glm-4.5": {"input": 0.00033, "output": 0.00132},
+        "gemini-2.5-pro": {"input": 0.00125, "output": 0.01},
+        "claude-4-sonnet": {"input": 0.003, "output": 0.015},
+        "claude-sonnet-4-5": {"input": 0.003, "output": 0.015},
+        "claude-4-5-haiku": {"input": 0.00088, "output": 0.0044},
+        "claude-4-sonnet-20250514": {"input": 0.003, "output": 0.015},
+        "gemini-2.5-flash": {"input": 0.0003, "output": 0.00252},
+        "gemini-3-flash-preview": {"input": 0.0005, "output": 0.003},
+        "gemini-3-pro-preview": {"input": 0.002, "output": 0.004},
+        "gemini-2.5-flash-image": {"input": 0.0003, "output": 0.03},
+    }
+
+
+\end{minted}
+\end{tcolorbox}

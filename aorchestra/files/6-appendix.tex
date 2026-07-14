@@ -1,0 +1,1405 @@
+% files/6-appendix.tex
+
+\clearpage
+\onecolumn
+\appendix
+% \section{Appendix}
+\label{sec:appendix}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Implemention Details}
+\label{app:A}
+
+%-----------------------------------------------------------
+\subsection{Datasets}
+\label{app:dataset}
+\begin{itemize}
+    \item \textbf{GAIA}~\cite{mialon2023gaia}: 
+    GAIA benchmarks general AI assistants on realistic, tool-augmented questions (often involving web browsing and multi-step reasoning).
+    We evaluate \our{} and compare with other baselines on the GAIA validation split, which contains a total of 165 tasks.
+
+    \item \textbf{Terminal Bench 2.0}~\cite{tbench_2025}: Terminal-Bench evaluates agents on end-to-end, real-world workflows in a sandboxed command-line environment, graded by executable tests. 
+    We evaluate \our{} and compare with other baselines on the Terminal-Bench2.0 test split, which contains a total of 89 tasks. In the main experiments, we randomly sample 70 tasks dut to cost reasons.
+
+    \item \textbf{SWE-Bench-Verified:}~\cite{jimenez2023swe} 
+    SWE-Bench Verified measures autonomous software engineering by asking agents to generate patches that resolve real GitHub issues in real repositories, verified by running tests; the Verified split is human-screened to remove problematic cases.
+    We evaluate \our{} and compare with other baselines on the SWE-Bench verified version test split, which contains a total of 500 tasks. We randomly sample 100 tasks for evaluation due to cost reasons.
+\end{itemize}
+
+\subsection{SFT Hyper-parameters.}
+\label{app:sft_hyper}
+We use the following hyperparameters during the experiments in Table~\ref{tab:hyper_sft_qwen}.
+
+\begin{table}[htbp]
+\centering
+\resizebox{0.5\textwidth}{!}{
+\begin{tabular}{l|c|l|c|}
+\hline
+\textbf{Hyperparams} & \textbf{Values} & \textbf{Hyperparams} & \textbf{Values} \\ \hline
+learning rate        & 1e-5            & weight decay         & 0.05            \\
+warmup ratio         & 0.1             & max length           & 16K            \\
+lr scheduler         & cosine          & batch size           & 64              \\
+epoch                & 2               & BF16                 & True            \\ 
+Deepspeed            & zero3           & tool-call template   & Hermes            \\ \hline
+\end{tabular}
+}
+\caption{SFT Hyperparameters used.}
+\label{tab:hyper_sft_qwen}
+\end{table}
+
+
+%-----------------------------------------------------------
+\subsection{Baseline Implementations}
+\label{app:baseline_imp}
+For baseline implementations, we evaluate a diverse set of widely-used agentic frameworks. 
+During our experiment, we found that \texttt{Claude Code} is not well-suited for GAIA open-world multi-hop question answering due to its architecture and intended usage pattern. Therefore, we did not report the results of \texttt{Claude Code} in the main experiments.
+
+In addition, we find that \texttt{DeepSeek-V3.2} exhibits poor native compatibility with \textsc{Claude Code} based on our initial investigation and empirical trials. Therefore, we exclude this experiment in Table~\ref{tab:main_results}.
+
+For the Terminal-Bench and SWE-Bench evaluations, we leverage the \texttt{Harbor} scaffold to run \texttt{MiniSWE}, \texttt{OpenHands}, and \texttt{Claude Code} under a unified execution interface.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Prompts}
+\label{app:prompt_used}
+
+%-----------------------------------------------------------
+\subsection{Main Agent Prompts}
+\label{app:B1}
+
+\subsubsection{GAIA Main Agent Prompt}
+\label{app:B1_gaia}
+% TODO: paste GAIA Main Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small GAIA Main Agent Prompt }}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+"""
+[GAIA BENCHMARK - QUESTION ANSWERING TASK]
+You are the MainAgent (Orchestrator). Your task is to 
+solve the given QUESTION by decomposing it into subtasks and delegating each to a sub-agent.
+
+DECISION PROCESS:
+1. REVIEW the SUBTASK HISTORY below - check status, result, and key findings of each attempt
+2. EVALUATE: Do the results SUFFICIENTLY answer the QUESTION?
+   - If any subtask returned a valid result with status "done" → Consider using 'complete'
+   - If subtask status is "incomplete" → Review its key findings to see what was accomplished
+3. DECIDE next action:
+   - Results sufficient → Use 'complete' with the answer
+   - Need more work → Use 'delegate_task' for the REMAINING work (don't repeat what's done)
+
+BUDGET AWARENESS:
+- You have LIMITED attempts (see Progress below)
+- Each delegation costs time and resources - choose models wisely based on task complexity
+- If a result looks correct and was verified, trust it and complete
+
+==== MODEL SELECTION GUIDE ====
+{model_pricing_table}
+
+Model Selection Strategy:
+- Choose cheaper models for simple tasks
+- Choose more capable models for complex reasoning or critical attempts
+
+==== Progress ====
+[Attempt {attempt_index}/{max_attempts}] Remaining {remaining_attempts} attempts
+Budget is limited. Make each attempt count.
+
+==== QUESTION ====
+{instruction}
+
+==== SUBTASK HISTORY ====
+{subtask_history if subtask_history else "No subtasks completed yet."}
+
+==== AVAILABLE TOOLS ====
+{tools_description}
+
+
+==== OUTPUT ====
+ANSWER FORMAT: GAIA requires precise, concise 
+answers (single word, number, or short phrase). Do NOT 
+include explanations in the answer field.
+
+Return JSON:
+
+If results are SUFFICIENT:
+{{
+  "action": "complete",
+  "reasoning": "The subtask results show [X], which answers the question",
+  "params": {{ "answer": "concise answer" }}
+}}
+
+If more work is NEEDED:
+{{
+  "action": "delegate_task", 
+  "reasoning": "We have [X] from previous attempts, but still need [Y] to answer the question",
+  "params": {{
+    "task_instruction": "A SPECIFIC, ACTIONABLE subtask 
+    (e.g., 'Extract second word from abstract of paper 2211.xxxxx')",
+    "context": "Relevant findings from previous attempts",
+    "model": "one of {sub_models}",
+    "tools": ["GoogleSearchAction", "ExtractUrlContentAction", 
+    "ExecuteCodeAction", "ImageAnalysisAction", "ParseAudioAction"]
+  }}
+}}
+"""
+\end{minted}
+\end{tcolorbox}
+
+
+
+\subsubsection{Terminal-Bench Main Agent Prompt}
+\label{app:B1_terminal}
+% TODO: paste Terminal-Bench Main Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small Terminal-Bench Main Agent Prompt }}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""
+You are the MainAgent (Orchestrator). Your task is to 
+complete the given software installation/configuration task by delegating to SubAgents.
+
+CRITICAL: CONTAINER LIFECYCLE
+- Each SubAgent runs in a FRESH container - if you delegate_task again, the previous work will be lost
+- When SubAgent reports status="done", use 'submit' immediately to run tests in that container
+
+==== DECISION PROCESS ====
+1. READ the original TASK carefully - identify ALL requirements and edge cases
+2. REVIEW SUBTASK HISTORY - check status and completed steps
+3. VERIFY SubAgent's work against TASK requirements:
+   - Did SubAgent test ALL requirements mentioned in TASK?
+   - Did SubAgent test edge cases? (e.g., if TASK mentions "keyboard interrupt", was it actually tested?)
+   - Are SubAgent's "completed" items actually addressing the TASK requirements?
+4. DECIDE:
+   - status="done" AND verification passes → Use 'submit'
+   - status="done" BUT verification passes but some requirements are not met → Use 'delegate_task' to fix
+   - status="partial" → Use 'delegate_task' with context about what worked/failed
+
+{budget_warning}
+
+==== MODEL SELECTION ====
+{model_pricing_table}
+
+==== Progress ====
+[Attempt {attempt_index}/{max_attempts}] Remaining {remaining_attempts} attempts
+
+==== TASK ====
+{instruction}
+
+==== SUBTASK HISTORY ====
+{subtask_history if subtask_history else "No subtasks completed yet."}
+
+==== AVAILABLE TOOLS ====
+{tools_description}
+
+==== OUTPUT ====
+Return JSON:
+
+If SubAgent status="done" AND you verified all TASK requirements are met:
+{{
+  "action": "submit",
+  "reasoning": "Verified: [list which TASK requirements were addressed]. Submitting.",
+  "params": {{ "reason": "Task completed: [specific accomplishments matching TASK requirements]" }}
+}}
+
+If SubAgent status="done" BUT verification shows gaps:
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent claimed done but [specific gap]: TASK requires [X] but SubAgent only tested [Y]",
+  "params": {{
+    "task_instruction": "CRITICAL: Previous attempt missed [specific requirement]. 
+                        You MUST: [exact steps to fix]",
+    "context": " PREVIOUS SUBAGENT CLAIMED DONE BUT MISSED: [specific gap]\\n- 
+                 WORKED: [steps to keep]\\n- 
+                 MUST FIX: [what was missed]",
+    "model": "one of {sub_models}"
+  }}
+}}
+
+If SubAgent status="partial":
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent made partial progress, need to continue with [remaining work]",
+  "params": {{
+    "task_instruction": "Continue from where previous SubAgent left off: [specific next steps]",
+    "context": "From SUBTASK HISTORY:\\n- 
+                 WORKED: [steps to REPEAT]\\n- 
+                 FAILED: [approaches to AVOID]",
+    "model": "one of {sub_models}"
+  }}
+}}
+"""
+\end{minted}
+\end{tcolorbox}
+
+
+
+\subsubsection{SWE-Bench Main Agent Prompt}
+\label{app:B1_swe}
+% TODO: paste SWE-Bench Main Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small SWE-Bench Main Agent Prompt }}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""You are the MainAgent (Orchestrator) for a SWE-bench task. 
+Your goal is to fix a GitHub issue by delegating work to SubAgents.
+
+
+==== TASK ====
+{instruction}
+
+REPOSITORY: {repo}
+INSTANCE: {instance_id}
+
+==== DECISION PROCESS ====
+1. READ the TASK carefully - understand the GitHub issue and what needs to be fixed
+2. REVIEW SUBTASK HISTORY - check SubAgent's progress, completed steps, and test results
+3. VERIFY against TASK requirements:
+   - Did SubAgent locate the buggy code?
+   - Did SubAgent make appropriate code changes?
+   - Did SubAgent run tests and confirm the fix works?
+4. DECIDE:
+   -  status="done" AND tests pass → Use 'submit'
+   -  status="done" BUT tests fail or incomplete → Use 'delegate_task' to fix remaining issues
+   -  status="partial" → Use 'delegate_task' with guidance on next steps
+
+CRITICAL: SWE-BENCH CONTAINER BEHAVIOR
+- When SubAgent reports status="done" with passing tests, use 'submit' to trigger final evaluation
+- 'submit' runs the official test suite (FAIL_TO_PASS + PASS_TO_PASS tests) to determine success
+
+
+==== MODEL SELECTION ====
+{model_pricing_table}
+
+==== Progress ====
+[Attempt {attempt_index}/{max_attempts}] Remaining {remaining_attempts} attempts
+{budget_warning}
+
+
+==== SUBTASK HISTORY ====
+{subtask_history if subtask_history else "No subtasks completed yet."}
+
+==== AVAILABLE TOOLS ====
+{tools_description}
+
+==== OUTPUT ====
+Return JSON:
+
+If SubAgent status="done" AND tests pass:
+{{
+  "action": "submit",
+  "reasoning": "Verified: [what was fixed, which tests passed]. Submitting for evaluation.",
+  "params": {{ "reason": "Fix verified: [specific fix description]" }}
+}}
+
+If SubAgent status="done" BUT tests fail or incomplete:
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent reported done but [specific issue]: tests show [failure details]",
+  "params": {{
+    "task_instruction": "CRITICAL: Previous fix incomplete. [specific next steps needed]",
+    "context": " ISSUE: [what failed]\\n-  DONE: [completed work]\\n-  TODO: [remaining work]",
+    "model": "one of {sub_models}"
+  }}
+}}
+
+If SubAgent status="partial":
+{{
+  "action": "delegate_task",
+  "reasoning": "SubAgent made partial progress: [summary]. Need to [next steps]",
+  "params": {{
+    "task_instruction": "Continue: [specific next steps based on SUBTASK HISTORY]",
+    "context": "From previous attempt:\\n-  WORKED: [keep these]\\n-  FAILED: [avoid these]",
+    "model": "one of {sub_models}"
+  }}
+}}
+"""
+\end{minted}
+\end{tcolorbox}
+
+
+
+%-----------------------------------------------------------
+\subsection{Sub-Agent Prompts}
+\label{app:B2}
+
+\subsubsection{GAIA Sub-Agent Prompt}
+\label{app:B2_gaia}
+% TODO: paste GAIA Sub-Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small Gaia Sub-Agent Prompt }},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+ORCHESTRA_GAIA_PROMPT = """
+==== Progress ====
+[Step {current_step}/{max_steps}] Remaining {remaining_steps} steps
+{budget_warning}
+
+==== Your Task (from MainAgent) ====
+{task_instruction}
+
+==== Context ====
+{context}
+
+==== Original Question (for reference) ====
+{original_question}
+
+==== Available Tools ====
+{action_space}
+
+==== Guidelines ====
+1. Focus on completing YOUR TASK above
+2. Think step by step before outputting an action
+3. Write key observations to the "memory" field
+4. Use print() in ExecuteCodeAction to see computation results
+5. Once done, use 'finish' IMMEDIATELY
+
+BUDGET: When remaining_steps <= 5, use 'finish' NOW!
+
+==== Output Format ====
+```json
+{{
+    "action": "<tool_name>",
+    "params": {{}},
+    "memory": "<observations>"
+}}
+```
+
+==== Memory ====
+{memory}
+
+==== Current Observation ====
+{obs}
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+\subsubsection{Terminal-Bench Sub-Agent Prompt}
+\label{app:B2_terminal}
+% TODO: paste Terminal-Bench Sub-Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small Terminal-Bench Sub-Agent Prompt }},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""
+==== Progress ====
+[Step {current_step}/{max_steps}] Remaining: {remaining_steps} step(s)
+{budget_warning}
+If you run out of steps without "finish", your work is lost and marked as timeout.
+
+==== Your Task (from MainAgent) ====
+{task_instruction}
+
+==== Context (from previous attempts) ====
+{context}
+Use this info: repeat what WORKED, avoid what FAILED.
+
+==== Original Question (for reference) ====
+{original_question}
+
+==== Action Space ====
+{action_space}
+
+==== Memory ====
+Recent memory:
+{memory}
+
+==== Current Observation ====
+{obs}
+
+==== Thinking ====
+Think step by step before outputting an action. Write key reasoning in memory for future steps.
+
+==== Action Guidelines ====
+You have TWO actions available:
+
+1. **execute** - Run shell commands and observe results
+   - Use this to install packages, configure services, verify status, etc.
+   - Example: "apt update && apt install -y nginx"
+
+2. **finish** - Report your progress to MainAgent
+   - Use when task is COMPLETE (status="done")
+   - Use when you made PROGRESS but need more work (status="partial")
+   - MUST use before running out of steps! Your work is LOST if you timeout.
+
+**What to report in finish:**
+- completed: List SUCCESSFUL steps that WORKED (e.g., ["apt update succeeded", "nginx installed"])
+- issues: List FAILED attempts with WHY (e.g., ["nginx -v failed: command not found"])
+- message: Brief summary of current state
+
+This info helps the NEXT SubAgent know what to repeat and what to avoid.
+
+==== Output Format ====
+CRITICAL: You MUST reply with ONLY a JSON object. No explanations, no markdown, no other text.
+
+For execute:
+{{"action": "execute", "params": {{"command": "your shell command"}}, "memory": "key findings"}}
+
+For finish:
+{{"action": "finish", "params": {{"status": "done|partial", "completed": [...], 
+
+"issues": [...], "message": "..."}}, "memory": "final notes"}}
+
+
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+
+\subsubsection{SWE-Bench Sub-Agent Prompt}
+\label{app:B2_swe}
+% TODO: paste SWE-Bench Sub-Agent prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small SWE-Bench Sub-Agent Prompt }},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false, before upper=\sloppy]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+SWEBENCH_SUBAGENT_PROMPT = """
+You are an autonomous software engineering agent tasked with solving GitHub issues.
+You have access to a specialized command interface (ACI) for navigating, viewing, editing, and testing code.
+You will work in a Docker container with the repository already cloned and checked out to the correct commit.
+
+==== Progress ====
+[Step {current_step}/{max_steps}] Remaining: {remaining_steps} step(s)
+{budget_warning}
+If you run out of steps without "finish", your work is lost and marked as timeout.
+
+==== Your Task (from MainAgent) ====
+{task_instruction}
+
+==== Context (from previous attempts) ====
+{context}
+
+==== Current State ====
+{state_info}
+
+==== Command Reference ====
+{command_docs}
+
+=== FINISH (Report to MainAgent) ===
+finish <status> <message>
+    Report your progress back to MainAgent. Status MUST be one of:
+    - done: Task completed successfully, tests pass
+    - partial: Made progress but not finished (e.g., found bug but fix not working)
+
+==== Memory ====
+Recent memory:
+{memory}
+
+==== Current Observation ====
+{observation}
+
+==== OUTPUT FORMAT (STRICT) ====
+You MUST output EXACTLY two sections in this order. No other text allowed.
+
+DISCUSSION
+<your reasoning here>
+
+COMMAND
+<single command here>
+
+RULES:
+- DISCUSSION must contain your step-by-step reasoning
+- COMMAND must contain exactly ONE command on a single line
+- After COMMAND line, do NOT add any explanation, examples, or comments
+- Do NOT output anything after the command
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+
+
+\subsubsection{Sub-Agent Summary Prompt}
+\label{app:B2_review}
+% TODO: paste Reviewer/Verifier prompt (tcolorbox + minted{text})
+
+\begin{tcolorbox}[title={\textbf{\small Sub-Agent Summary Prompt }},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+"""You are a trajectory summarizer. Review the SubAgent's execution trace.
+Compare the execution trace against the original task requirements.
+
+== ORIGINAL TASK ==
+{original_question}
+
+== EXECUTION TRACE ==
+{trace_text}
+
+== OUTPUT ==
+Based on the trace, answer:
+1. COMPLETED: What requirements from the original task were actually done?
+2. REMAINING: What requirements are still missing or not properly tested?
+
+Summarize in 5-10 bullets: key progress, problems, remaining issues.
+Output ONLY bullets.Be specific and concise. Output ONLY the two sections above."""
+
+\end{minted}
+\end{tcolorbox}
+
+
+\subsection{Learning Prompt}
+
+\subsubsection{STRATEGY OPTIMIZE PROMPT}
+\begin{tcolorbox}[title={\textbf{\small STRATEGY OPTIMIZE PROMPT }},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+STRATEGY_OPTIMIZE_PROMPT = """
+You are optimizing the MainAgent strategy block for GAIA tasks.
+Focus on selecting sub-models, deciding when to delegate, and managing cost vs performance.
+You need to analysis the model ability and cost on this task, 
+and creat a better strategy for main agent to select cheaper model while keep the performance.
+
+Current strategy block:
+{strategy}
+
+Evaluation summary:
+- pass_rate: {pass_rate}
+- avg_reward: {avg_reward}
+- total_cost: {total_cost}
+
+Recent trajectories (summarized):
+{trajectories}
+
+Write one improved strategy block ONLY. Output in XML:
+<prompt>...strategy text...</prompt>
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+\subsubsection{STRATEGY SELECT PROMPT}
+
+\begin{tcolorbox}[title={\textbf{\small STRATEGY SELECT PROMPT }},   boxrule=1pt, arc=0mm,colback=black!5!white,colframe=darkgray,breakable, before skip=10pt, after skip=10pt,pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{python}
+
+STRATEGY_SELECT_PROMPT = """
+You are comparing two MainAgent strategy prompts for GAIA tasks.
+Summarize each trajectory's strengths/weaknesses, 
+relate them to the strategy text,
+then decide which strategy is better overall considering BOTH performance and cost.
+
+# A (parent/best-so-far)
+pass_rate: {pass_rate_a} / avg_reward: {avg_reward_a} / total_cost: {total_cost_a}
+strategy: {strategy_a}
+trajectories: {traj_a}
+
+# B (new candidate)
+pass_rate: {pass_rate_b} / avg_reward: {avg_reward_b} / total_cost: {total_cost_b}
+strategy: {strategy_b}
+trajectories: {traj_b}
+
+Respond with XML:
+<analysis>your reasoning</analysis>
+<choose>A/B</choose>
+"""
+
+\end{minted}
+\end{tcolorbox}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Case Study}
+\label{app:case_study}
+
+\subsection{GAIA Case Study}
+
+\subsubsection{Case Overview}
+
+We evaluate \our{} on 165 tasks from the GAIA benchmark, using Gemini-3-Flash for both the Main Agent and Sub Agent. The results show that \our{} exhibit strong orchestration
+capability and robustness in complex, multi-step tasks.
+Across all 165 \textsc{GAIA} tasks, \textsc{\our{}} achieves an overall success rate of $80.0\%$. Performance further stratifies by difficulty: Level~1 (easy) reaches $88.7\%$, Level~2 (medium) reaches $80.2\%$, and Level~3 (hard) reaches $61.5\%$. 
+
+\paragraph{Long-Horizon Support and Context Stability.}
+The system successfully completes multiple high-cost tasks with long interaction chains. For example, task \texttt{935e2cff} (Level~1) requires 10 attempts with a total cost of \$5.93 yet still completes successfully; task \texttt{853c8244} (Level~2) also succeeds after 10 interaction rounds with a cost of \$3.06. These cases demonstrate that the system can maintain context integrity throughout long-horizon execution, mitigating the ``context rot'' issue commonly observed in standard LLM-based long dialogs.
+
+\paragraph{Strong Error Recovery.}
+We find a key strength of \textsc{\our{}} is its self-correction mechanism. On Level~3 hard tasks, \texttt{8131e2c0} and \texttt{0512426f} succeed after 10 attempts, \texttt{983bba7c} succeeds after 9 attempts, and \texttt{872bfbb1} succeeds after 8 attempts. This indicates that even when initial plans fail, the system can progressively converge to the correct answer via Main-Agent reflection and replanning, coupled with iterative execution by Sub Agents. In total, 34 tasks are successfully completed after more than five attempts, highlighting strong error recovery capability.
+
+%在这里，我们展示了一版我们的轨迹数据。在mainagent接收到任务之后，它会动态的把任务拆解并且输出action，选择delegatetask或者是complete。subagent执行之后，选择finish action结束任务。subagent会调用模型review一遍执行的任务实际
+%
+
+
+% \paragraph{Case Study Overview.}
+Here we present a representative case study to illustrate how the proposed hierarchical orchestration mechanism operates in practice.
+
+The task is a \textbf{Level-2} question from the GAIA benchmark, asking the agent to identify the 2015 Metropolitan Museum of Art exhibition titled after the Chinese zodiac animal of that year, and count how many figures in the ``twelve animals of the Chinese zodiac'' set have a visible hand. The expected answer is \textbf{11}.
+
+Our orchestrator successfully solved this task in \textbf{10 attempts} through three key phases of iterative refinement:
+
+\textbf{(i) Error Correction via Feedback Loop.} 
+In Attempt~1, the main agent initially hypothesized incorrect accession numbers (\texttt{1975.1.784-795}) based on prior knowledge. After the sub-agent reported these were unrelated artworks, the orchestrator \emph{proactively corrected} the hypothesis in Attempt~2, explicitly instructing: \emph{``Do not use 1975.1.784-795 as they are unrelated drawings.''} This demonstrates the system's ability to learn from sub-agent failures and refine task instructions accordingly.
+
+\textbf{(ii) Key Finding Extraction and Propagation.} 
+In Attempt~5, although the sub-agent timed out, it discovered a critical piece of evidence: \emph{``The snake's hands are hidden in long, loose sleeves.''} The orchestrator extracted this partial result and persisted it into the context for Attempt~6, writing: \emph{``Previous analysis suggested the snake (02.18.730f) has hands hidden in sleeves.''} This illustrates how our architecture preserves and propagates valuable intermediate findings across attempts.
+
+\textbf{(iii) Hypothesis Formation and Confident Convergence.} 
+By Attempt~7, the orchestrator synthesized accumulated evidence to form a concrete hypothesis: the answer is likely 11 (all figures except the snake). Rather than immediately committing, it delegated additional verification tasks to confirm whether any other figures (e.g., monkey, dog, pig) might have ``paws'' instead of ``hands.'' Finally, in Attempt~10, with sufficient corroborating evidence, the orchestrator confidently issued the \texttt{complete} action with the correct answer.
+
+
+\subsubsection{Detailed Case}
+
+Below is the detailed parameters of Main Agent decision of each attempt:
+\begin{tcolorbox}[
+  title={\textbf{\small Case Metadata (JSON)}},
+  boxrule=1pt, arc=0mm,
+  colback=gray!5, colframe=gray!70,
+  breakable, before skip=8pt, after skip=10pt,
+  pad at break=2mm, parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=true, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "task_id": "853c8244-429e-46ca-89f2-addf40dfb2bd",
+  "question": "In the 2015 Metropolitan Museum of Art exhibition titled after 
+  the Chinese zodiac animal of 2015, how many of the \"twelve animals of the Chinese zodiac\"
+  have a hand visible?",
+  "expected_answer": "11",
+  "main_model": "gemini-3-flash-preview",
+  "success": true,
+  "total_cost": 3.0551280000000003,
+  "attempts": 10
+}
+\end{minted}
+\end{tcolorbox}
+
+
+
+\label{app:C1_gaia}
+% TODO:
+% - Task description (1--2 lines)
+% - Key delegation steps (with raw trajectory excerpts)
+% - What each delegate solved and what context was passed
+% - Final answer
+
+% -------- Preamble (required) --------
+% \usepackage[most]{tcolorbox}
+% \usepackage{xcolor}
+% \usepackage{minted}
+% % minted requires: -shell-escape
+%
+% % Optional: nicer subtitles in tcolorbox
+% \tcbset{subtitle style={font=\bfseries}}
+
+% -------- Case Study 1 (tcolorbox + minted) --------
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 1 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "I need to identify the specific 2015 Metropolitan Museum 
+  of Art exhibition titled after the Chinese zodiac animal of that year 
+  and then count how many of the 'twelve animals of the Chinese zodiac' figures in
+  that exhibition have visible hands. 
+  This requires online research and visual inspection of museum artifacts.",
+  "params": {
+    "task_instruction": "
+    1. Identify the 2015 Metropolitan Museum of Art exhibition titled after the 2015 Chinese zodiac animal 
+    (Note: 2015 was the Year of the Ram/Goat/Sheep).
+    \n2. In that exhibition, identify the specific set of 
+    'twelve animals of the Chinese zodiac' figures mentioned in the question 
+    (likely a set of Tang dynasty ceramic figures).
+    \n3. Examine the images of these 12 figures from the Metropolitan Museum's online collection 
+    (e.g., accession numbers 1975.1.784 through 1975.1.795).
+    \n4. Count how many of these 12 anthropomorphic figures have at least one visible hand 
+    (fingers or hand structure visible, not tucked inside sleeves or purely animal paws/hooves).
+    \n5. Provide the final count as the answer.",
+    "context": "The year 2015 was the Year of the Ram/Goat. 
+    The exhibition at the Met was likely titled 'Celebrating the Year of the Ram'.
+    There is a famous set of 12 zodiac figures in their collection.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 2 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "The previous attempt correctly identified the exhibition as 'Celebrating the Year of the Ram' 
+  (2015) 
+  but failed to correctly identify the specific set of zodiac figures 
+  and count the visible hands due to incorrect accession numbers and tool failures. 
+  I need to find the specific set of 12 zodiac figures featured in that exhibition 
+  and visually inspect them for hands.",
+  "params": {
+    "task_instruction": "1. Identify the specific set of 'twelve animals of the Chinese zodiac' featured 
+    in the 2015 Metropolitan Museum of Art exhibition 'Celebrating the Year of the Ram'.
+    \n2. Locate the Met Museum accession numbers for this set 
+    (likely Tang dynasty figures, possibly 02.18.730a–l or similar).
+    \n3. For each of the twelve figures in that specific set, determine how many have a hand 
+    (or fingers/claws with hand-like structure) visible outside of their sleeves.
+    \n4. Count the number of such figures with visible hands and provide the integer as the answer.",
+    "context": "2015 was the Year of the Ram. The exhibition 'Celebrating the Year of the Ram' ran 
+    from January 19 to August 23, 2015. 
+    Previous attempts suggest exploring accession numbers 02.18.730a–l. 
+    Do not use 1975.1.784–795 as they are unrelated drawings.
+    Many Tang ceramic zodiac figures have their hands hidden in sleeves;
+    the question specifically asks for visible hands.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 3 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "Previous attempts identified the 2015 exhibition as 'Celebrating the Year of the Ram' 
+  and the likely target set as the 'Twelve animals of the Chinese zodiac' (Accession 02.18.730a–l). 
+  However, they failed to count the visible hands due to API errors and mismanagement of findings.
+  I am delegating to a sub-agent to specifically find the image for 02.18.730a–l 
+  and count the figures with visible hands.",
+  "params": {
+    "task_instruction": "1. Confirm that the artwork titled 'twelve animals of the Chinese zodiac' 
+    (likely Accession 02.18.730a–l) was featured in the 2015 Metropolitan Museum exhibition 
+    'Celebrating the Year of the Ram'.
+    \n2. For this specific set of 12 figures, identify how many of the animals have a hand visible 
+    (i.e., fingers or hand structure visible outside of sleeves, possibly holding an object or resting). 
+    \n3. Look for high-resolution images of this set on the Met Museum's website 
+    or associated catalogue records to ensure an accurate count for all 12 figures.
+    \n4. Provide only the final count as the answer.",
+    "context": "The exhibition is 'Celebrating the Year of the Ram' (Jan-Aug 2015). 
+    The set is jade figures, Qing dynasty, accession 02.18.730a–l. Previous attempts suggested 
+    these are seated anthropomorphic figures. 
+    Be careful to check if the hands are truly visible or tucked into the 'hu' tablets or sleeves.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 4 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "Previous attempts identified the exhibition 'Celebrating the Year of the Ram' 
+  and the jade zodiac set (02.18.730a–l) but failed to provide a definitive count of figures with visible hands. 
+  I need a sub-agent to specifically analyze the images of the 12 individual figures in the jade set 
+  (02.18.730a through 02.18.730l) 
+  and count how many have at least one hand visible (fingers or hand structure outside the sleeve).",
+  "params": {
+    "task_instruction": "1. Confirm the set of 'twelve animals of the Chinese zodiac'
+    featured in the Met Museum exhibition 'Celebrating the Year of the Ram' (2015). 
+    Identify its accession numbers (likely 02.18.730a–l).
+    \n2. For each of the twelve figures in this specific jade set, examine high-resolution images 
+    or detailed descriptions on the Metropolitan Museum website 
+    to determine if a hand (fingers or hand structure) is visible.
+    \n3. Note: A 'visible hand' means the hand is not completely hidden inside a voluminous sleeve.
+    It may be holding an object (like a fan, scroll,
+    or medicinal herb).
+    \n4. Provide the total number (integer) of the twelve figures that have a hand visible.",
+    "context": "The exhibition is 'Celebrating the Year of the Ram' (Jan 2015 - Jan 2016). 
+    The jade set is Accession No. 02.18.730a–l.
+    Previous attempts confirm this set was in the exhibition.
+    You need to perform a visual or 
+    descriptive audit of each piece (A through L) to count visible hands.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 5 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "Previous attempts have correctly identified the target set as 
+  the Qing dynasty jade 'Twelve animals of the Chinese zodiac' (Accession 02.18.730a–l), 
+  which was featured in the 2015 exhibition 'Celebrating the Year of the Ram'. 
+  However, they failed to produce a final count of figures with visible hands. 
+  I will delegate a task to perform a definitive count by examining the high-resolution images 
+  or detailed descriptions of each of the twelve figures (a through l).",
+  "params": {
+    "task_instruction": "
+    1. Access the Metropolitan Museum's collection page for accession number 02.18.730 
+    (Object ID 42102) and its sub-items (02.18.730a through 02.18.730l).
+    \n2. For each of the twelve figures in this set, determine if a hand 
+    (fingers, hand structure, or paws clearly acting as hands) is visible outside of the robe sleeves.
+    Often these figures are holding objects like fans, scrolls, or brushes, which makes the hand visible.
+    \n3. Count the total number of figures out of the twelve that have at least one hand visible.
+    \n4. Provide the final integer count as the answer.",
+    "context": "The 2015 Met exhibition is 'Celebrating the Year of the Ram'. 
+    The relevant set of 'twelve animals' is 02.18.730a–l. Use high-resolution images like DT5058.jpg 
+    (found on the Met website) 
+    or individual item photos to verify the visibility of hands for each figure 
+    (Rat, Ox, Tiger, Rabbit, Dragon, Snake, Horse, Ram, Monkey, Rooster, Dog, Pig).
+    Note that 'visible' means the hand is not completely tucked into a sleeve.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 6 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=true, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "Previous attempts have correctly identified 
+  the 'Twelve animals of the Chinese zodiac' set as the jade figures 
+  with accession numbers 02.18.730a–l (Object ID 42102) from the Heber R. 
+  Bishop Collection, featured in the 2015 exhibition 'Celebrating the Year of the Ram'. 
+  However, they failed to definitively count how many have visible hands.
+  Attempt 5 noted that the snake (02.18.730f) has hands hidden in sleeves. 
+  I need a sub-agent to find the detailed descriptions for each of the 12 figures (a through l) 
+  to determine the visibility of their hands (fingers or hand structure visible, often while holding an object).",
+  "params": {
+    "task_instruction": "Identify the set of 12 jade Chinese zodiac figures (Accession 02.18.730a–l)
+    in the Metropolitan Museum of Art's collection. 
+    For each figure 
+    (Rat, Ox, Tiger, Rabbit, Dragon, Snake, Horse, Ram, Monkey, Rooster, Dog, Pig),
+    determine if at least one hand (or fingers) is visible outside of the sleeves. 
+    Many of these anthropomorphic figures hold objects (e.g., scrolls, fans, fly whisks).
+    Count the total number of figures where a hand is visible and provide the integer.",
+    "context": "The figures are from the Qing dynasty (Qianlong period) 
+    and were part of the 2015 exhibition 'Celebrating the Year of the Ram'.
+    Accession numbers are 02.18.730a through 02.18.730l. 
+    Previous analysis suggested the snake (02.18.730f) has hands hidden in sleeves. 
+    Focus on finding individual descriptions or high-res images to check each of the 12.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 7 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "We have identified the exhibition as 'Celebrating the Year of the Ram' (2015)
+  and the centerpiece as the jade set of twelve zodiac animals (Accession 02.18.730a–l).
+  A commonly found description states that 'with the exception of the snake,
+  whose hands are hidden in its sleeves, each of the other eleven figures holds an object.' 
+  This strongly suggests the answer is 11.
+  However, the question specifies a 'hand visible' meaning 'fingers or hand structure visible,
+  not... purely animal paws/hooves.' 
+  I need a final verification that each of the 11 non-snake figures indeed shows human-like fingers 
+  or hands rather than animal paws, especially the monkey, dog, and pig.",
+  "params": {
+    "task_instruction": "1. Verify the specific attributes and hand visibility 
+    for the eleven figures in the Met's jade
+    'Twelve animals of the Chinese zodiac' (Accession 02.18.730a–l), excluding the snake (02.18.730f).
+    \n2. For each of the animals (Rat, Ox, Tiger, Rabbit, Dragon, Horse, Ram, Monkey, Rooster, Dog, and Pig),
+    confirm if at least one human-like hand (fingers or hand structure) is visible while holding 
+    their respective objects (candle, fan, shield, etc.).
+    \n3. Specifically check if any of these anthropomorphic figures are depicted with 'paws' or 'hooves' 
+    that would disqualify them under the 'hand visible' definition, 
+    or if any have their hands hidden despite holding an object.\n4. 
+    Confirm the final count of animals with at least one hand visible.",
+    "context": "The exhibition is 'Celebrating the Year of the Ram' (2015). The set is 02.18.730a–l. 
+    The snake definitely has no hands visible. 
+    Images and descriptions suggest the other 11 hold objects and are in human form.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 8 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "Previous attempts have correctly identified the target artwork 
+  as the set of twelve jade zodiac figures (accession 02.18.730a–l) 
+  in the 2015 Metropolitan Museum exhibition 'Celebrating the Year of the Ram'. 
+  It has been established that the snake figure (02.18.730f) has its hands hidden in its sleeves. 
+  I need to confirm if the other 11 figures all have visible hands while holding their respective objects, 
+  or if any others also have hidden hands/paws.",
+  "params": {
+    "task_instruction": "1. Verify the hand visibility for each of the 12 figures in 
+    the Metropolitan Museum's jade set 'Twelve animals of the Chinese zodiac' (Accession 02.18.730a–l).
+    \n2. Search for the specific museum description or catalog entry 
+    for this set that details which animals have hidden hands. 
+    \n3. Specifically, confirm if there is a statement that 'the snake is the only one' with hidden hands, 
+    or if other figures (like the pig or dragon) also have obscured hands.
+    \n4. Count the number of figures where at least one hand 
+    (or finger/human-like hand structure) is visible outside the sleeves.
+    \n5. Provide the final integer count.",
+    "context": "The exhibition is 'Celebrating the Year of the Ram' (2015). 
+    The set is 02.18.730a–l. Previous findings suggest the snake (02.18.730f) has tucked hands.
+    We need to be certain about the other 11.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 9 - Main Decision}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "delegate_task",
+  "reasoning": "Previous attempts identified the exhibition as 'Celebrating the Year of the Ram' (2015) 
+  and the set as the jade 'Twelve animals of the Chinese zodiac' (Accession 02.18.730a–l). 
+  Findings suggest the snake (02.18.730f) has its hands hidden in sleeves, while the others hold attributes. 
+  I need to confirm if the snake is the ONLY one with hidden hands to arrive at the count (12 - 1 = 11) 
+  or if others like the dragon or pig also have hidden hands.",
+  "params": {
+    "task_instruction": "Identify the set of 12 jade Chinese zodiac figures involved in the 2015 MET exhibition 
+    'Celebrating the Year of the Ram' (Accession 02.18.730a–l). 
+    For each of the twelve figures, determine if a hand is visible. 
+    Specifically, search for the official Met Museum description 
+    (possibly in the Bishop Collection catalog) 
+    that states which figures have their hands hidden in sleeves 
+    and which have visible hands holding attributes. 
+    Confirm if the snake is the only one with hidden hands.",
+    "context": "The figures are Qing dynasty jade anthropomorphic zodiac animals. 
+    Previous attempts found that the snake (02.18.730f) has hidden hands.
+    Most sources imply the other 11 hold objects with visible hands.
+    Verify if '11' is the correct count by checking if any other animal 
+    (e.g., Dragon, Dog, Pig) also has hidden hands.",
+    "model": "model_1"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\begin{tcolorbox}[
+  title={\textbf{\small Attempt 10 - Main Decision (Final)}},
+  boxrule=1pt,
+  arc=0mm,
+  colback=black!5,
+  colframe=black!70,
+  breakable,
+  before skip=10pt,
+  after skip=10pt,
+  pad at break=2mm,
+  parbox=false
+]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "action": "complete",
+  "reasoning": "The 2015 Metropolitan Museum of Art exhibition titled after the Chinese zodiac animal of 2015 
+  (the Ram) was 'Celebrating the Year of the Ram'. 
+  A highlight of this exhibition was the 'Twelve animals of the Chinese zodiac' (Accession 02.18.730a–l),
+  a set of 12 Qing-dynasty jade anthropomorphic figures. 
+  According to museum descriptions and high-resolution images (such as DT5058.jpg),
+  each of the twelve figures holds an attribute (e.g., a candle, fan, scroll, or peach), 
+  which requires at least one hand to be visible outside of the sleeves, except for the snake (02.18.730f). 
+  The snake is specifically described as sitting with its hands tucked into long, loose sleeves 
+  (a scholar's posture), making its hands hidden. 
+  Therefore, 11 of the 12 animals have a hand visible.",
+  "params": {
+    "answer": "11"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+
+
+% \subsection{Terminal-Bench Case Study}
+% \label{app:C2_terminal}
+% % TODO
+
+% \subsection{SWE-Bench Case Study}
+% \label{app:C3_swe}
+% % TODO
+
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Tools And Action Space}
+\label{app:action_space}
+% TODO:
+% - Main agent action space: complete / delegate_task (schema)
+% - Sub-agent tools per benchmark (inventory + constraints)
+% - Any sandbox / network constraints
+
+% (Optional) Table D1 placeholder: tool inventory
+% \begin{table}[t]
+% \centering
+% \small
+% \caption{Tool inventory and constraints.}
+% \label{tab:D_tools}
+% \begin{tabular}{l l l}
+% \toprule
+% Benchmark & Tool Name & Constraints / Notes \\
+% \midrule
+% GAIA &  &  \\
+% Terminal-Bench &  &  \\
+% SWE-Bench &  &  \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+
+This appendix details the action space of the \our{} framework, including the actions available to the Main Agent and Sub-Agents, as well as the tool inventory and execution constraints for each benchmark.
+
+\subsection{Main Agent Action Space}
+
+The Main Agent is responsible for global task planning and subtask delegation. Its action space consists of two core actions.
+
+\paragraph{\texttt{delegate\_task}.}
+This action delegates a well-scoped subtask to a specialized Sub-Agent. The parameter schema is defined as follows:
+
+\begin{tcolorbox}[title={\textbf{\small Action Schema: delegate\_task}},
+  boxrule=1pt, arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable, before skip=6pt, after skip=10pt,
+  pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{json}
+{
+  "type": "object",
+  "properties": {
+    "task_instruction": {
+      "type": "string",
+      "description": "Detailed, actionable instruction for the Sub-Agent"
+    },
+    "context": {
+      "type": "string",
+      "description": "Additional context distilled from prior attempts"
+    },
+    "model": {
+      "type": "string",
+      "description": "Model alias to use",
+      "enum": ["model_1", "model_2", "..."]
+    },
+    "tools": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional subset of tools exposed to the Sub-Agent"
+    }
+  },
+  "required": ["task_instruction", "model"]
+}
+\end{minted}
+\end{tcolorbox}
+
+\paragraph{\texttt{complete}.}
+This action submits the final answer and terminates the task.
+
+\begin{tcolorbox}[title={\textbf{\small Action: complete}},
+  boxrule=1pt, arc=0mm,
+  colback=gray!5,
+  colframe=gray!70,
+  breakable, before skip=6pt, after skip=10pt,
+  pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, autogobble]{json}
+{
+  "action": "complete",
+  "params": {
+    "answer": "<final answer string>"
+  }
+}
+\end{minted}
+\end{tcolorbox}
+
+\subsection{Sub-Agent Tools For each Benchmark}
+\label{app:tools}
+Table~\ref{tab:D_tools} summarizes the tools available to Sub-Agents in each benchmark and their corresponding constraints.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Tool inventory and constraints per benchmark.}
+\label{tab:D_tools}
+\begin{tabular}{l l p{5.8cm}}
+\toprule
+\textbf{Benchmark} & \textbf{Tool Name} & \textbf{Constraints / Notes} \\
+\midrule
+\multirow{6}{*}{GAIA}
+  & \texttt{GoogleSearchAction} & Serper API; max 5 results; 30s timeout \\
+  & \texttt{ExtractUrlContentAction} & Jina API; chunked for long pages; 50s timeout \\
+  & \texttt{ExecuteCodeAction} & Sandboxed in \texttt{workspace/temp}; 10s timeout \\
+  & \texttt{ImageAnalysisAction} & Vision LLM backend; supports URL \& local files \\
+  & \texttt{ParseAudioAction} & Audio-capable LLM backend; multi-format support \\
+  & \texttt{finish} & Reports result/status to the Main Agent \\
+\midrule
+\multirow{3}{*}{Terminal-Bench}
+  & \texttt{execute} & Shell commands in Docker/E2B sandbox \\
+  & \texttt{finish} & Reports progress without triggering tests \\
+
+\midrule
+\multirow{4}{*}{SWE-Bench}
+  & \texttt{execute} & Shell commands in a Docker container \\
+  & \texttt{view\_file} & Reads a file with line-range specification \\
+  & \texttt{edit\_file} & File editing via string replacement \\
+  & \texttt{finish} &  Reports progress to main agent \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{GAIA Tools}
+
+In the GAIA benchmark, Sub-Agents are equipped with tools for web retrieval, code execution, and multimodal analysis.
+
+\begin{itemize}
+\item \textbf{\texttt{GoogleSearchAction}.} Performs web search via the Serper API.
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"GoogleSearchAction",
+ "params":{"query":"...","k":5,"gl":"us","hl":"en"}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ExtractUrlContentAction}.} Extracts webpage content via the Jina API.
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ExtractUrlContentAction",
+ "params":{"url":"...","browse_query":"..."}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ExecuteCodeAction}.} Executes Python or Bash code in a sandboxed environment.
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ExecuteCodeAction",
+ "params":{"code":"...","code_type":"python|bash","timeout_sec":10}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ImageAnalysisAction}.} Calls a vision-capable LLM backend to analyze images.
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ImageAnalysisAction",
+ "params":{"query":"...","image_path":"..."}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{ParseAudioAction}.} Calls an audio-capable LLM backend to process audio inputs.
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"ParseAudioAction",
+ "params":{"query":"...","audio_path":"..."}}
+\end{minted}
+\end{tcolorbox}
+
+\item \textbf{\texttt{finish}.} Reports subtask results back to the Main Agent.
+\begin{tcolorbox}[colback=gray!5,colframe=gray!70,arc=0mm,boxrule=1pt]
+\begin{minted}[fontsize=\scriptsize,breaklines=breakanywhere]{json}
+{"action":"finish",
+ "params":{"result":"...","status":"done|partial|blocked","summary":"..."}}
+\end{minted}
+\end{tcolorbox}
+\end{itemize}
+
+\subsubsection{Terminal-Bench Tools}
+
+In Terminal-Bench, Sub-Agents execute shell commands inside Docker/E2B sandboxes using the following tools:
+\begin{itemize}
+    \item \textbf{\texttt{execute}:} run shell commands and return outputs.
+    \item \textbf{\texttt{finish}:} report intermediate progress without triggering tests.
+\end{itemize}
+
+\subsubsection{SWE-Bench Tools}
+
+In SWE-Bench, Sub-Agents are equipped with code navigation and editing capabilities:
+\begin{itemize}
+    \item \textbf{\texttt{execute}:} run shell commands (e.g., \texttt{git} operations and tests).
+    \item \textbf{\texttt{view\_file}:} read file content with a specified line range.
+    \item \textbf{\texttt{edit\_file}:} edit files via string replacement.
+    \item \textbf{\texttt{finish}:} Report your progress back to MainAgent.
+\end{itemize}
+
+\subsection{Sandbox and Network Constraints}
+
+\paragraph{Code Execution Sandbox.}
+\texttt{ExecuteCodeAction} executes code in an isolated directory (\texttt{workspace/temp}). Potentially destructive Bash operations are disallowed, including file deletion, privilege escalation, permission changes, root-level redirection, and system-level commands. The default execution timeout is 10 seconds.
+
+\paragraph{Network Constraints.}
+Web access is mediated exclusively through tool APIs. Web search is performed via the Serper API (\texttt{google.serper.dev}) with a 30-second timeout, while URL content extraction is handled via the Jina API (\texttt{r.jina.ai}) with a 50-second timeout. Raw HTTP requests are not directly exposed to agents.
+
+\paragraph{Terminal-Bench Sandbox.}
+Terminal-Bench supports Docker, E2B, and Daytona backends. The default execution timeout is 600 seconds, and the working directory is automatically inferred from the Dockerfile \texttt{WORKDIR} directive.
+
+\paragraph{SWE-Bench Sandbox.}
+Each SWE-Bench task runs in an isolated Docker container. The system automatically clones the target repository and checks out the specified base commit. Tests are executed with \texttt{pytest} under a 300-second timeout.
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Third-Party API and Model Pricing}
+\label{app:E}
+
+%-----------------------------------------------------------
+\subsection{Third-Party APIs}
+\label{app:E1}
+% TODO:
+% - List external APIs used (search, browser, etc.)
+% - Rate limits / caching / reliability notes
+
+
+We rely on a small set of third-party APIs to support web search and sandboxed agent environment creation/execution.
+
+\begin{table}[h]
+\centering
+\small
+\begin{threeparttable}
+\caption{Third-party APIs used in our system.}
+\label{tab:third_party_apis}
+\begin{tabular}{l l p{0.56\linewidth}}
+\toprule
+\textbf{API} & \textbf{Role} & \textbf{How it is used in \our{}} \\
+\midrule
+\textbf{Serper} (\texttt{serper.dev}) & Web search & Used as the primary search API for retrieving relevant webpages/snippets during GAIA-style information-seeking subtasks. \\
+\textbf{Jina} (\texttt{jina.ai}) & Web content retrieval & Used for lightweight webpage fetching/reading (e.g., converting a URL into clean text for extraction) to support search-and-read subtasks. \\
+\textbf{E2B} (\texttt{e2b.dev}) & Sandbox environment & Used to create isolated execution environments for agent tool use (e.g., running code or environment-dependent operations) with controlled resources. \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]\footnotesize
+\item \textbf{Usage.} These APIs are invoked only through our tool interface; the main agent and sub-agents do not access external services directly.
+\item \textbf{Reproducibility.} When applicable, we cache retrieved web content and log API responses/metadata (e.g., timestamps, query strings, and URLs) to ensure consistent evaluation.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+
+
+%-----------------------------------------------------------
+\subsection{Model Pricing Table and Cost Accounting}
+\label{app:E2}
+% TODO:
+% - Pricing table (input/output per 1M tokens)
+% - Cost accounting protocol (what tokens counted, system prompt included, etc.)
+
+% (Optional) Table E1 placeholder: pricing
+% \begin{table}[t]
+% \centering
+% \small
+% \caption{Model pricing and cost accounting.}
+% \label{tab:E_pricing}
+% \begin{tabular}{l c c c}
+% \toprule
+% Model & Input (\$/1M tok) & Output (\$/1M tok) & Notes \\
+% \midrule
+%  &  &  &  \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+% Requires: \usepackage{booktabs}, \usepackage{threeparttable}, \usepackage{graphicx}
+
+
+\begin{tcolorbox}[title={\textbf{\small Cost Table }}, boxrule=1pt, arc=0mm, colback=black!5!white, colframe=black!75!white, breakable, before skip=10pt, after skip=10pt, pad at break=2mm, parbox=false]
+\begin{minted}[fontsize=\scriptsize, breaklines=breakanywhere, frame=lines, framesep=2mm, tabsize=4, style=vs, autogobble]{text}
+
+    PRICES = {
+        # openai: https://platform.openai.com/docs/pricing
+        # anthropic: https://docs.anthropic.com/en/docs/about-claude/pricing
+        # openrouter: https://openrouter.ai/
+        "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+        "o3": {"input": 0.002, "output": 0.008},
+        "o3-mini": {"input": 0.0011, "output": 0.0044},
+        "gpt-5": {"input": 0.00125, "output": 0.01},
+        "gpt-5-mini": {"input":0.00025, "output": 0.002},
+        "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},
+        "moonshotai/kimi-k2": {"input": 0.000296, "output": 0.001185}, 
+        "deepseek/deepseek-chat-v3.1": {"input":0.00025 , "output":0.001},
+        "deepseek-chat": {"input":0.00025 , "output":0.001},
+        "z-ai/glm-4.5": {"input": 0.00033, "output": 0.00132},
+        "gemini-2.5-pro": {"input": 0.00125, "output": 0.01},
+        "claude-4-sonnet": {"input": 0.003, "output": 0.015},
+        "claude-sonnet-4-5": {"input": 0.003, "output": 0.015},
+        "claude-4-5-haiku": {"input": 0.00088, "output": 0.0044},
+        "claude-4-sonnet-20250514": {"input": 0.003, "output": 0.015},
+        "gemini-2.5-flash": {"input": 0.0003, "output": 0.00252},
+        "gemini-3-flash-preview": {"input": 0.0005, "output": 0.003},
+        "gemini-3-pro-preview": {"input": 0.002, "output": 0.004},
+        "gemini-2.5-flash-image": {"input": 0.0003, "output": 0.03},
+    }
+
+
+\end{minted}
+/\end{tcolorbox}
