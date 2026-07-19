@@ -1,0 +1,158 @@
+\section{问题设定与方法概览}
+\label{sec:overview}
+
+本文研究\emph{运行时}智能体记忆抽取：系统在\emph{查询时}选择性处理原始历史记录，构建紧凑记忆，以回答当前用户查询。
+与预先压缩或预先结构化全部历史的离线流水线不同，我们保持历史记录\emph{原样不变}，并将记忆计算推迟到查询到达之后，从而避免查询无关的预处理所造成的不可逆信息损失。
+在详述方法之前，我们先从输入和输出两个角度简要概括任务设定。
+
+\paragraph{输入。}
+令 $\mathcal{H}$ 表示 LLM 智能体的历史，例如先前的对话、日志或文档。
+我们首先执行轻量级、任务无关的切分，把 $\mathcal{H}$ 划分为分块库 $\mathcal{C}=\{c_i\}_{i=1}^{N}$，其中每个 $c_i$ 都是一个短文本块\footnote{该步骤仅切分原始文本以便建立索引，不执行任何离线抽取、摘要或改写。}。
+给定用户查询 $q$，检索器 $\mathcal{R}$ 返回一个可能相关的文本块子集：
+\begin{equation}
+\mathcal{C}_q = \mathcal{R}(q, \mathcal{C}), \qquad \mathcal{C}_q \subset \mathcal{C}.
+\end{equation}
+其中，$(q, \mathcal{C}_q)$ 作为运行时记忆流水线的输入。
+
+\paragraph{输出。}
+系统生成：（i）紧凑且对查询有用的抽取记忆 $m$；（ii）由 LLM 在 $(q,m)$ 条件下生成的最终答案 $\hat{y}$：
+\begin{equation}
+m = f_{\text{mem}}(q, \mathcal{C}_q), \qquad \hat{y} = f_{\text{ans}}(q,m).
+\end{equation}
+这里，$f_{\text{mem}}$ 是学习得到、受预算控制的记忆抽取过程，也是本文的研究重点；$f_{\text{ans}}$ 则是答案生成器，例如一个固定的 LLM。
+
+\paragraph{带预算的运行时抽取。}
+一个关键挑战在于，运行时抽取在线发生且成本可能很高；因此，我们希望实现显式且可控的性能--成本权衡。
+为此，我们设计了一条模块化记忆流水线，其中每个模块均提供一小组\emph{预算档位}（\textsc{低}/\textsc{中}/\textsc{高}）。
+在处理查询的过程中，共享的轻量级路由器作出\emph{预算档位路由}决策，根据可用上下文，即查询与中间信号，为每个模块选择所用档位。
+最终模块生成的抽取记忆随后用于回答查询；端到端过程产生任务级性能信号与抽取成本信号，用于以端到端方式优化路由器。
+
+\section{BudgetMem}
+\label{sec:method}
+
+本节首先介绍 BudgetMem 的模块化流水线骨架（第~\ref{sec:framework} 节），随后形式化预算档位并给出三种分层策略（第~\ref{sec:budget_tier} 节），最后说明如何利用强化学习优化轻量级路由器，学习预算档位路由（第~\ref{sec:learn_routing} 节）。
+
+\begin{figure*}[t]
+	\centering
+	\includegraphics[width=1.0\linewidth]{figs/budget_method.pdf}
+        \caption{\textbf{BudgetMem 概览。}给定用户查询 $q$，系统从经过分块的历史中检索原始文本块 $\mathcal{C}_q$（不执行离线记忆预处理），并通过模块化流水线进行处理（过滤 $\rightarrow$ 实体/时间/主题 $\rightarrow$ 摘要）。每个模块提供 \textsc{低}/\textsc{中}/\textsc{高}预算档位，并采用三种策略之一实现，即\textbf{实现分层}、\textbf{推理分层}或\textbf{容量分层}。共享的轻量级路由器根据查询与中间状态为每个模块选择档位，并使用任务奖励与成本奖励进行强化学习训练，从而得到可控的性能--成本权衡。（$\mathcal{C}_q$：检索到的原始文本块；$\tilde{\mathcal{C}}_q$：过滤后的文本块；$e,t,p$：抽取的上下文；$m$：抽取记忆）}
+	\label{model_figure}
+\end{figure*}
+
+\subsection{模块化运行时记忆流水线}
+\label{sec:framework}
+
+如图~\ref{model_figure} 所示，BudgetMem 将 $f_{\text{mem}}$ 实现为一条\emph{多阶段模块化流水线}，逐步把检索到的原始文本块精炼为聚焦当前查询的记忆。
+针对以对话为中心的评估，我们采用一个简单、可解释的模块组合，即过滤 $\rightarrow$ 并行抽取 $\rightarrow$ 摘要，将其作为研究预算控制的具体骨架。
+需要说明的是，实验虽采用了这一实例，框架本身并不假定特定的模块集合，也可以适配其他模块化记忆流水线。
+
+\paragraph{流水线结构。}
+给定 $(q, \mathcal{C}_q)$，BudgetMem 执行一条固定的模块化流水线：
+\begin{equation}
+\mathcal{M}_{\text{fil}}
+~\rightarrow~
+\{\mathcal{M}_{\text{ent}}, \mathcal{M}_{\text{tmp}}, \mathcal{M}_{\text{top}}\}
+~\rightarrow~
+\mathcal{M}_{\text{sum}}.
+\end{equation}
+从整体上看，$\mathcal{M}_{\text{fil}}$（过滤模块）对检索到的上下文进行精炼；并行模块 $\{\mathcal{M}_{\text{ent}}, \mathcal{M}_{\text{tmp}}, \mathcal{M}_{\text{top}}\}$（实体、时间和主题模块）抽取互补的中间上下文；$\mathcal{M}_{\text{sum}}$ 则把它们汇总为最终记忆。
+前序模块的输出会被送入后续模块，形成由流水线逐阶段精炼的中间状态。
+本文关注预算档位控制与路由，而非具体模块实现，因此将模块细节放在附录~\ref{appendix:module}。
+
+\paragraph{模块接口与中间状态。}
+我们使用包含查询与当前可用信号的上下文来表示每次模块调用。
+过滤模块生成经过精炼的文本块集合：
+\begin{equation}
+\tilde{\mathcal{C}}_q = \mathcal{M}_{\text{fil}}(q, \mathcal{C}_q).
+\end{equation}
+其中，$\tilde{\mathcal{C}}_q$ 可视为一个更聚焦的文本块子集或经过重加权的文本块集合。
+接着，三个抽取模块在过滤后的上下文上并行运行：
+\begin{equation}
+\begin{aligned}
+e &= \mathcal{M}_{\text{ent}}(q, \tilde{\mathcal{C}}_q), \qquad
+t = \mathcal{M}_{\text{tmp}}(q, \tilde{\mathcal{C}}_q), \\
+p &= \mathcal{M}_{\text{top}}(q, \tilde{\mathcal{C}}_q).
+\end{aligned}
+\end{equation}
+这里，$e,t,p$ 表示抽取出的上下文，例如以实体为中心的事实、时间线索和主题摘要；它们可以表示为文本、结构化字段或紧凑的自然语言笔记。
+最后，摘要模块把这些输出汇总为抽取记忆：
+\begin{equation}
+m = \mathcal{M}_{\text{sum}}(q, e, t, p),
+\end{equation}
+然后将其提供给答案生成器，即 $\hat{y}=f_{\text{ans}}(q,m)$。
+
+\paragraph{预算档位接口（概念）。}
+流水线中的每个模块 $\mathcal{M}$ 都通过统一的\emph{预算档位接口}对外提供能力，这意味着模块可以在不同计算预算（\textsc{低}/\textsc{中}/\textsc{高}）下被调用，同时保持相同的输入--输出契约。
+这一标准化设计支持模块级预算控制，并为学习预算档位路由（第~\ref{sec:learn_routing} 节）和比较不同分层策略（第~\ref{sec:budget_tier} 节）奠定基础。
+
+\subsection{预算档位与分层策略}
+\label{sec:budget_tier}
+
+BudgetMem 为流水线中的每个模块 $\mathcal{M}$ 配置一小组\emph{预算档位}，从而在运行时抽取期间显式提供质量--成本选项。
+具体而言，每个模块都提供 \textsc{低}/\textsc{中}/\textsc{高}三个档位，分别对应逐渐增加的计算预算以及通常更高的抽取质量。
+重要的是，预算档位通过统一的预算档位接口（第~\ref{sec:framework} 节）在各模块内部定义，使路由器无须改变流水线结构，便能逐模块作出细粒度预算决策。
+
+\paragraph{分层策略。}
+一个关键问题是如何在实践中实现这些档位。
+受现代 LLM 系统常用性能--成本控制旋钮的启发（第~\ref{sec:related_tradeoff} 节），我们研究三种互补的分层策略，分别捕捉不同的成本变化来源：
+（i）\textbf{实现分层}，改变\emph{模块实现}，从轻量级启发式方法，到学习得到的任务专用模型，再到基于 LLM 的处理；
+（ii）\textbf{推理分层}，在保持底层模型骨架不变的情况下改变\emph{推理行为}，例如直接生成与更审慎的推理模式；
+（iii）\textbf{容量分层}，改变模块内部使用的\emph{模型容量}，例如使用较小或较大的语言模型。
+这些策略彼此正交：它们通过不同机制，即算法过程、推理模式和模型规模，交换计算资源，因此可以在统一框架内直接比较各自的权衡特性。
+
+\paragraph{\textsc{低}/\textsc{中}/\textsc{高}档位的实现。}
+对于\textbf{实现分层}，\textsc{低}档采用轻量级规则或模式处理，\textsc{中}档采用针对模块功能训练的紧凑学习模型，通常为基于 BERT 的模型~\citep{devlin2019bert}，\textsc{高}档则升级为基于 LLM 的处理，以提高抽取质量。
+对于\textbf{推理分层}，各档位通过计算量逐步增加的推理行为实现，例如\textsc{低}档为直接生成，\textsc{中}档为思维链式推理~\citep{wei2022chain}，\textsc{高}档为多步或反思式推理~\citep{shinn2023reflexion}。
+对于\textbf{容量分层}，各档位对应实现同一模块功能时采用的不同模型规模。
+附录~\ref{appendix:module} 给出了每种策略在各模块上的具体实例。
+
+\subsection{学习模块级预算档位路由}
+\label{sec:learn_routing}
+
+给定分层模块，BudgetMem 学习一个共享的轻量级路由器，在整个模块化流水线中执行\emph{预算档位路由}。
+随着查询被逐阶段处理，路由器为每次模块调用选择预算档位，从而针对单个查询产生一系列档位决策。
+由于记忆抽取过程可能包含不可微组件，我们将路由表述为序列决策问题，并使用强化学习优化路由器。
+
+\paragraph{策略、状态与动作。}
+令 $\pi_\theta$ 表示参数为 $\theta$ 的路由策略。
+在每个模块调用步骤 $k$，路由器观测概括可用上下文的状态 $s_k$，并输出动作 $a_k \in \{\textsc{低},\textsc{中},\textsc{高}\}$，为当前模块选择档位。
+具体而言，我们使用以下信息构造 $s_k$：（i）查询 $q$；（ii）当前模块输入，即上一模块的输出；（iii）指示当前被路由模块的模块描述符\footnote{我们把状态实现为这些组成部分的紧凑嵌入；细节见附录~\ref{appendix:ppo}。}。
+所选动作 $a_k$ 决定模块执行时使用的预算档位，模块随后生成下一组中间信号，进而形成下一个状态。
+
+\paragraph{回合与目标。}
+针对一个查询完整运行一次模块化流水线构成一个回合。
+执行所有经过路由的模块后，我们得到抽取记忆 $m$，并生成答案 $\hat{y}=f_{\text{ans}}(q,m)$，据此计算任务性能奖励 $r_{\text{task}}\in[0,1]$。
+此外，经过路由的模块执行会产生抽取成本，我们将其转换为成本奖励 $r_{\text{cost}}$。
+我们在一个成本感知目标下优化路由器，以权衡任务性能与抽取成本：
+\begin{equation}
+r = r_{\text{task}} + \lambda \cdot \alpha \cdot r_{\text{cost}},
+\label{eq:total_reward}
+\end{equation}
+其中，$\lambda$ 控制性能--成本权衡偏好，$\alpha$ 是用于对齐奖励量级的缩放因子，具体如下所述。
+我们使用标准策略优化算法，例如 PPO~\citep{schulman2017proximal}，来优化 $\pi_\theta$；算法细节见附录~\ref{appendix:ppo}。
+
+\paragraph{成本建模。}
+我们把原始抽取成本定义为经过路由的流水线上各模块成本之和：
+\begin{equation}
+c_{\text{raw}} = \sum_{k} c(\mathcal{M}_k, a_k).
+\end{equation}
+对于基于 LLM 的档位，我们使用词元用量乘以相应的输入/输出词元价格来度量 $c(\cdot)$；相较之下，非 LLM 档位，例如轻量级启发式方法，其成本被视为可忽略不计。
+为使成本项与 $r_{\text{task}}$ 具有可比尺度，我们采用滑动窗口归一化，将成本映射到有界范围~\citep{zhang2025router}。
+具体而言，我们维护一个近期原始成本窗口，并使用稳健分位数对 $\sqrt{c_{\text{raw}}}$ 进行归一化：
+\begin{equation}
+\tilde{c} = \frac{\sqrt{c_{\text{raw}}} - Q_{5}}{Q_{95} - Q_{5}},
+\qquad
+r_{\text{cost}} = 1 - \mathrm{clip}(\tilde{c}, 0, 1),
+\label{eq:cost_norm}
+\end{equation}
+其中，$Q_{5}$ 和 $Q_{95}$ 表示在滑动窗口上计算的第 5 和第 95 百分位数。
+
+\paragraph{奖励尺度对齐。}
+在实践中，我们观察到 $r_{\text{task}}$ 和 $r_{\text{cost}}$ 在训练期间可能呈现不同的方差，这会使方差较大的项主导策略更新。
+为缓解这一问题，我们引入一个简单的、基于方差的对齐因子：
+\begin{equation}
+\alpha = \frac{\mathrm{std}(r_{\text{task}})}{\mathrm{std}(r_{\text{cost}}) + \epsilon},
+\label{eq:std_align}
+\end{equation}
+其中，$\mathrm{std}(\cdot)$ 在近期训练奖励上计算，$\epsilon$ 为一个较小常数。
+式~\ref{eq:total_reward} 中的最终奖励因而同时兼顾：（i）通过 $\lambda$ 实现可控权衡；（ii）通过 $\alpha$ 稳定优化。

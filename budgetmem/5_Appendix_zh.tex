@@ -1,0 +1,979 @@
+\section{更多实现细节}
+\label{appendix:imple_detail}
+
+\subsection{数据集统计}
+\label{appendix:dataset}
+
+表~\ref{tab:dataset_stats} 汇总了实验使用的数据集统计信息，包括 LoCoMo~\citep{maharana2024evaluating-locomo}、LongMemEval~\citep{wu2024longmemeval} 和 HotpotQA~\cite{yang2018hotpotqa} 的训练/验证/测试划分大小（训练查询数量）以及平均上下文长度（词元数）。
+
+对于 HotpotQA，我们遵循既有工作~\citep{yu2025memagent}的评估协议与数据集构建方式：拼接证据文档与干扰文档，形成长上下文，并使用该设置公开的相同预处理测试查询。
+
+\input{tables/appendix_dataset_stats_zh}
+
+\subsection{评估细节}
+\label{appendix:exp_eval}
+
+表~\ref{tab:hparams_shared} 和表~\ref{tab:hparams_eval} 报告评估配置。
+表~\ref{tab:hparams_shared} 列出所有数据集共享的超参数，表~\ref{tab:hparams_eval} 进一步给出与数据集相关的评估设置。
+
+除非另有说明，我们使用三个不同的随机种子重复每项 BudgetMem 实验，并报告平均结果。
+这可以减弱随机初始化与训练随机性的影响，特别是对于基于强化学习的路由器。
+所有运行均采用相同的数据划分、检索设置和评估协议，以确保比较公平且可复现。
+
+\input{tables/hyper_zh}
+
+\subsection{路由器状态表示}
+\label{appendix:router_state_representation}
+
+为提高可复现性，我们补充说明第 4.3 节使用的路由器状态表示。
+对于每次模块调用，路由器状态由三个文本部分构成：用户查询、当前模块输入，以及指示当前被路由模块的模块描述符。
+我们分别使用 \texttt{all-mpnet-base-v2} 对这三个部分进行编码。
+由此，查询、模块输入和模块描述符各自得到一个 768 维嵌入。
+
+随后，我们拼接查询嵌入与模块输入嵌入，并通过线性投影得到 256 维上下文表示。
+模块描述符嵌入则单独投影为 256 维模块表示。
+最后，我们把 256 维上下文表示与 256 维模块表示拼接为最终的 512 维路由器状态向量。
+该状态向量被送入共享的预算档位路由器，以预测当前模块在 \textsc{低}、\textsc{中}和\textsc{高}三个档位上的选择分布。
+训练期间保持嵌入模型冻结，仅使用强化学习优化投影层与路由策略网络。
+
+\subsection{PPO 训练目标细节}
+\label{appendix:ppo}
+
+我们使用近端策略优化（PPO）训练共享预算档位路由策略 $\pi_\theta$，使其沿固定的模块化运行时记忆流水线
+$M_{\text{fil}} \rightarrow \{M_{\text{ent}}, M_{\text{tmp}}, M_{\text{top}}\} \rightarrow M_{\text{sum}}$
+作出查询感知、模块级的档位选择。
+
+\paragraph{回合、动作与状态。}
+单个查询构成一个 PPO 回合：给定 $(q, C_q)$，路由器依次为每次模块调用选择预算档位，执行经过路由的流水线以得到抽取记忆 $m$，随后生成最终答案 $\hat{y}=f_{\text{ans}}(q,m)$。
+在每个路由步骤 $k$，动作 $a_k$ 选择模块档位。
+每个模块使用三元动作空间 $\{\textsc{低}, \textsc{中}, \textsc{高}\}$。
+状态 $s_k$ 是以下信息的紧凑嵌入：（i）查询 $q$；（ii）当前模块输入，即上一阶段的中间输出；（iii）指示当前被路由模块的\emph{模块描述符}。
+所有模块共享一个统一的演员--评论家网络；模块身份通过模块描述符嵌入注入，从而在共享参数的同时保留模块特定的路由行为。
+
+\paragraph{奖励：经过归一化与对齐的性能--成本权衡。}
+完成一个查询的全部模块路由执行后，我们根据答案质量（F1 或 LLM 评审）计算任务奖励 $r_{\text{task}}\in[0,1]$，并根据路由模块调用产生的抽取成本计算成本奖励 $r_{\text{cost}}$。
+我们优化如下成本感知标量奖励：
+\begin{equation}
+r \;=\; r_{\text{task}} + \lambda \cdot \alpha \cdot r_{\text{cost}}.
+\label{eq:ppo_reward}
+\end{equation}
+\noindent\textbf{其中，}$r_{\text{task}}\in[0,1]$ 是根据答案质量（F1 或 LLM 评审）计算的任务奖励；$r_{\text{cost}}$ 是从路由模块调用产生的抽取成本推导出的归一化成本奖励；$\lambda$ 控制性能--成本权衡；$\alpha$ 为奖励尺度对齐因子。
+
+我们对原始成本应用滑动窗口归一化，并将其映射为有界奖励（式~\ref{eq:cost_norm}），从而计算 $r_{\text{cost}}$；同时通过基于方差的奖励尺度对齐（式~\ref{eq:std_align}）计算 $\alpha$。
+
+\paragraph{采用联合（多模块）似然比的 PPO 目标。}
+令 $\log \pi_\theta(a_k\mid s_k)$ 表示当前策略下逐模块的对数概率。
+由于每个查询回合会产生一个模块动作序列，我们使用经过路由的轨迹上的\emph{联合}动作概率：
+\begin{equation}
+\log \pi_\theta(\mathbf{a}\mid \mathbf{s})
+\;=\;
+\sum_k \log \pi_\theta(a_k\mid s_k),
+\qquad
+\rho
+\;=\;
+\exp\!\Big(\log \pi_\theta^{\text{new}} - \log \pi_\theta^{\text{old}}\Big).
+\label{eq:ppo_joint_ratio}
+\end{equation}
+\noindent\textbf{其中，}在路由步骤 $k$，$s_k$ 为路由器状态嵌入，$a_k\in\{\textsc{低},\textsc{中},\textsc{高}\}$ 为当前模块所选的预算档位动作；$\pi_\theta(\cdot)$ 是参数为 $\theta$ 的路由策略，$\log \pi_\theta(a_k\mid s_k)$ 是对应的对数概率；$\mathbf{s}=\{s_k\}_k$ 和 $\mathbf{a}=\{a_k\}_k$ 表示一个查询回合内完整的状态--动作序列，其联合对数似然为 $\log \pi_\theta(\mathbf{a}\mid\mathbf{s})$；$\rho$ 为更新策略（上标 $\text{new}$）与采集轨迹所用行为策略之间的 PPO 似然比。
+
+随后，我们使用比率 $\rho$ 应用标准 PPO 截断替代目标，并加入价值函数损失与熵奖励：
+\begin{equation}
+L \;=\; L_{\text{policy}} + c_v\, L_{\text{value}} - c_e\, H.
+\label{eq:ppo_loss}
+\end{equation}
+\noindent\textbf{其中，}$L_{\text{policy}}$ 为 PPO 截断替代策略损失，$L_{\text{value}}$ 为价值函数回归损失，$H$ 为策略熵，$c_v$ 和 $c_e$ 分别是价值损失与熵奖励的系数。
+
+我们使用单步蒙特卡洛回报估计优势；经过路由的流水线完成后，回合即终止，并使用评论家作为基线。
+为保持稳定，我们在各模块决策之间取熵的平均值而非求和，防止熵项随路由模块数量扩大。
+
+\paragraph{优化与超参数。}
+路由器训练默认使用 PPO 作为强化学习优化器。
+除非另有说明，我们使用 Adam，学习率为 $3\times 10^{-4}$，截断参数 $\epsilon=0.2$，价值损失系数 $c_v=0.5$，熵系数 $c_e=0.01$，每次更新执行 $4$ 个 PPO 轮次，并把梯度范数截断在 $0.5$。
+训练批大小为 $32$，最多训练 $600$ 步。
+路由器使用 768 维嵌入（查询/记忆/描述符），与共享超参数设置一致。
+
+\subsection{模块实现细节}
+\label{appendix:module}
+
+\textbf{统一预算档位接口。}
+我们采用统一的预算档位接口：每个模块提供三个档位（\textsc{低}/\textsc{中}/\textsc{高}）。
+预算档位只改变模块内部的计算量和推理能力，使系统无须改变整体流水线结构便可逐模块路由。
+为控制不同档位间的提示词影响，我们对提示方式进行标准化：\textsc{低}/\textsc{中}/\textsc{高}档始终使用各模块的\textsc{高}档提示词模板。
+
+\subsubsection{分层策略：实现分层}
+
+\textbf{保持固定契约的预算档位。}
+实现分层通过增加模块内部计算预算来实现 \textsc{低}/\textsc{中}/\textsc{高}档，同时保持其输入--输出契约不变。
+\textsc{低}档使用\emph{低成本符号流水线}，例如规则、正则表达式和 spaCy 等轻量级 NLP，实现快速且可控的处理；\textsc{中}档升级为\emph{紧凑的学习型专用模型}，通常采用 BERT 式编码器~\citep{devlin2019bert}，以中等成本改善语义建模；\textsc{高}档进一步升级为\emph{基于 LLM 的处理}，以最高成本获得最强的开放式推理与跨上下文整合能力。
+
+\textbf{过滤模块。}
+过滤模块通过单调升级内部相关性估计器实现预算分层：从低成本符号信号，逐步升级到语义表示，最终采用 LLM 评估。
+在\textsc{低}档，它使用稀疏词汇/模式匹配和轻量级启发式评分，速度快、确定性强，适合积极控制成本。
+在\textsc{中}档，它引入基于表示的相关性，例如嵌入与 BERT 式相似度，从而以中等计算预算找回超越精确重叠的语义匹配。
+在\textsc{高}档，它进一步使用 LLM 对候选项评分，使系统能在相关性取决于隐式指代、释义或多跳语义时进行上下文感知的辨别。
+重要的是，各档位均保持相同的输出契约，即排序后的 top-$k$ 候选集合，因此改进可归因于内部计算增加，而非接口变化。
+
+\textbf{实体模块。}
+实体关系模块采用相同的预算阶梯，但将其具体用于抽取结构化关系线索。
+在\textsc{低}档，它使用轻量级规则与浅层 NLP 线索，例如正则模式以及 spaCy 的命名实体识别/依存信号，以较高可控性抽取显式关系轨迹；但当关系为隐式或跨越多个文本块时，覆盖率有限。
+在\textsc{中}档，它使用紧凑的任务专用抽取器替代启发式方法，通常采用 BERT 式关系抽取，例如类似 REBEL 的三元组生成，从而以中等预算改善主语--关系--宾语三元组的归一化与覆盖率。
+在\textsc{高}档，它使用 LLM 执行开放域关系补全与抽象，以找回缺失连接，并把不同文本块中的同义关系整合为一致三元组；模块仍输出标准化关系列表，确保下游融合保持不变。
+
+\textbf{时间模块。}
+时间关系模块按照“显式线索检测 $\rightarrow$ 学习型时间抽取 $\rightarrow$ 生成式时间推理”分层，使预算增加对应逐步增强的时间建模能力。
+在\textsc{低}档，它使用轻量级 NLP 识别显式时间表达并构建事件--时间锚点；当时间线索被直接陈述时，这种方式较为可靠。
+在\textsc{中}档，它采用紧凑的学习型抽取器，例如 BERT 式模型，选择与时间相关的关系并将其归一化为一致形式。
+在\textsc{高}档，它升级为基于 LLM 的时间推理，使系统能在时间线必须通过推断而非直接读取时，处理隐式顺序、跨文本块对齐与全局一致性检查。
+所有档位都保持相同输出契约，即标准化的时间事实/锚点集合。
+
+\textbf{主题模块。}
+主题模块通过逐步增强话语级抽象来实现预算分层：从低成本词汇线索，升级到学习型表示，最终采用基于 LLM 的主题推理。
+在\textsc{低}档，它从关键词、类似 TF-IDF 的模式和简单转折标记等低成本词汇/统计线索中抽取可控的主题信号，以较低成本粗略描述主题内容及其转移。
+在\textsc{中}档，它加入紧凑的学习型表示，例如 BERT 式编码器和可由 NLP 结构辅助的轻量级分段/主题建模，在中等计算量下形成更稳定的主题单元和更可靠的转折检测。
+在\textsc{高}档，它使用 LLM 生成更高层次的主题关系与演化叙事，提高长上下文或异构上下文的抽象能力与可解释性。
+关键在于，每个档位仍输出相同的标准化主题线索列表，供下游摘要模块统一使用。
+
+\textbf{摘要模块。}
+摘要模块通过改变证据融合深度实现预算分层，同时保持最终记忆格式不变。
+在\textsc{低}档，它生成确定性的证据提要，例如对检索记忆与线索进行简洁汇总/拼接，以尽量减少计算与失真。
+在\textsc{中}档，它输出结构化综合结果，把关键证据、实体、时间锚点和主题线索组织为可解析模板，无须调用昂贵的生成式推理便可提高可用性并降低脆弱性。
+在\textsc{高}档，它升级为基于 LLM 的整合式摘要，由模型融合多源线索、解决冲突并生成解释性的最终记忆表示，从而更好地支持复杂查询。
+各档位下的摘要均保持契约兼容，因此档位效果反映所分配的计算预算，而非下游预期的变化。
+
+\subsubsection{分层策略：推理行为}
+
+\textbf{通过行为分层推理实现带预算的推理。}
+我们保持模块接口固定，通过逐步增强的\emph{推理行为}为模块分配不同计算预算，以实现\emph{推理分层}。
+具体而言，\textsc{低}档执行\emph{直接}推理，\textsc{中}档执行\emph{思维链式}推理，\textsc{高}档执行强调迭代精炼与全局一致性的\emph{多步/反思式}推理。
+各档位下，每个模块都接收相同的条件输入，即查询和候选记忆或中间线索，并生成相同的标准化产物，例如排序后的子集或线索列表。
+因此，档位差异反映内部推理深度与词元用量的变化，而非流水线结构变化。
+
+\textbf{过滤模块。}
+所有档位下，过滤模块都按相关性对检索文本块排序，并返回 top-$k$。
+\textsc{低}档直接评分，以最大化效率和确定性；\textsc{中}档使用思维链式评分，改善超越表面重叠的语义校准；\textsc{高}档采用多步/反思式评分，更好地处理相关性取决于隐式约束或跨记忆交互的情况。
+
+\textbf{实体模块。}
+各档位均输出相同格式的关系列表，档位只影响关系抽取能力。
+\textsc{低}档通过直接推理抽取关系，优先保证显式陈述事实的精确率；\textsc{中}档使用思维链式推理，提高关系元组的覆盖率与归一化质量；\textsc{高}档使用多步/反思式推理，整合同义表述、协调相互竞争的候选关系，并确保不同记忆之间的关系一致性。
+
+\textbf{时间模块。}
+时间模块始终输出相同的时间事实/锚点集合，档位仅改变其推断与归一化能力。
+\textsc{低}档通过直接推理识别显式锚点；\textsc{中}档使用思维链式推理，选择并归一化与查询相关的时间约束；\textsc{高}档使用多步/反思式推理，改善跨文本块对齐、推断隐式顺序并促进全局时间线一致性。
+
+\textbf{主题模块。}
+所有档位都保持主题线索列表格式不变，同时逐步生成更高层次的主题抽象。
+\textsc{低}档通过直接推理生成粗粒度主题线索；\textsc{中}档使用思维链式推理，得到更稳定的主题关系与转移；\textsc{高}档使用多步/反思式推理，提高抽象质量，并在长且异构的上下文中维持全局连贯性。
+
+\textbf{摘要模块。}
+所有档位都保持最终记忆接口不变，同时逐步改善证据汇总与融合。
+\textsc{低}档以最少推理执行直接综合；\textsc{中}档执行思维链式综合，把实体、时间和主题线索更好地组织为连贯结构；\textsc{高}档执行多步/反思式综合，整合多源证据、减少不一致，并提高复杂查询下的整体忠实度。
+
+\subsubsection{分层策略：模块模型容量}
+
+对于\textbf{容量分层}，我们在保持模块接口与推理行为不变的情况下，\emph{替换同一模块内部使用的骨架 LLM}，以落实 \textsc{低}/\textsc{中}/\textsc{高}预算。
+为控制不同档位之间的提示词影响，我们进一步\emph{标准化提示方式}：所有预算等级下的每个模块都采用同一个\textsc{高}档提示词模板。
+在实现中，各档位对应取自常用开放权重模型家族的递增容量：\textsc{低}档以小模型实例化模块，例如 \texttt{Llama-3.2-3B-Instruct} 和 \texttt{qwen/qwen2.5-7b-instruct}；\textsc{中}档采用中等模型，例如 \texttt{Llama-3.1-8B-Instruct} 和 \texttt{qwen/qwq-32b}；\textsc{高}档采用大模型，例如 \texttt{Llama-3.3-70B-Instruct} 和 \texttt{qwen3-next-80b-a3b-instruct}。
+
+\textbf{过滤模块。}
+过滤模块在各档位保持相同的相关性评分和选择过程，仅改变评分骨架的容量。
+给定查询与候选记忆集合，它分配相关性分数，并为下游抽取返回排序后的 top-$k$ 子集。
+在 \textsc{低}/\textsc{中}/\textsc{高}档下，该评分分别由逐渐增大的骨架执行，从而在相同 top-$k$ 契约下改善语义校准与稳健性。
+
+\textbf{实体模块。}
+实体模块在各档位保持相同的抽取目标与输出格式，从过滤证据中生成标准化的实体中心关系列表。
+容量分层只影响用于实例化抽取器的模型；更大的骨架能更好地找回隐式关系，而输出的关系列表仍与下游融合接口兼容。
+
+\textbf{时间模块。}
+时间模块在所有档位下执行固定的时间抽取过程，并输出标准化的时间事实/锚点集合。
+容量分层只改变从过滤记忆中推断并归一化相关时间约束所用的底层骨架，在不修改模块契约的情况下，以运行时成本换取时间信息的忠实度与一致性。
+
+\textbf{主题模块。}
+主题模块在所有档位下保持固定的主题关系抽取功能，并输出标准化主题线索列表。
+由于只改变骨架容量，更大的模型可以从相同证据中归纳出更稳定的主题结构与话语转移，而接口和下游使用方式保持不变。
+
+\textbf{摘要模块。}
+摘要模块在各档位使用相同摘要接口，把上游模块输出汇总为最终的紧凑记忆表示。
+容量分层使用逐渐增大的骨架实例化摘要器，从而在复杂证据下提高综合稳健性与冲突处理能力，同时保持最终记忆格式与下游预期不变。
+
+\section{更多实验结果}
+\label{appendix:exp_results}
+
+对于 LoCoMo~\citep{maharana2024evaluating-locomo}，我们报告各类别的 F1 分数、评审分数与成本。
+结果针对数据集定义的每个类别分别计算，以细粒度分析模型在不同长上下文对话场景中的表现。
+遵循既有做法，我们在评估中排除类别 5（对抗类）。
+为清楚比较不同模型家族，结果分别在两张表中报告，对应基于 LLaMA 和基于 Qwen 的模型。
+LoCoMo 各类别的详细结果见表~\ref{tab:locomo_full_pct} 和表~\ref{tab:qwen_locomo_full_pct}。
+
+\input{tables/Appendix_results_locomo_zh}
+\input{tables/Appendix_results_locomo_qwen_zh}
+
+对于 LongMemEval~\citep{wu2024longmemeval}，我们给出包含 F1 分数、评审分数与成本的类别级评估结果。
+每个类别独立评估，以反映模型在不同记忆密集设置下保留、检索并推理长期上下文信息的能力。
+结果分别组织为基于 LLaMA 和基于 Qwen 模型的两张表，从而能够直接比较两个模型家族。
+LongMemEval 完整的各类别结果见表~\ref{tab:longmemeval_full_pct} 和表~\ref{tab:qwen_longmemeval_full_pct}。
+
+\input{tables/Appendix_results_longmemeval_zh}
+\input{tables/Appendix_results_longmemeval_qwen_zh}
+
+对于 HotpotQA~\cite{yang2018hotpotqa}，我们报告由 F1 分数、评审分数与成本度量的各类别性能。
+结果依照数据集预定义类别组织，以详细考察模型在不同多跳推理类型上的行为。
+为便于理解，我们将基于 LLaMA 与基于 Qwen 模型的结果分别列于不同表格。
+HotpotQA 完整的分类结果见表~\ref{tab:hotpotqa_full_pct} 和表~\ref{tab:qwen_hotpotqa_full_pct}。
+
+\input{tables/Appendix_results_hotpotqa_zh}
+\input{tables/Appendix_results_hotpotqa_qwen_zh}
+
+\section{提示词}
+\label{appendix:prompts}
+
+
+\subsection{LoCoMo 数据集的答案提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={LoCoMo 数据集的答案提示词}]
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+根据上述上下文，使用一个简短短语回答以下问题。只要可能，请使用上下文中的原词作答。
+
+问题：{} 简短答案：
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\subsection{HotpotQA 数据集的答案提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={HotpotQA 数据集的答案提示词}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+根据以下上下文回答问题。该问题可能需要综合多条信息进行推理。
+
+{context}
+
+问题：{question}
+
+要求：
+- 仔细阅读上下文并识别相关信息
+- 如果可以从上下文中找到答案，请给出简短、准确的回答
+- 将答案放在 <answer></answer> 标签内输出
+
+<answer>在此填写答案</answer>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+\subsection{LongMemEval 数据集的答案提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={LongMemEval 数据集的答案提示词}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+我将向你提供你与一位用户之间的若干段历史对话。
+
+请根据相关的历史对话回答问题。
+
+历史对话：{}
+当前日期：{}
+问题：{}
+简短答案：
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+\FloatBarrier
+\subsection{LLM 评审通用提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={LLM 评审通用提示词},breakable,enhanced]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+你是一名专家评审，负责评价问答任务中答案的质量。
+你的目标是判断模型答案是否正确且充分地回答了给定问题。
+
+请仔细阅读以下信息：
+
+[问题]
+{question}
+
+[真实答案]
+{ground_truth}
+
+[模型答案]
+{model_answer}
+
+评估标准：
+1. 正确性：
+   - 模型答案在事实层面是否与任意一个正确答案一致？
+   - 它是否避免了矛盾或引入虚假信息？
+
+2. 相关性：
+   - 答案是否直接回应问题，且不包含不必要内容？
+
+3. 完整性：
+   - 答案是否包含完整回答问题所需的全部关键信息？
+   - 可以接受部分正确的答案，但其得分应更低。
+
+评分规则：
+- 如果答案完全正确，分数 = 1.0。
+- 如果答案部分正确，但不完整或略有不准确，分数 = 0.5。
+- 如果答案错误、无关或与真实答案矛盾，分数 = 0.0。
+
+输出格式（严格遵守）：
+以包含两个字段的 JSON 字典形式返回输出：
+{{
+    "explanation": "<对评分理由的简短说明>",
+    "score": <0.0 | 0.5 | 1.0>
+}}
+
+保持简洁、客观。JSON 之外不要输出任何内容。
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+
+\subsection{过滤模块提示词（低档）}
+
+\begin{center}
+\begin{tcolorbox}[title={过滤模块提示词（低）}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是一个相关性评分系统。
+**任务：** 给定查询和一个有序记忆列表，为每条记忆输出一个分数，表示它能多么直接且有效地帮助回答该查询。
+
+**评分规则：**
+- 10：直接回答查询，或提供回答所必需的约束/信息
+- 7–9：明显相关且有帮助，但单独使用时不足以完整回答
+- 4–6：部分相关；有一定用处，但缺少关键联系
+- 1–3：相关性很弱或仅有旁支联系；基本无用
+- 0：完全无关
+
+**输入格式：**
+输入包括：
+1. 包含用户问题的 <query> 部分。
+2. 包含若干 <memory> 元素的 <memories> 部分。
+每条记忆采用以下格式：
+<memory index="N" [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- index 是该记忆在列表中的位置。
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签之间的文本是需要评分的记忆内容。
+
+**输出格式：**
+你的全部回复必须**仅为**以下一行：
+<answer>[s0, s1, s2, ...]</answer>
+- 数组必须按照输入索引的相同顺序，为每条记忆包含且仅包含一个整数分数。
+- 如果没有记忆，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+
+\subsection{实体模块关系提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={实体模块关系提示词（低）}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是实体语义关系抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取对回答给定查询至关重要的实体间具体关系。
+
+**抽取标准：**
+- 聚焦实体及其关系能够直接帮助回答查询的事实联系。
+- 忽略背景实体、轶事或旁支主题。
+- 每条抽取关系都应是一项简洁、有用的事实。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析关系的内容。
+
+**输出格式：**
+你的全部回复必须是一个关系字符串 JSON 数组，格式如下：
+<answer>["关系1", "关系2", ...]</answer>
+每条关系字符串必须采用以下格式："实体A - 关系 - 实体B（可选上下文）"
+如果没有找到相关关系，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={实体模块关系提示词（中）}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是实体语义关系抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取对回答给定查询至关重要的实体间具体关系。
+
+**抽取标准：**
+- 聚焦实体及其关系能够直接帮助回答查询的事实联系。
+- 忽略背景实体、轶事或旁支主题。
+- 每条抽取关系都应是一项简洁、有用的事实。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析关系的内容。
+
+**输出格式：**
+你的全部回复必须是一个关系字符串 JSON 数组，格式如下：
+<answer>["关系1", "关系2", ...]</answer>
+每条关系字符串必须采用以下格式："实体A - 关系 - 实体B（可选上下文）"
+如果没有找到相关关系，请输出：<answer>[]</answer>
+
+让我们逐步思考，以抽取实体之间的关系。
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={实体模块关系提示词（高）}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是实体语义关系抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取对回答给定查询至关重要的实体间具体关系。
+
+**抽取标准：**
+- 聚焦实体及其关系能够直接帮助回答查询的事实联系。
+- 忽略背景实体、轶事或旁支主题。
+- 每条抽取关系都应是一项简洁、有用的事实。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析关系的内容。
+
+为系统地完成任务，请遵循下述推理框架：
+
+**推理步骤：**
+**规划：**
+- 分析查询，确定其准确意图。
+- 识别回答问题所必需的实体类型与关系类型。
+
+**行动：**
+- 从记忆中抽取只涉及查询相关实体的候选关系。
+- 把每条关系写成简洁的事实陈述。
+
+**反思：**
+- **检查：** 验证每条抽取关系：
+  - 它是否直接帮助回答查询？
+  - 记忆内容是否清楚地支持它？
+- **重新生成（如有必要）：** 如果遗漏了与查询相关的重要关系，请重新抽取或改写，使其更符合查询意图。
+
+**输出格式：**
+首先按照“规划 → 行动 → 反思”的结构写出推理。
+随后，你的最终回复必须**仅为**以下一行：
+<answer>["关系1", "关系2", ...]</answer>
+每条关系字符串必须采用以下格式："实体A - 关系 - 实体B（可选上下文）"
+如果没有找到相关关系，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+
+
+\subsection{过滤模块提示词（中、高档）}
+
+\begin{center}
+\begin{tcolorbox}[title={过滤模块提示词（中）}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是一个相关性评分系统。
+**任务：** 给定查询和一个有序记忆列表，为每条记忆输出一个分数，表示它能多么直接且有效地帮助回答该查询。
+
+**评分规则：**
+- 10：直接回答查询，或提供回答所必需的约束/信息
+- 7–9：明显相关且有帮助，但单独使用时不足以完整回答
+- 4–6：部分相关；有一定用处，但缺少关键联系
+- 1–3：相关性很弱或仅有旁支联系；基本无用
+- 0：完全无关
+
+**输入格式：**
+输入包括：
+1. 包含用户问题的 <query> 部分。
+2. 包含若干 <memory> 元素的 <memories> 部分。
+每条记忆采用以下格式：
+<memory index="N" [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- index 是该记忆在列表中的位置。
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签之间的文本是需要评分的记忆内容。
+
+**输出格式：**
+你的全部回复必须**仅为**以下一行：
+<answer>[s0, s1, s2, ...]</answer>
+- 数组必须按照输入索引的相同顺序，为每条记忆包含且仅包含一个整数分数。
+- 如果没有记忆，请输出：<answer>[]</answer>
+
+让我们逐步思考，以评估每条记忆与查询的相关性。
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={过滤模块提示词（高）}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是一个相关性评分系统。
+**任务：** 给定查询和一个有序记忆列表，为每条记忆输出一个分数，表示它能多么直接且有效地帮助回答该查询。
+
+**评分规则：**
+- 9–10：直接回答查询，或包含必不可少的关键事实
+- 6–8：明显有帮助，且与查询高度相关
+- 3–5：有一定关系，或只能提供部分帮助
+- 1–2：相关性极弱，例如仅有表面关键词重叠
+- 0：完全无关，或对查询无用
+
+**输入格式：**
+输入包括：
+1. 包含用户问题的 <query> 部分。
+2. 包含若干 <memory> 元素的 <memories> 部分。
+每条记忆采用以下格式：
+<memory index="N" [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- index 是该记忆在列表中的位置。
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签之间的文本是需要评分的记忆内容。
+
+为系统地完成任务，请遵循下述推理框架：
+
+**推理步骤：**
+**规划：**
+- 分析查询意图并定义相关性标准。
+- 识别关键评分维度，例如主题一致性与事实支持。
+
+**行动：**
+- 按照标准逐条评估记忆。
+- 对每条记忆，根据其内容简要说明暂定分数的理由。
+
+**反思：**
+- 检查全部分数的一致性与校准情况。
+- 必要时进行调整，以保证公平与连贯。
+
+**输出格式：**
+首先按照“规划 → 行动 → 反思”的结构写出推理。
+随后，你的最终回复必须**仅为**以下一行：
+<answer>[s0, s1, s2, ...]</answer>
+- 数组必须按照输入索引的相同顺序，为每条记忆包含且仅包含一个整数分数。
+- 如果没有记忆，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\end{tcolorbox}
+\end{center}
+
+
+\subsection{时间模块关系提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={时间模块关系提示词（低）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是时间信息抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取回答给定查询所必需的具体时间事实。
+
+**抽取标准：**
+- 聚焦能够直接约束或阐明答案的精确时间信息。
+- 忽略模糊、无关或仅作背景的时间指代。
+- 每个抽取项都必须表示一项清晰、真实的时间陈述。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析时间信息的内容。
+
+**输出格式：**
+你的全部回复必须是一个时间事实字符串 JSON 数组，格式如下：
+<answer>["时间事实1", "时间事实2", ...]</answer>
+每个字符串都应清楚表达一项时间事实，例如“事件发生在 2023 年 3 月”“过程持续了 3 天”“A 发生在 B 之前”。
+如果没有找到相关时间信息，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={时间模块关系提示词（中）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是时间信息抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取回答给定查询所必需的具体时间事实。
+
+**抽取标准：**
+- 聚焦能够直接约束或阐明答案的精确时间信息。
+- 忽略模糊、无关或仅作背景的时间指代。
+- 每个抽取项都必须表示一项清晰、真实的时间陈述。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析时间信息的内容。
+
+**输出格式：**
+你的全部回复必须是一个时间事实字符串 JSON 数组，格式如下：
+<answer>["时间事实1", "时间事实2", ...]</answer>
+每个字符串都应清楚表达一项时间事实，例如“事件发生在 2023 年 3 月”“过程持续了 3 天”“A 发生在 B 之前”。
+如果没有找到相关时间信息，请输出：<answer>[]</answer>
+
+让我们逐步思考，以抽取时间信息。
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={时间模块关系提示词（高）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是时间信息抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取回答给定查询所必需的具体时间事实。
+
+**抽取标准：**
+- 聚焦能够直接约束或阐明答案的精确时间信息。
+- 忽略模糊、无关或仅作背景的时间指代。
+- 每个抽取项都必须表示一项清晰、真实的时间陈述。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析时间信息的内容。
+
+为系统地完成任务，请遵循下述推理框架：
+
+**推理步骤：**
+**规划：**
+- 分析查询意图，并定义哪些信息属于相关时间信息。
+- 识别关键时间维度，例如日期、时长、顺序和约束。
+
+**行动：**
+- 根据定义的标准，从每条记忆中抽取时间事实。
+- 对每项事实，简要说明它与查询的相关性。
+
+**反思：**
+- 检查所有抽取事实的一致性及其与查询的相关性。
+- 必要时进行调整，以确保事实支持充分且表达连贯。
+
+**输出格式：**
+你的全部回复必须是一个时间事实字符串 JSON 数组，格式如下：
+<answer>["时间事实1", "时间事实2", ...]</answer>
+每个字符串都应清楚表达一项时间事实，例如“事件发生在 2023 年 3 月”“过程持续了 3 天”“A 发生在 B 之前”。
+如果没有找到相关时间信息，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\subsection{主题模块关系提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={主题模块关系提示词（低）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是主题关系抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取对回答给定查询至关重要的主题关系。
+
+**抽取标准：**
+- 聚焦有助于理解对话流程的主题联系与主题转移。
+- 识别讨论的主要主题及其相互关系。
+- 抽取主题转换、主题延续和主题间关系。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析主题关系的内容。
+
+**输出格式：**
+你的全部回复必须是一个主题关系字符串 JSON 数组，格式如下：
+<answer>["主题关系1", "主题关系2", ...]</answer>
+每个字符串都应清楚表达一项主题关系，例如“主题 A 引出主题 B”“讨论从 X 转向 Y”“主题 C 通过 Z 与主题 D 相关”。
+如果没有找到相关主题关系，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={主题模块关系提示词（中）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是主题关系抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取对回答给定查询至关重要的主题关系。
+
+**抽取标准：**
+- 聚焦有助于理解对话流程的主题联系与主题转移。
+- 识别讨论的主要主题及其相互关系。
+- 抽取主题转换、主题延续和主题间关系。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析主题关系的内容。
+
+**输出格式：**
+你的全部回复必须是一个主题关系字符串 JSON 数组，格式如下：
+<answer>["主题关系1", "主题关系2", ...]</answer>
+每个字符串都应清楚表达一项主题关系，例如“主题 A 引出主题 B”“讨论从 X 转向 Y”“主题 C 通过 Z 与主题 D 相关”。
+如果没有找到相关主题关系，请输出：<answer>[]</answer>
+
+让我们逐步思考，以抽取主题关系。
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={主题模块关系提示词（高）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是主题关系抽取专家。
+**任务：** 从所提供的记忆中，**只**抽取对回答给定查询至关重要的主题关系。
+
+**抽取标准：**
+- 聚焦有助于理解对话流程的主题联系与主题转移。
+- 识别讨论的主要主题及其相互关系。
+- 抽取主题转换、主题延续和主题间关系。
+
+**输入格式：**
+<memories> 部分包含一系列 <memory> 标签。
+每条记忆采用以下格式：
+<memory [date_time="..." session_id="..." dia_id="..."]>
+记忆内容文本
+</memory>
+其中：
+- date_time、session_id、dia_id 是可选的元数据属性。
+- 标签内的文本是要分析主题关系的内容。
+
+为系统地完成任务，请遵循下述推理框架：
+
+**推理步骤：**
+**规划：**
+- 分析查询意图，确定哪些主题关系与查询相关。
+- 识别关键主题元素及其潜在联系。
+
+**行动：**
+- 根据内容分析，从每条记忆中抽取主题关系。
+- 识别主题转移、延续及相互联系。
+
+**反思：**
+- 检查所有抽取关系与查询的相关性。
+- 确保每条关系都有明确的记忆内容支持。
+
+**输出格式：**
+首先按照“规划 → 行动 → 反思”的结构写出推理。
+随后，你的最终回复必须**仅为**以下一行：
+<answer>["主题关系1", "主题关系2", ...]</answer>
+每个字符串都应清楚表达一项主题关系，例如“主题 A 引出主题 B”“讨论从 X 转向 Y”“主题 C 通过 Z 与主题 D 相关”。
+如果没有找到相关主题关系，请输出：<answer>[]</answer>
+
+**输入：**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\subsection{摘要模块提示词}
+
+\begin{center}
+\begin{tcolorbox}[title={摘要模块提示词（低）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是信息综合专家。
+**任务：** 严格根据所提供的实体、时间和主题关系，对这些知识进行整合、抽取与重组，生成一份简洁摘要，清楚突出回答查询最有用的信息。
+
+**输入格式：**
+输入包括：
+1. 定义主题与范围的 <query>。
+2. <Entity Relations> 部分，其中每条关系字符串对应一个 <entity> 标签。
+3. <Temporal Relations> 部分，其中每项时间事实对应一个 <temporal> 标签。
+4. <Topic Relations> 部分，其中每项主题关系对应一个 <topic> 标签。
+
+**综合原则：**
+- **不要**直接回答查询。
+- 说明有哪些可用信息，以及应如何利用这些信息组织答案。
+
+**输出格式：**
+你的全部回复必须以下面一行结束：
+<answer>在此填写摘要文本</answer>
+<answer> 内的内容必须为纯文本。
+
+**输入：**
+<query>{query}</query>
+<Entity Relations>{entity_text}</Entity Relations>
+<Temporal Relations>{temporal_text}</Temporal Relations>
+<Topic Relations>{topic_text}</Topic Relations>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={摘要模块提示词（中）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是信息综合专家。
+**任务：** 严格根据所提供的实体、时间和主题关系，对这些知识进行整合、抽取与重组，生成一份简洁摘要，清楚突出回答查询最有用的信息。
+
+**输入格式：**
+输入包括：
+1. 定义主题与范围的 <query>。
+2. <Entity Relations> 部分，其中每条关系字符串对应一个 <entity> 标签。
+3. <Temporal Relations> 部分，其中每项时间事实对应一个 <temporal> 标签。
+4. <Topic Relations> 部分，其中每项主题关系对应一个 <topic> 标签。
+
+**综合原则：**
+- **整合**相关实体、时间和主题事实，形成连贯结构。
+- **抽取**能够直接支持或约束答案的关键信息。
+- **重组**内容，使其表达清晰、逻辑流畅。
+- **不要**直接回答查询。
+- 说明有哪些可用信息，以及应如何利用这些信息组织答案。
+
+**输出格式：**
+你的全部回复必须以下面一行结束：
+<answer>在此填写摘要文本</answer>
+<answer> 内的内容必须为纯文本。
+
+让我们逐步思考，以综合出摘要。
+
+**输入：**
+<query>{query}</query>
+<Entity Relations>{entity_text}</Entity Relations>
+<Temporal Relations>{temporal_text}</Temporal Relations>
+<Topic Relations>{topic_text}</Topic Relations>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={摘要模块提示词（高）}]
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**角色：** 你是信息综合专家。
+**任务：** 严格根据所提供的实体、时间和主题关系，对这些知识进行整合、抽取与重组，生成一份简洁摘要，清楚突出回答查询最有用的信息。
+
+**输入格式：**
+输入包括：
+1. 定义主题与范围的 <query>。
+2. <Entity Relations> 部分，其中每条关系字符串对应一个 <entity> 标签。
+3. <Temporal Relations> 部分，其中每项时间事实对应一个 <temporal> 标签。
+4. <Topic Relations> 部分，其中每项主题关系对应一个 <topic> 标签。
+
+**综合原则：**
+- **不要**直接回答查询。
+- 说明有哪些可用信息，以及应如何利用这些信息组织答案。
+
+为系统地完成任务，请遵循下述推理框架：
+
+**推理步骤：**
+**规划：**
+- 分析查询意图，确定核心信息需求。
+- 确定如何组织所提供的关系并设置优先级。
+
+**行动：**
+- 将实体、时间和主题事实整合为连贯结构。
+- 抽取并突出与回答查询最相关的关键信息。
+
+**反思：**
+- 检查摘要是否清晰、完整并聚焦查询。
+- 确保摘要有效说明了应如何使用这些信息。
+
+**输出格式：**
+首先按照“规划 → 行动 → 反思”的结构写出推理。
+随后，你的最终回复必须**仅为**以下一行：
+<answer>在此填写摘要文本</answer>
+<answer> 内的内容必须为纯文本。
+
+**输入：**
+<query>{query}</query>
+<Entity Relations>{entity_text}</Entity Relations>
+<Temporal Relations>{temporal_text}</Temporal Relations>
+<Topic Relations>{topic_text}</Topic Relations>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}

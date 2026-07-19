@@ -1,0 +1,1013 @@
+\section{More Implementation Details}
+\label{appendix:imple_detail}
+
+
+
+
+
+\subsection{Dataset Statistics}
+\label{appendix:dataset}
+
+
+Table~\ref{tab:dataset_stats} summarizes the dataset statistics used in our experiments, including the train/validation/test split sizes (the number of training queries) and the average context length (in tokens) for LoCoMo~\citep{maharana2024evaluating-locomo}, LongMemEval~\citep{wu2024longmemeval}, and HotpotQA~\cite{yang2018hotpotqa}.
+
+Note that for HotpotQA, we follow the evaluation protocol and dataset construction in prior work~\citep{yu2025memagent}: we concatenate evidence and distractor documents to form a long context, and use the same preprocessed test queries released in that setup.
+
+
+
+\input{tables/appendix_dataset_stats}
+
+
+
+
+\subsection{Evaluation Details}
+\label{appendix:exp_eval}
+
+
+
+Tables~\ref{tab:hparams_shared} and~\ref{tab:hparams_eval} report the evaluation configuration. Table~\ref{tab:hparams_shared} lists hyperparameters shared across all datasets. Table~\ref{tab:hparams_eval} further specifies dataset-dependent evaluation settings.
+
+Unless otherwise specified, we repeat each BudgetMem experiment with three different random seeds and report the averaged results. 
+This reduces the effect of random initialization and training stochasticity, especially for the reinforcement-learning-based router. 
+We use the same data splits, retrieval settings, and evaluation protocol across runs to ensure a fair and reproducible comparison.
+
+
+
+\input{tables/hyper}
+
+
+
+\subsection{Router State Representation}
+\label{appendix:router_state_representation}
+
+We provide additional details on the router state representation used in Sec.~4.3 to improve reproducibility. 
+For each module invocation, the router state is constructed from three textual components: the user query, the current module input, and a module descriptor indicating which module is being routed. 
+We encode these three components separately using \texttt{all-mpnet-base-v2}. 
+This produces one 768-dimensional embedding for the query, one 768-dimensional embedding for the module input, and one 768-dimensional embedding for the module descriptor.
+
+We then concatenate the query embedding and the module-input embedding, and apply a linear projection to obtain a 256-dimensional context representation. 
+The module descriptor embedding is projected separately into a 256-dimensional module representation. 
+Finally, we concatenate the 256-dimensional context representation and the 256-dimensional module representation to form the final 512-dimensional router state vector. 
+This state vector is fed into the shared budget-tier router to predict the tier selection distribution over \textsc{Low}, \textsc{Mid}, and \textsc{High} for the current module. 
+The embedding model is kept frozen during training, while the projection layers and the router policy network are optimized with reinforcement learning.
+
+
+
+
+
+\subsection{Details on PPO Training Objectives}
+\label{appendix:ppo}
+
+We train the shared budget-tier router policy $\pi_\theta$ with Proximal Policy Optimization (PPO) to make query-aware, module-wise tier selections along the fixed modular runtime memory pipeline:
+$M_{\text{fil}} \rightarrow \{M_{\text{ent}}, M_{\text{tmp}}, M_{\text{top}}\} \rightarrow M_{\text{sum}}$.
+
+\paragraph{Episode, actions, and states.}
+A single query constitutes one PPO episode: given $(q, C_q)$, the router sequentially selects a budget tier for each module invocation, executes the routed pipeline to obtain extracted memory $m$, and then produces the final answer $\hat{y}=f_{\text{ans}}(q,m)$.
+At each routing step $k$, the action $a_k$ chooses the module tier. We use a 3-way action space per module
+$\{\textsc{LOW}, \textsc{MID}, \textsc{HIGH} \}$.
+The state $s_k$ is a compact embedding of (i) the query $q$, (ii) the current module input (i.e., the intermediate output from the previous stage), and (iii) a \emph{module descriptor} that indicates which module is being routed.
+We use a single unified actor--critic network shared across modules; the module identity is injected via the module-descriptor embedding, enabling parameter sharing while retaining module-specific routing behavior.
+
+\paragraph{Reward: performance--cost trade-off with normalization and alignment.}
+After finishing all routed module executions for a query, we compute a task reward $r_{\text{task}}\in[0,1]$ from answer quality (F1 or LLM-judge), and a cost reward $r_{\text{cost}}$ from the extraction cost incurred by routed module calls.
+We optimize the cost-aware scalar reward as follows:
+\begin{equation}
+r \;=\; r_{\text{task}} + \lambda \cdot \alpha \cdot r_{\text{cost}}.
+\label{eq:ppo_reward}
+\end{equation}
+\noindent\textbf{Where.} $r_{\text{task}}\in[0,1]$ is the task reward computed from answer quality (F1 or LLM-as-a-judge); $r_{\text{cost}}$ is the (normalized) cost reward derived from the extraction cost incurred by routed module calls; $\lambda$ controls the performance--cost trade-off; and $\alpha$ is the reward-scale alignment factor.
+
+We compute $r_{\text{cost}}$ by applying sliding-window normalization to raw costs and mapping them to a bounded reward (Eq.~\ref{eq:cost_norm}),
+and compute $\alpha$ via variance-based reward-scale alignment (Eq.~\ref{eq:std_align}).
+
+\paragraph{PPO objective with joint (multi-module) likelihood ratio.}
+Let $\log \pi_\theta(a_k\mid s_k)$ be the per-module log-probability under the current policy.
+Because each query episode yields a sequence of module actions, we use the \emph{joint} action probability over the routed trajectory:
+\begin{equation}
+\log \pi_\theta(\mathbf{a}\mid \mathbf{s})
+\;=\;
+\sum_k \log \pi_\theta(a_k\mid s_k),
+\qquad
+\rho
+\;=\;
+\exp\!\Big(\log \pi_\theta^{\text{new}} - \log \pi_\theta^{\text{old}}\Big).
+\label{eq:ppo_joint_ratio}
+\end{equation}
+\noindent\textbf{Where.} At routing step $k$, $s_k$ is the router state embedding and $a_k\in\{\textsc{LOW},\textsc{MID},\textsc{HIGH}\}$ is the chosen budget-tier action for the current module; $\pi_\theta(\cdot)$ is the router policy parameterized by $\theta$ and $\log \pi_\theta(a_k\mid s_k)$ is the corresponding log-probability; $\mathbf{s}=\{s_k\}_k$ and $\mathbf{a}=\{a_k\}_k$ denote the full state--action sequence over a query episode, with joint log-likelihood $\log \pi_\theta(\mathbf{a}\mid\mathbf{s})$; and $\rho$ is the PPO likelihood ratio between the updated policy (superscript $\text{new}$) and the behavior policy used to collect rollouts.
+
+We then apply the standard PPO clipped surrogate objective with ratio $\rho$, together with a value-function loss and an entropy bonus:
+\begin{equation}
+L \;=\; L_{\text{policy}} + c_v\, L_{\text{value}} - c_e\, H.
+\label{eq:ppo_loss}
+\end{equation}
+\noindent\textbf{Where.} $L_{\text{policy}}$ is the PPO clipped surrogate policy loss; $L_{\text{value}}$ is the value-function regression loss; $H$ is the policy entropy; and $c_v$ and $c_e$ are the coefficients for the value loss and entropy bonus, respectively.
+
+We estimate advantages with a one-step Monte-Carlo return (the episode terminates after the routed pipeline completes), and use the critic as a baseline.
+For stability, we average entropy across module decisions (rather than summing), preventing the entropy term from scaling with the number of routed modules.
+
+\paragraph{Optimization and hyperparameters.}
+We use PPO as the default RL optimizer for router training.
+Unless otherwise specified, we use Adam with learning rate $3\times 10^{-4}$, clip $\epsilon=0.2$,
+$value$-loss coefficient $c_v=0.5$, entropy coefficient $c_e=0.01$,
+$4$ PPO epochs per update, and gradient-norm clipping at $0.5$.
+We train with batch size $32$ and up to $600$ training steps.
+The router operates on 768-d embeddings (query/memory/descriptor), consistent with our shared hyperparameter settings.
+
+
+
+
+\subsection{Module Implementation Details}
+\label{appendix:module}
+
+\textbf{Unified budget-tier interface.}
+We follow the unified budget-tier interface: each module exposes three tiers (\textsc{Low}/\textsc{Mid}/\textsc{High}). Budget tiers only alter the module's internal compute and inferential strength, enabling module-wise routing without changing the overall pipeline structure. To control for prompt effects across tiers, we standardize prompting by using each module's \textsc{High}-tier prompt template consistently for \textsc{Low}/\textsc{Mid}/\textsc{High}.
+
+\subsubsection{Tiering Strategy: Implementation Tiering}
+
+\textbf{Budgeted tiers with a fixed contract.}
+Implementation tiering realizes \textsc{low}/\textsc{mid}/\textsc{high} by increasing the internal compute budget of a module while keeping its input--output contract unchanged. textsc{Low} uses \emph{cheap symbolic pipelines} (rules, regex, lightweight NLP such as spaCy) for fast and controllable processing; \textsc{Mid} upgrades to a \emph{compact learned specialist} (typically BERT-style encoders~\citep{devlin2019bert}) that improves semantic modeling at moderate cost; \textsc{High} further upgrades to \emph{LLM-based processing} for the strongest open-ended reasoning and cross-context integration, at the highest cost.
+
+\textbf{Filter Module.}
+The filter module realizes budget tiering through a monotonic upgrade of its internal relevance estimator, moving from inexpensive symbolic signals to semantic representations and finally to LLM-based evaluation. At \textsc{Low}, it relies on sparse lexical/pattern matching with lightweight heuristic scoring, which is fast and deterministic and thus suitable for aggressive cost control. At \textsc{Mid}, it introduces representation-based relevance (e.g., embedding- and BERT-style similarity), so that semantic matches beyond exact overlap can be recovered under a moderate compute budget. At \textsc{High}, it further upgrades to LLM-based scoring over candidates, thereby enabling context-sensitive discrimination when relevance depends on implicit references, paraphrases, or multi-hop semantics; importantly, across tiers the module keeps the same output contract (a ranked top-$k$ candidate set), so improvements can be attributed to increased internal compute rather than interface changes.
+
+\textbf{Entity Module.}
+The entity relation module follows the same budget ladder, but instantiates it for structured relational cue extraction. At \textsc{Low}, it uses lightweight rules and shallow NLP cues (e.g., regex patterns and spaCy NER/dependency signals) to extract explicit relational traces with high controllability, although coverage is limited when relations are implicit or span multiple chunks. At \textsc{Mid}, it replaces heuristics with a compact task-specific extractor---typically BERT-style relation extraction (e.g., REBEL-like triplet generation)---which improves normalization and coverage of subject--relation--object tuples under a moderate budget. At \textsc{High}, it employs an LLM to perform open-domain relation completion and abstraction, so that missing links can be recovered and paraphrased relations can be consolidated into consistent tuples across chunks; nevertheless, the module continues to emit a standardized relation list, ensuring that downstream fusion remains unchanged.
+
+\textbf{Temporal Module.}
+The temporal relation module is tiered as explicit cue detection $\rightarrow$ learned temporal extraction $\rightarrow$ generative temporal inference, aligning budget increases with progressively stronger temporal modeling. At \textsc{Low}, it identifies explicit time expressions and constructs event--time anchors using lightweight NLP, which is reliable when temporal cues are directly stated. At \textsc{Mid}, it adopts a compact learned extractor (e.g., BERT-style) to select temporally relevant relations and normalize them into a consistent form. At \textsc{High}, it upgrades to LLM-based temporal reasoning, enabling implicit ordering, cross-chunk alignment, and global consistency checking when the timeline must be inferred rather than read off; across all tiers, the output contract is preserved as a standardized set of temporal facts/anchors.
+
+\textbf{Topic Module.}
+The topic module implements budget tiering by progressively strengthening discourse-level abstraction from cheap lexical cues to learned representations and finally LLM-based topic reasoning. At \textsc{Low}, it extracts controllable topical signals from inexpensive lexical/statistical cues (e.g., keywords, TF-IDF-like patterns, and simple transition markers), providing a low-cost but coarse description of topical content and shifts. At \textsc{Mid}, it incorporates compact learned representations (e.g., BERT-style encoders and lightweight segment/topic modeling optionally assisted by NLP structure), which yields more stable topical units and more reliable transition detection under moderate compute. At \textsc{High}, it uses an LLM to produce higher-level topic relations and evolution narratives, improving abstraction and interpretability for long or heterogeneous contexts; critically, each tier still outputs the same standardized topic-cue list so that downstream summarization can consume it uniformly.
+
+\textbf{Summary Module.}
+The summary module realizes budget tiering by varying the depth of evidence fusion while keeping the final memory format unchanged. At \textsc{Low}, it produces a deterministic evidence digest (e.g., concise aggregation/concatenation of retrieved memories and cues), minimizing compute and distortion. At \textsc{Mid}, it outputs a structured synthesis that organizes key evidence, entities, temporal anchors, and topic cues into a parseable template, thereby improving usability and reducing brittleness without invoking expensive generative reasoning. At \textsc{High}, it upgrades to LLM-based integrative summarization, where the model fuses multi-source cues, resolves conflicts, and generates an explanatory final memory representation that better supports complex queries; across tiers, the summary remains contract-compatible, so tier effects reflect the allocated compute budget rather than changes in downstream expectations.
+
+\subsubsection{Tiering Strategy: Inference Behaviour}
+
+\textbf{Budgeted inference via behaviourally tiered reasoning.}
+We realize \emph{reasoning tiering} by allocating different compute budgets to a module through progressively stronger \emph{inference behaviours}, while keeping the module interface fixed. Specifically, \textsc{Low} executes \emph{direct} inference; \textsc{Mid} executes \emph{CoT-style} inference; and \textsc{High} executes \emph{multi-step/reflection-style} inference that emphasizes iterative refinement and global consistency. Across tiers, each module consumes the same conditional inputs (the query and candidate memories or intermediate cues) and produces the same standardized artifact (e.g., a ranked subset or a cue list); therefore, tier differences reflect changes in internal reasoning depth and token footprint rather than changes in pipeline structure.
+
+\textbf{Filter Module.}
+Across tiers, the filter module ranks retrieved chunks by relevance and returns the top-$k$. \textsc{Low} performs direct scoring to maximize efficiency and determinism; \textsc{Mid} adopts CoT-style scoring to improve semantic calibration beyond surface overlap; and \textsc{High} adopts multi-step/reflection-style scoring to better resolve cases where relevance depends on implicit constraints or cross-memory interactions.
+
+\textbf{Entity Module.}
+The entity module outputs the same relation list format across tiers; tiers only affect relation extraction strength. \textsc{Low} extracts relations via direct inference and thus prioritizes precision on explicitly stated facts; \textsc{Mid} uses CoT-style inference to improve coverage and normalization of relation tuples; and \textsc{High} uses multi-step/reflection-style inference to consolidate paraphrases, reconcile competing candidates, and enforce relation consistency across memories.
+
+\textbf{Temporal Module.}
+The temporal module always outputs the same set of temporal facts/anchors; tiers only change how well it infers and normalizes them. \textsc{Low} identifies explicit anchors via direct inference; \textsc{Mid} uses CoT-style inference to select and normalize query-relevant temporal constraints; and \textsc{High} uses multi-step/reflection-style inference to improve cross-chunk alignment, infer implicit ordering, and promote global timeline coherence.
+
+\textbf{Topic Module.}
+Across tiers, the topic module preserves the topic-cue list format, while producing progressively higher-level topic abstractions.\textsc{Low} produces coarse topical cues via direct inference; \textsc{Mid} uses CoT-style inference to yield more stable topic relations and transitions; and \textsc{High} uses multi-step/reflection-style inference to improve abstraction quality and maintain global coherence over long and heterogeneous contexts.
+
+\textbf{Summary Module.}
+Across tiers, the summary module preserves the final memory interface, while improving evidence aggregation and fusion. \textsc{Low} performs direct synthesis with minimal inference; \textsc{Mid} performs CoT-style synthesis that better organizes entity/temporal/topic cues into a coherent structure; and \textsc{High} performs multi-step/reflection-style synthesis to integrate multi-source evidence, reduce inconsistencies, and improve overall faithfulness under complex queries.
+
+
+\subsubsection{Tiering Strategy: Module's Model Capacity}
+For \textbf{capacity tiering}, we operationalize the \textsc{LOW}/\textsc{MID}/\textsc{HIGH} budgets by \emph{swapping the backbone LLM used inside the same module}, while keeping the module interface and inference behavior fixed. 
+To control for prompt effects across tiers, we further \emph{standardize the prompting} by using the same \textsc{HIGH}-tier prompt template for each module at all budget levels.
+In our implementation, tiers correspond to increasing model capacities drawn from widely used open-weight families: \textsc{LOW} instantiates modules with a small model (e.g., \texttt{Llama-3.2-3B-Instruct and qwen/qwen2.5-7b-instruct}), \textsc{MID} uses a medium model (e.g., \texttt{Llama-3.1-8B-Instruct and qwen/qwq-32b}), and \textsc{HIGH} uses a large model (e.g., \texttt{Llama-3.3-70B-Instruct and qwen3-next-80b-a3b-instruct}).
+
+\textbf{Filter Module.}
+The filter module preserves an identical relevance scoring and selection procedure across tiers, and varies only the capacity of the scoring backbone. Given the query and a set of candidate memories, it assigns relevance scores and returns a ranked top-$k$ subset for downstream extraction. Under \textsc{LOW}/\textsc{MID}/\textsc{HIGH}, this scoring is executed by increasingly larger backbones, which improves semantic calibration and robustness under the same top-$k$ contract.
+
+\textbf{Entity Module.}
+The entity module keeps the same extraction objective and output format across tiers, producing a standardized list of entity-centric relations from the filtered evidence. Capacity tiering affects only the model used to instantiate the extractor: larger backbones better recover implicit relations, while the emitted relation list remains interface-compatible with downstream fusion.
+
+\textbf{Temporal Module.}
+The temporal module follows a fixed temporal extraction procedure for all tiers and outputs a standardized set of temporal facts/anchors. Capacity tiering changes only the underlying backbone used to infer and normalize temporally relevant constraints from the filtered memories, trading temporal fidelity and consistency against runtime cost without modifying the module contract.
+
+\textbf{Topic Module.}
+The topic module maintains a fixed topic-relation extraction function and emits a standardized topic-cue list across all tiers. By varying only the backbone capacity, larger models can induce more stable topical structure and discourse transitions from the same evidence, while the interface and downstream consumption remain unchanged.
+
+\textbf{Summary Module.}
+The summary module aggregates the upstream module outputs into a final compact memory representation under an identical summarization interface across tiers. Capacity tiering instantiates the summarizer with increasingly larger backbones, improving synthesis robustness and conflict handling under complex evidence, while keeping the final memory format and downstream expectations fixed.
+
+
+
+\section{More Experimental Results}
+\label{appendix:exp_results}
+
+
+
+For LoCoMo \citep{maharana2024evaluating-locomo}, we report the per-category performance in terms of F1-score, Judge score, and Cost. The results are computed separately for each category defined in the dataset, providing a fine-grained analysis of model performance across different long-context conversational scenarios. Following prior practice, we exclude Category 5 (adversarial) from our evaluation. To facilitate a clear comparison across model families, the results are reported in two separate tables, corresponding to LLaMA-based models and Qwen-based models, respectively. The detailed category-wise results on LoCoMo are summarized in Tables \ref{tab:locomo_full_pct} and \ref{tab:qwen_locomo_full_pct}.
+
+\input{tables/Appendix_results_locomo}
+\input{tables/Appendix_results_locomo_qwen}
+
+For LongMemEval \citep{wu2024longmemeval}, we present the category-level evaluation results, including F1-score, Judge score, and Cost. Each category is evaluated independently to reflect the model’s ability to retain, retrieve, and reason over long-term contextual information under different memory-intensive settings. The results are organized into two separate tables for LLaMA-based and Qwen-based models, respectively, enabling a direct comparison between the two model families. The complete per-category results for LongMemEval are reported in Tables \ref{tab:longmemeval_full_pct} and \ref{tab:qwen_longmemeval_full_pct}.
+
+\input{tables/Appendix_results_longmemeval}
+\input{tables/Appendix_results_longmemeval_qwen}
+
+For HotpotQA \cite{yang2018hotpotqa}, we provide the per-category performance measured by F1-score, Judge score, and Cost. The results are organized according to the predefined categories of the dataset, enabling a detailed examination of model behavior across different multi-hop reasoning types. For clarity, we report the results of LLaMA-based models and Qwen-based models in separate tables. The full category-wise results on HotpotQA are shown in Tables \ref{tab:hotpotqa_full_pct} and \ref{tab:qwen_hotpotqa_full_pct}.
+
+\input{tables/Appendix_results_hotpotqa}
+
+
+\input{tables/Appendix_results_hotpotqa_qwen}
+
+
+
+
+
+
+
+
+
+
+
+\section{Prompts}
+\label{appendix:prompts}
+
+
+
+
+
+\subsection{Answer Prompt for the Locomo Dataset}
+
+\begin{center}
+\begin{tcolorbox}[title={Answer Prompt for the Locomo Dataset}]
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+Based on the above context, write an answer in the form of a short phrase for the following question. Answer with exact words from the context whenever possible.
+
+Question: {} Short answer:
+\end{Verbatim}
+\end{tcolorbox}
+
+\end{center}
+
+\subsection{Answer Prompt for the HotpotQA Dataset}
+\begin{center}
+\begin{tcolorbox}[title={Answer Prompt for the HotpotQA Dataset}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+Based on the following context, answer the question. The question may require reasoning across multiple pieces of information.
+
+{context}
+
+Question: {question}
+
+Instructions:
+- Read the context carefully and identify relevant information
+- If the answer can be found in the context, provide a short, precise answer
+- Output your answer within <answer></answer> tags
+
+<answer>your answer here</answer>
+\end{Verbatim}
+}
+\label{appendix:case_1}
+\end{tcolorbox}
+\end{center}
+
+
+
+\subsection{Answer Prompt for the LongMemEval Dataset}
+
+
+
+\begin{center}
+\begin{tcolorbox}[title={Answer Prompt for the LongMemEval Dataset}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+I will give you several history chats between you and a user.
+
+Please answer the question based on the relevant chat history.
+
+History Chats:{}
+Current Date: {}
+Question: {}
+Short Answer:
+\end{Verbatim}
+}
+\label{appendix:case_1}
+\end{tcolorbox}
+\end{center}
+
+\FloatBarrier
+\subsection{LLM JUDGE GENERAL PROMPT}
+
+
+\begin{center}
+\begin{tcolorbox}[title={LLM JUDGE GENERAL PROMPT},breakable,
+  enhanced,]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontsize=\small,
+                 fontfamily=tt, fontseries=b]
+You are an expert judge evaluating the quality of an answer for a QA task.
+Your goal is to determine whether the model's answer correctly and sufficiently
+answers the given question.
+
+Read the following information carefully:
+
+[Question]
+{question}
+
+[Ground Truth Answers]
+{ground_truth}
+
+[Model Answer]
+{model_answer}
+
+Your evaluation criteria:
+1. Correctness:
+   - Is the model answer factually consistent with ANY of the correct answers?
+   - Does it avoid contradictions or introducing false information?
+
+2. Relevance:
+   - Does the answer address the question directly without unnecessary content?
+
+3. Completeness:
+   - Does the answer include all essential information needed to fully answer the question?
+   - Partial answers are allowed but should receive lower scores.
+
+Scoring Rules:
+- Score = 1.0 if the answer is fully correct.
+- Score = 0.5 if the answer is partially correct but incomplete or slightly inaccurate.
+- Score = 0.0 if the answer is incorrect, irrelevant, or contradicts the ground truth.
+
+Output Format (STRICT):
+Return your output as a JSON dictionary with two fields:
+{{
+    "explanation": "<brief explanation of your reasoning>",
+    "score": <0.0 | 0.5 | 1.0>
+}}
+
+Be concise and objective. Do not include anything outside the JSON.
+\end{Verbatim}
+}
+\label{appendix:case_1}
+\end{tcolorbox}
+\end{center}
+
+\subsection{FILTER MODULE PROMPT}
+
+\begin{center}
+\begin{tcolorbox}[title={FILTER MODULE PROMPT (Low)}]
+{
+\begin{Verbatim}[breaklines, breakanywhere, fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a relevance scoring system.  
+**Task:** Given a query and an ordered list of memories, output a score for each memory indicating how directly and usefully it helps answer the query.
+
+**Scoring Rules:**    
+- 10: directly answers the query or provides essential constraints/info to answer it  
+- 7–9: clearly relevant and helpful, but not fully sufficient alone  
+- 4–6: partially relevant; some usefulness but missing key connection
+- 1–3: weak/tangential relevance; mostly not useful  
+- 0: completely irrelevant
+
+**Input Format:**  
+The input consists of:  
+1. A `<query>` section containing the user's question.  
+2. A `<memories>` section containing individual `<memory>` elements.  
+Each memory is formatted as:  
+```
+<memory index="N" [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `index` is the memory's position in the list.  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text between the tags is the memory content to be scored.
+
+**Output Format:**  
+Your entire response must be **only** the following line:  
+`<answer>[s0, s1, s2, ...]</answer>`  
+- The array must contain exactly one integer score per memory, in the same order as the input indices.  
+- If there are no memories, output: `<answer>[]</answer>`
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories> 
+\end{Verbatim}
+}
+\label{appendix:case_1}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={Filter Module Prompt (Mid)}]
+{
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a relevance scoring system.  
+**Task:** Given a query and an ordered list of memories, output a score for each memory indicating how directly and usefully it helps answer the query.
+
+**Scoring Rules:**  
+- 10: directly answers the query or provides essential constraints/info to answer it  
+- 7–9: clearly relevant and helpful, but not fully sufficient alone  
+- 4–6: partially relevant; some usefulness but missing key connection
+- 1–3: weak/tangential relevance; mostly not useful  
+- 0: completely irrelevant
+
+**Input Format:**  
+The input consists of:  
+1. A `<query>` section containing the user's question.  
+2. A `<memories>` section containing individual `<memory>` elements.  
+Each memory is formatted as:  
+```
+<memory index="N" [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `index` is the memory's position in the list.  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text between the tags is the memory content to be scored.
+
+**Output Format:**  
+Your entire response must be **only** the following line:  
+`<answer>[s0, s1, s2, ...]</answer>`  
+- The array must contain exactly one integer score per memory, in the same order as the input indices.  
+- If there are no memories, output: `<answer>[]</answer>`
+
+Let's think step by step to score the relevance of each memory to the query.
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories> 
+\end{Verbatim}
+}
+\label{appendix:case_1}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={FILTER MODULE PROMPT (High)}]
+{
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a relevance scoring system.  
+**Task:** Given a query and an ordered list of memories, output a score for each memory indicating how directly and usefully it helps answer the query.
+
+**Scoring Rules:**  
+- 9–10: directly answers the query or contains essential key facts  
+- 6–8: clearly helpful and strongly related to the query  
+- 3–5: somewhat related or only partially helpful  
+- 1–2: very weakly related (e.g., superficial keyword overlap only)  
+- 0: completely irrelevant or not useful for the query
+
+**Input Format:**  
+The input consists of:  
+1. A `<query>` section containing the user's question.  
+2. A `<memories>` section containing individual `<memory>` elements.  
+Each memory is formatted as:  
+```
+<memory index="N" [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `index` is the memory's position in the list.  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text between the tags is the memory content to be scored.
+
+To complete the task systematically, please follow the steps reasoning framework outlined below:
+
+**Reasoning Steps:**  
+**PLAN:**  
+- Analyze the query's intent and define relevance criteria.  
+- Identify key scoring dimensions (e.g., topical alignment, factual support).  
+
+**ACT:**  
+- Evaluate each memory against the criteria.  
+- For each memory, briefly justify the provisional score based on its content.  
+
+**REFLECT:**  
+- Review all scores for consistency and calibration.  
+- Make adjustments if needed to ensure fairness and coherence.  
+
+**Output Format:**  
+First write your reasoning following the PLAN → ACT → REFLECT structure.  
+Then, your final response must be **only** the following line:  
+`<answer>[s0, s1, s2, ...]</answer>`  
+- The array must contain exactly one integer score per memory, in the same order as the input indices.  
+- If there are no memories, output: `<answer>[]</answer>`
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\label{appendix:case_1}
+\end{tcolorbox}
+\end{center}
+
+\subsection{ENTITY MODULE RELATION PROMPT}
+\begin{center}
+\begin{tcolorbox}[title={ENTITY MODULE RELATION PROMPT (Low)}]
+{
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in entity semantic relationship extraction.  
+**Task:** From the provided memories, extract **only** concrete relationships between entities that are central to answering the given query.
+
+**Extraction Criteria:**  
+- Focus on factual connections where the entities and their relationship directly help answer the query.  
+- Ignore background entities, anecdotes, or side topics.  
+- Each extracted relationship should be a concise, useful fact.
+
+**Input Format:**  
+The `<memories>` section contains a list of `<memory>` tags.  
+Each memory is formatted as:  
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text within the tags is the content to analyze for relationships.
+
+**Output Format:**  
+Your entire response must be a JSON array of relationship strings, formatted as follows:  
+`<answer>["relationship1", "relationship2", ...]</answer>`  
+Each relationship string must be in the format: `"EntityA - relation - EntityB (optional context)"`  
+If no relevant relationships are found, output: `<answer>[]</answer>`
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\label{appendix:prompt_for_locomo}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={ENTITY MODULE RELATION PROMPT (Mid)}]
+{
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in entity semantic relationship extraction.  
+**Task:** From the provided memories, extract **only** concrete relationships between entities that are central to answering the given query.
+
+**Extraction Criteria:**  
+- Focus on factual connections where the entities and their relationship directly help answer the query.  
+- Ignore background entities, anecdotes, or side topics.  
+- Each extracted relationship should be a concise, useful fact.
+
+**Input Format:**  
+The `<memories>` section contains a list of `<memory>` tags.  
+Each memory is formatted as:  
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text within the tags is the content to analyze for relationships.
+
+**Output Format:**  
+Your entire response must be a JSON array of relationship strings, formatted as follows:  
+`<answer>["relationship1", "relationship2", ...]</answer>`  
+Each relationship string must be in the format: `"EntityA - relation - EntityB (optional context)"`  
+If no relevant relationships are found, output: `<answer>[]</answer>`
+
+Let's think step by step to extract the relationships between entities.
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\label{appendix:prompt_for_locomo}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={ENTITY MODULE RELATION PROMPT (High)}]
+{
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in entity semantic relationship extraction.  
+**Task:** From the provided memories, extract **only** concrete relationships between entities that are central to answering the given query.
+
+**Extraction Criteria:**  
+- Focus on factual connections where the entities and their relationship directly help answer the query.  
+- Ignore background entities, anecdotes, or side topics.  
+- Each extracted relationship should be a concise, useful fact.
+
+**Input Format:**  
+The `<memories>` section contains a list of `<memory>` tags.  
+Each memory is formatted as:  
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text within the tags is the content to analyze for relationships.
+
+To complete the task systematically, please follow the steps reasoning framework outlined below:
+
+**Reasoning Steps:**  
+**PLAN:**  
+- Analyze the query to determine its precise intent.  
+- Identify which entity types and relationship types are essential for answering it.  
+
+**ACT:**  
+- From the memories, extract candidate relations that involve only query-relevant entities.  
+- Format each relation as a concise, factual statement.  
+
+**REFLECT:**  
+- **CHECK:** Verify each extracted relation:  
+  - Does it directly help answer the query?  
+  - Is it clearly supported by the memory content?  
+- **REGENERATE (if needed):** If important query-relevant relations are missing, re-extract or rewrite them to better align with the query intent.  
+
+**Output Format:**  
+First write your reasoning following the PLAN → ACT → REFLECT structure.  
+Then, your final response must be **only** the following line:  
+`<answer>["relationship1", "relationship2", ...]</answer>`  
+Each relationship string must be in the format: `"EntityA - relation - EntityB (optional context)"`  
+If no relevant relationships are found, output: `<answer>[]</answer>`
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+}
+\label{appendix:prompt_for_locomo}
+\end{tcolorbox}
+\end{center}
+
+\subsection{TEMPORAL MODULE RELATION PROMPT}
+
+\begin{center}
+\begin{tcolorbox}[title={TEMPORAL MODULE RELATION PROMPT (Low)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in temporal information extraction.  
+**Task:** From the provided memories, extract **only** specific temporal facts that are necessary for answering the given query.
+
+**Extraction Criteria:**  
+- Focus on precise temporal information that directly constrains or clarifies the answer.  
+- Ignore vague, irrelevant, or background time references.  
+- Each extracted item must represent a clear, factual temporal statement.
+
+**Input Format:**  
+The `<memories>` section contains a list of `<memory>` tags.  
+Each memory is formatted as:  
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text within the tags is the content to analyze for temporal information.
+
+**Output Format:**  
+Your entire response must be a JSON array of temporal fact strings, formatted as follows:  
+`<answer>["temporal_fact1", "temporal_fact2", ...]</answer>`  
+Each string should clearly express a temporal fact (e.g., "Event occurred in March 2023", "Process lasted 3 days", "A happened before B").  
+If no relevant temporal information is found, output: `<answer>[]</answer>`
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={TEMPORAL MODULE RELATION PROMPT (Mid)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in temporal information extraction.  
+**Task:** From the provided memories, extract **only** specific temporal facts that are necessary for answering the given query.
+
+**Extraction Criteria:**  
+- Focus on precise temporal information that directly constrains or clarifies the answer.  
+- Ignore vague, irrelevant, or background time references.  
+- Each extracted item must represent a clear, factual temporal statement.
+
+**Input Format:**  
+The `<memories>` section contains a list of `<memory>` tags.  
+Each memory is formatted as:  
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text within the tags is the content to analyze for temporal information.
+
+**Output Format:**  
+Your entire response must be a JSON array of temporal fact strings, formatted as follows:  
+`<answer>["temporal_fact1", "temporal_fact2", ...]</answer>`  
+Each string should clearly express a temporal fact (e.g., "Event occurred in March 2023", "Process lasted 3 days", "A happened before B").  
+If no relevant temporal information is found, output: `<answer>[]</answer>`
+
+Let's think step by step to extract the temporal information.
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\begin{center}
+\begin{tcolorbox}[title={TEMPORAL MODULE RELATION PROMPT (High)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in temporal information extraction.  
+**Task:** From the provided memories, extract **only** specific temporal facts that are necessary for answering the given query.
+
+**Extraction Criteria:**  
+- Focus on precise temporal information that directly constrains or clarifies the answer.  
+- Ignore vague, irrelevant, or background time references.  
+- Each extracted item must represent a clear, factual temporal statement.
+
+**Input Format:**  
+The `<memories>` section contains a list of `<memory>` tags.  
+Each memory is formatted as:  
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```  
+Where:  
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.  
+- The text within the tags is the content to analyze for temporal information.
+
+To complete the task systematically, please follow the steps reasoning framework outlined below:
+
+**Reasoning Steps:**  
+**PLAN:**  
+- Analyze the query's intent and define what constitutes relevant temporal information.  
+- Identify key temporal dimensions (e.g., dates, durations, sequences, constraints).  
+
+**ACT:**  
+- Extract temporal facts from each memory based on the defined criteria.  
+- For each fact, briefly justify its relevance to the query.  
+
+**REFLECT:**  
+- Review all extracted facts for consistency and query relevance.  
+- Make adjustments if needed to ensure factual support and coherence.  
+
+**Output Format:**  
+Your entire response must be a JSON array of temporal fact strings, formatted as follows:  
+`<answer>["temporal_fact1", "temporal_fact2", ...]</answer>`  
+Each string should clearly express a temporal fact (e.g., "Event occurred in March 2023", "Process lasted 3 days", "A happened before B").  
+If no relevant temporal information is found, output: `<answer>[]</answer>`
+
+**Input:**  
+<query>{query}</query>  
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\subsection{TOPIC MODULE RELATION PROMPT}
+
+\begin{center}
+\begin{tcolorbox}[title={TOPIC MODULE RELATION PROMPT (Low)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in topic relationship extraction.
+**Task:** From the provided memories, extract **only** topic relationships that are central to answering the given query.
+
+**Extraction Criteria:**
+- Focus on thematic connections and topic transitions that help understand the conversation flow.
+- Identify main topics discussed and how they relate to each other.
+- Extract topic shifts, topic continuations, and thematic relationships.
+
+**Input Format:**
+The `<memories>` section contains a list of `<memory>` tags.
+Each memory is formatted as:
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```
+Where:
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.
+- The text within the tags is the content to analyze for topic relationships.
+
+**Output Format:**
+Your entire response must be a JSON array of topic relationship strings, formatted as follows:
+`<answer>["topic_relationship1", "topic_relationship2", ...]</answer>`
+Each string should clearly express a topic relationship (e.g., "Topic A leads to Topic B", "Discussion shifts from X to Y", "Topic C is related to Topic D through Z").
+If no relevant topic relationships are found, output: `<answer>[]</answer>`
+
+**Input:**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={TOPIC MODULE RELATION PROMPT (Mid)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in topic relationship extraction.
+**Task:** From the provided memories, extract **only** topic relationships that are central to answering the given query.
+
+**Extraction Criteria:**
+- Focus on thematic connections and topic transitions that help understand the conversation flow.
+- Identify main topics discussed and how they relate to each other.
+- Extract topic shifts, topic continuations, and thematic relationships.
+
+**Input Format:**
+The `<memories>` section contains a list of `<memory>` tags.
+Each memory is formatted as:
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```
+Where:
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.
+- The text within the tags is the content to analyze for topic relationships.
+
+**Output Format:**
+Your entire response must be a JSON array of topic relationship strings, formatted as follows:
+`<answer>["topic_relationship1", "topic_relationship2", ...]</answer>`
+Each string should clearly express a topic relationship (e.g., "Topic A leads to Topic B", "Discussion shifts from X to Y", "Topic C is related to Topic D through Z").
+If no relevant topic relationships are found, output: `<answer>[]</answer>`
+
+Let's think step by step to extract the topic relationships.
+
+**Input:**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={TOPIC MODULE RELATION PROMPT (High)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in topic relationship extraction.
+**Task:** From the provided memories, extract **only** topic relationships that are central to answering the given query.
+
+**Extraction Criteria:**
+- Focus on thematic connections and topic transitions that help understand the conversation flow.
+- Identify main topics discussed and how they relate to each other.
+- Extract topic shifts, topic continuations, and thematic relationships.
+
+**Input Format:**
+The `<memories>` section contains a list of `<memory>` tags.
+Each memory is formatted as:
+```
+<memory [date_time="..." session_id="..." dia_id="..."]>
+memory content text
+</memory>
+```
+Where:
+- `date_time`, `session_id`, `dia_id` are optional metadata attributes.
+- The text within the tags is the content to analyze for topic relationships.
+
+To complete the task systematically, please follow the steps reasoning framework outlined below:
+
+**Reasoning Steps:**
+**PLAN:**
+- Analyze the query's intent to determine what topic relationships are relevant.
+- Identify key thematic elements and potential connections.
+
+**ACT:**
+- Extract topic relationships from each memory based on content analysis.
+- Identify thematic shifts, continuations, and interconnections.
+
+**REFLECT:**
+- Review all extracted relationships for relevance to the query.
+- Ensure relationships are clearly supported by the memory content.
+
+**Output Format:**
+First write your reasoning following the PLAN → ACT → REFLECT structure.
+Then, your final response must be **only** the following line:
+`<answer>["topic_relationship1", "topic_relationship2", ...]</answer>`
+Each string should clearly express a topic relationship (e.g., "Topic A leads to Topic B", "Discussion shifts from X to Y", "Topic C is related to Topic D through Z").
+If no relevant topic relationships are found, output: `<answer>[]</answer>`
+
+**Input:**
+<query>{query}</query>
+<memories>{memories_text}</memories>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+\subsection{SUMMARY MODULE PROMPT}
+\begin{center}
+\begin{tcolorbox}[title={SUMMARY MODULE PROMPT (Low)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in information synthesis.
+**Task:** Based strictly on the provided entity, temporal, and topic relations, integrate, extract, and reorganize this knowledge to create a concise summary that clearly highlights the most useful information for answering the query.
+
+**Input Format:**
+The input includes:
+1. A `<query>` defining the subject and scope.
+2. An `<Entity Relations>` section containing one `<entity>` tag per relationship string.
+3. A `<Temporal Relations>` section containing one `<temporal>` tag per temporal fact.
+4. A `<Topic Relations>` section containing one `<topic>` tag per topic relationship.
+
+**Synthesis Guidelines:**
+- Do **not** answer the query directly.
+- Explain what information is available and how it should be used to formulate an answer.
+
+**Output Format:**
+Your entire response must end with the following line:
+`<answer>your summary text here</answer>`
+The content inside `<answer>` must be plain text.
+
+**Input:**
+<query>{query}</query>
+<Entity Relations>{entity_text}</Entity Relations>
+<Temporal Relations>{temporal_text}</Temporal Relations>
+<Topic Relations>{topic_text}</Topic Relations>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={SUMMARY MODULE PROMPT (Mid)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in information synthesis.
+**Task:** Based strictly on the provided entity, temporal, and topic relations, integrate, extract, and reorganize this knowledge to create a concise summary that clearly highlights the most useful information for answering the query.
+
+**Input Format:**
+The input includes:
+1. A `<query>` defining the subject and scope.
+2. An `<Entity Relations>` section containing one `<entity>` tag per relationship string.
+3. A `<Temporal Relations>` section containing one `<temporal>` tag per temporal fact.
+4. A `<Topic Relations>` section containing one `<topic>` tag per topic relationship.
+
+**Synthesis Guidelines:**
+- **Integrate** relevant entity, temporal, and topic facts into a coherent structure.
+- **Extract** key information that directly supports or constrains the answer.
+- **Reorganize** content for clarity and logical flow.
+- Do **not** answer the query directly.
+- Explain what information is available and how it should be used to formulate an answer.
+
+**Output Format:**
+Your entire response must end with the following line:
+`<answer>your summary text here</answer>`
+The content inside `<answer>` must be plain text.
+
+Let's think step by step to synthesize the summary.
+
+**Input:**
+<query>{query}</query>
+<Entity Relations>{entity_text}</Entity Relations>
+<Temporal Relations>{temporal_text}</Temporal Relations>
+<Topic Relations>{topic_text}</Topic Relations>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
+
+\begin{center}
+\begin{tcolorbox}[title={SUMMARY MODULE PROMPT (High)}]
+\begin{Verbatim}[breaklines, breakanywhere,fontfamily=tt, fontseries=b, baselinestretch=0.95]
+**Role:** You are a specialist in information synthesis.
+**Task:** Based strictly on the provided entity, temporal, and topic relations, integrate, extract, and reorganize this knowledge to create a concise summary that clearly highlights the most useful information for answering the query.
+
+**Input Format:**
+The input includes:
+1. A `<query>` defining the subject and scope.
+2. An `<Entity Relations>` section containing one `<entity>` tag per relationship string.
+3. An `<Temporal Relations>` section containing one `<temporal>` tag per temporal fact.
+4. A `<Topic Relations>` section containing one `<topic>` tag per topic relationship.
+
+**Synthesis Guidelines:**
+- Do **not** answer the query directly.
+- Explain what information is available and how it should be used to formulate an answer.
+
+To complete the task systematically, please follow the steps reasoning framework outlined below:
+
+**Reasoning Steps:**
+**PLAN:**
+- Analyze the query's intent to determine the core information requirements.
+- Identify how to organize and prioritize the provided relations.
+
+**ACT:**
+- Integrate entity, temporal, and topic facts into a coherent structure.
+- Extract and highlight key information most relevant to answering the query.
+
+**REFLECT:**
+- Review the summary for clarity, completeness, and focus on the query.
+- Ensure the summary effectively explains how the information should be used.
+
+**Output Format:**
+First write your reasoning following the PLAN → ACT → REFLECT structure.
+Then, your final response must be **only** the following line:
+`<answer>your summary text here</answer>`
+The content inside `<answer>` must be plain text.
+
+**Input:**
+<query>{query}</query>
+<Entity Relations>{entity_text}</Entity Relations>
+<Temporal Relations>{temporal_text}</Temporal Relations>
+<Topic Relations>{topic_text}</Topic Relations>
+\end{Verbatim}
+\end{tcolorbox}
+\end{center}
+
