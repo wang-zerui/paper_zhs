@@ -1,0 +1,99 @@
+
+%\vspace{-1em}
+\section{引言}
+\label{sec.intro}
+
+
+
+\begin{figure}[t]
+\centering
+% \vspace{-2\baselineskip}
+\includegraphics[width=0.9\columnwidth]{figs/pareto_front.png}
+\vspace{-0.5\baselineskip}
+\captionof{figure}{\small {基于 AIME24 和 GPQA 的平均准确率与总推理成本计算所得的成本-性能权衡。\ourframework 位于帕累托前沿，以低于或接近强基线的成本取得更高准确率（见\cref{ap:cost_breakdown}）。所有训练时编排模型均使用其已发布的编排器，而这些编排器的训练环境可能与我们的环境不同。}}
+% which may be sub-optimal for our evaluation environment.
+\label{fig:parato_front}
+\vspace{-1\baselineskip}
+\end{figure}
+
+
+
+\begin{figure*}[h]
+\centering
+% \vspace{-0.5\baselineskip}
+\includegraphics[width=\textwidth]{figs/comparison.png}
+\vspace{-15pt}
+\captionof{figure}{\small 不同范式与 \ourframework 的对比。\textbf{左：}推理时编排系统通常采用整体式编排，但不进行训练。\ourframework 属于自动化 MAS，并将问题表述为采用整体式编排的函数调用强化学习问题。\textbf{右：}当 \masness 被设为\textit{低}（虚线）时，系统至多实例化一个智能体；当 \masness 为\textit{高}时，智能体数量不受限制。函数调用协议与解析器的细节见附录 \ref{app:prompt} 和附录 \ref{app:parser}。
+% \zixuan{a couple point can be clearer}
+% \shafiq{
+% Some symbols are not defined (the blue snowflake, the red one). For manual MAS, show a human agent. 
+% Auto MAS (inf time) and Holistic Orchestration look similar.} 
+% \yf{Two points seems unclear: (1) what is the input and output for the orchestrator vs. sub-agents; Is there a concrete example? (2) How do they communicate? Are there specific patterns like loops?}\zixuan{query is input, answer is output. communicate via function calling}
+}
+\label{fig:main}
+\vspace{-1\baselineskip}
+\end{figure*}
+
+我们已经观察到一条清晰的演进路线：从独立的大语言模型（LLM），到基于 LLM 的单智能体系统（SAS），再到近来的多智能体系统（MAS）\citep{ke2025surveyfrontiersllmreasoning}。这一转变反映了现代任务日益增长的复杂性；这些任务往往需要持续推理、任务分解以及与其他专门智能体交互。早期 MAS 设计大多由人工构建，采用辩论等固定交互模式\citep{du2023improvingfactualityreasoning}。近年来，研究重心逐渐转向\textit{自动化 MAS 设计}：系统结构、智能体角色与交互关系均动态生成，因为人工指定不仅耗费大量人力，也难以扩展到新问题或新领域。
+%\shafiq{Need to introduce automatic MAS with motivations.}
+
+
+
+
+
+尽管自动化 MAS 已展现出很强的实证潜力，现有方法在几个重要方面仍存在局限：（1）\textbf{问题表述}：多数已有工作\citep{Ke2025MASZero,nie2025weakforstrong,hu2024ADAS}采用\textit{可执行代码}来表述智能体编排。基于代码的表述虽然灵活，但会带来显著开销；当子智能体及其连接关系变得更加复杂时（例如执行多轮搜索的智能体），这种方法也难以扩展，因为编排器在编排过程中往往需要分析、甚至复现完整的子智能体代码。
+因此，这些方法通常局限于相对简单的子智能体，例如基于思维链（Chain-of-Thought，CoT）\citep{wei2022chain}和自洽思维链（Self-Consistency，SC）\citep{wang2023selfconsistency}的子智能体。（2）\textbf{训练}：许多现有方法高度依赖推理时自我改进或启发式搜索~\citep{zhang2024aflowautomatingagenticworkflow,liu2024dynamicllmpowered}。缺乏显式训练目标时，这种适应过程可能不稳定、优化方向错误，而且计算成本高昂。尽管近期一些研究已将训练引入 MAS 设计\citep{dang2025multiagentcollaborationevolvingorchestration,chi2025eraagenticorganizationlearning}，它们通常仍将编排建模为顺序决策过程，即每次增量添加一个组件，并通过多轮强化学习进行优化。这种范式在部分场景下有效，却会引入大量训练开销并鼓励局部的逐步优化，使编排器难以从全局视角推理 MAS 结构；（3）\textbf{智能体扩展原则}\citep{li2024more,qian2025scaling}。尽管 MAS 正被迅速采用，目前仍没有原则性的定量框架能够预测增加子智能体何时会提升性能、何时反而会降低性能。因此，实践者往往依赖启发式方法，这既限制了科学理解，也阻碍了实际部署。多智能体协作何时真正优于更简单的单智能体方案、何时只是增加复杂性，仍不明确\citep{kim2025sciencescalingagentsystems,huang2024large}。
+%\shafiq{I meant this one: https://arxiv.org/abs/2310.01798 that shows CoTSC is better than Debate. We can cite both if relevant}.
+
+
+
+我们认为，一个有效的自动化 MAS 应满足三个核心要求：（1）应有一个明确的\textbf{“MAS 程度（\masness）”}概念，用以刻画特定任务适合采用多大程度的多智能体协作，因为并非所有问题都能从 MAS 中获益。例如，我们的先导实验（\cref{sec:experiemnt}）表明，即便是 AIME 中颇具挑战性的数学任务，往往也很少受益于多智能体协作；（2）\textbf{编排机制应当灵活且可扩展}。即使子智能体高度复杂，该问题表述也应保持有效。特别是，编排器 LLM 应当\textit{只}关注高层推理与系统设计：它的职责是决定何时调用哪些子智能体，以及如何连接它们，而不是复现子智能体自身的内部行为；（3）\textbf{子智能体应由自己的目标定义，因此应拥有自己的上下文、工具和工作流}\cite{anthropic_subagents_2024}。
+% \ryan{should we flag here that the design doesn't always beat SAS}
+多数现有方法要么在\textit{LLM 空间}中定义子智能体~\cite{jin2025controllingperformancebudgetcentralized,estornell2025trainleaderhierarchicalreasoning,dang2025multiagentcollaborationevolvingorchestration}，通过切换不同骨干模型来区分子智能体，这会让编排器退化为单纯的 LLM 路由器；要么在\textit{提示词模板空间}中定义子智能体，使不同子智能体之间只有表层的提示词差异（例如在辩论中，不同角色往往仅通过修改角色描述来实例化：“你是一名批评者”与“你是一名支持者”）。此类定义忽略了工具使用与工作流，而这些同样是让子智能体围绕其目标形成专业能力的关键因素。
+
+% rather than lightweight prompt variations or merely different LLMs
+% Most existing methods consider only the \textit{LLM space} \cite{jin2025controllingperformancebudgetcentralized,estornell2025trainleaderhierarchicalreasoning,dang2025multiagentcollaborationevolvingorchestration}, reduces the orchestrator to merely an LLM router or lightweight prompt variations like CoT and SC. These ignoring the tools, workflows, or configurations that also specialize a sub-agent’s goal
+
+
+
+% In \ourframework, we instead consider a \textbf{sub-agent} space \cite{anthropic_subagents_2024}: a sub-agent explicitly or implicitly has its own goal, as well as its own context window, tools, and custom prompt. a sub-agent should explicitly or implicitly has its own goal, given by its own context window, tools, and custom prompt. 
+% \zixuan{move some content from Section 5 }
+
+
+
+本文提出 \textbf{\ourframework}，
+% \yf{why do we use ORCH instead of sth like Orchestra? The latter seems more memorable}, 
+它将 MAS 编排表述为\textbf{函数调用强化学习（RL）问题}。在这一表述下，\textit{复杂度任意且面向目标}的子智能体（例如推理智能体和搜索智能体）被封装为可调用函数，其内部机制则被抽象隐藏。编排器只需通过调用 \texttt{create\_agent} 和 \texttt{create\_flow} 两个原语函数，决定何时实例化子智能体、创建哪些子智能体，以及如何连接它们。我们还在问题表述中引入了 \textbf{\masness}，用户可将其配置为\textit{低}（至多使用一个子智能体）或\textit{高}。基于这一表述，我们不再将 MAS 设计视为一系列决策，而是采用\textbf{整体式编排}，由编排器\textbf{在单个决策步骤中}生成\textit{完整}编排（对比见\cref{fig:main}）。
+% \yf{Here it is a bit abstract for first-time readers. It might be better to put an illustrative figure here. Regarding the motivation, I'm thinking about if there are some concrete cases where this design is obviously better than existing ones? Or do you have some simple experimental results to compare side-by-side? This would give readers more confidence that the proposed framework is indeed superior.}\zixuan{we can refer to figure 1.  entire MAS at once is superior, e.g., sequential orchestration can only be "sequential"} 
+这种设计使编排器能够联合推理完整系统配置，而不是优化一连串局部决策。因此，学习到的编排反映的是全局协作模式，而不是执行顺序造成的影响。从学习角度看，它比多步方法更容易优化；多步方法会诱导局部的逐步优化，并受到长时域信用分配和误差传播的影响。因此，随着 MAS 复杂度上升，该设计能带来更稳定的训练和更好的可扩展性；其性能优于顺序式编排基线（\cref{sec:experiemnt}）也证明了这一点。它还带来了显著的效率提升（超过 10$\times$），因而位于帕累托前沿，如\cref{fig:parato_front}所示。
+
+% (\cref{sec:experiemnt} shows suprior results of this design comparing to the seqeuntial orchesation baselines}).
+%\shafiq{Also state that framing it as a single-step RL problem makes RL optimization more stable, scalable and easier compared to multi-step (potentially long-horizon) RL.}
+
+%To quantitatively study when and why MAS outperforms single agent systems, we further introduce a controlled benchmark called  \textbf{\ourbenchmark}, where we consider \textbf{5 axes (depth, horizon, breadth, parallel, and robustness)} to characterize a problem for controlled MAS evaluation. 
+为了定量分析 MAS 在何时以及为何优于单智能体系统，我们提出受控基准 \ourbenchmark。它从\textbf{\depth、\horizon、\breadth、\myparallel 和 \robustness}五个维度刻画问题，从而能够系统且受控地评估 MAS 行为。
+% \austin{Abstract has ``parallel'' instead of ``parallelism'' -- may have something to do with macro definitions.}
+我们的分析得出了若干关键洞见。例如，我们发现多智能体协作的收益高度依赖于任务结构和底层 LLM 的能力。在这些洞见的指导下，我们在公共基准上开展实验，并证明恰当的 MAS 配置能够带来稳定的性能提升。
+
+总之，本文的主要贡献如下：
+\begin{itemize}[leftmargin=*,noitemsep,topsep=2pt]
+  \item 我们为 MAS 编排提出一种新颖、可扩展且有效的强化学习表述，其中包含明确的 \textit{\masness} 概念，以及封装复杂子智能体的函数调用抽象。
+  \item 我们提出专为 MAS 评估设计的受控基准 \ourbenchmark，可系统地实证分析 MAS 何时优于单智能体系统、何时并非如此。据我们所知，这是首个专门评估 MAS 收益的基准。
+  \item 借助 \ourbenchmark，我们从三个分析方向研究广泛 MAS 配置下的收益，覆盖不同模型规模与家族中的三种编排器设置和五种子智能体设置。
+  \item 在上述分析洞见的指导下，我们证明本方法在数学、多跳问答和多步搜索问答等公共基准上表现强劲，同时效率比强基线高出超过 \textit{10$\times$}。
+\end{itemize}
+% \footnote{Code and data will be publicly available upon acceptance.}
+
+  %\zixaun{orchestator: Qwen-7b, GPT-20b, DS-7b; sub-agent:  Qwen-7b, GPT-20b, GPT-120b (3 efforts)}
+
+  % \austin{Can we make this more direct? ``...tailored for MAS evaluation. Using IMAS, we rigorously analyze when MAS outperforms and underperforms SAS.'' That is, we want to explicitly claim the analysis as a contribution, whereas the current bullet only says IMAS \textit{enables} analysis/analysis is implied in 3rd bullet}. \austin{Can we also get super explicit? ``We train [x] different meta-agents across [z] configurations and [y] model families to investigate the benefits of MAS across 3 analysis directions'' or something similar?}
+
+
+
+%In summary, our key contributions are
+%\begin{itemize}[leftmargin=*,noitemsep,topsep=2pt]
+%  \item A novel and effective RL training  formulation for MAS orchestration, including an explicit notion of \masness and a function-calling abstraction for complex sub-agents.
+%  \item A controlled benchmark dedicated to MAS evaluation and gaining empirical insights that clarify when MAS outperforms single agent systems and when it does not.
+%  \item Strong performance on public benchmarks, including math, multi-hop QA and multi-step search-based QA, guided by the proposed analysis.
+%\end{itemize}
+

@@ -1,0 +1,438 @@
+\section{基于规则的解析器}
+\label{app:parser}
+
+\subsection{低 \masness}
+
+
+\begin{subagent}[title=低 \masness 解析器]
+
+\pykw{async} \pykw{def} \pyfn{LowDoMParser}(
+\pykw{self}, response\_text, original\_task\_info):
+
+\quad \pycom{\# 步骤 1：检查是否指定了智能体}
+
+\quad agent\_name = extract\_xml(response\_text, \pystr{agent\_name})
+
+\quad \pykw{if} \pykw{not} agent\_name:
+
+\quad\quad \pycom{\# 没有智能体：回退到直接回答}
+
+\quad\quad answer = extract\_xml(response\_text, \pystr{answer})
+
+\quad\quad \pykw{return} \pystr{direct\_answer}, answer \\
+
+
+\quad \pycom{\# 步骤 2：解析必需参数}
+
+\quad args\_xml = extract\_xml(response\_text, \pystr{required\_arguments})
+
+\quad required\_args = \code{\{\}} \\
+
+\quad \pycom{\# 处理 agent\_input}
+
+\quad agent\_input = extract\_xml(args\_xml, \pystr{agent\_input})
+
+\quad \pykw{if} agent\_input == \pystr{""} \pykw{or} global\_no\_decompose:
+
+\quad\quad required\_args[\pystr{agent\_input}] = \pystr{""}
+
+\quad \pykw{else}:
+
+\quad\quad required\_args[\pystr{agent\_input}] = agent\_input \\
+
+
+\quad \pycom{\# 可选的 DebateAgent 参数}
+
+\quad debate\_roles = extract\_xml(args\_xml, \pystr{debate\_roles})
+
+\quad \pykw{if} agent\_name.lower() == \pystr{debateagent}:
+
+\quad\quad roles = parse\_list(debate\_roles)
+
+\quad\quad \pykw{assert} len(roles) $\geq$ 2
+
+\quad\quad required\_args[\pystr{debate\_roles}] = roles \\
+
+
+\quad \pycom{\# 步骤 3：构造智能体调用}
+
+\quad agent\_call = \code{\{}
+
+\quad\quad \jsonkey{name}: agent\_name,
+
+\quad\quad \jsonkey{required\_arguments}: required\_args
+
+\quad \code{\}} \\
+
+
+\quad \pycom{\# 步骤 4：生成统一的 forward() 分派器}
+
+\quad \pykw{async} \pykw{def} \pyfn{forward}(
+\pykw{self}, original\_task\_info):
+
+\quad\quad agent\_input = required\_args[\pystr{agent\_input}] \\
+
+\quad\quad \pykw{if} agent\_input == \pystr{""}:
+
+\quad\quad\quad task\_info = original\_task\_info
+
+\quad\quad \pykw{else}:
+
+\quad\quad\quad task\_info = CombineTask(original\_task\_info,
+agent\_input) \\
+
+\quad\quad \pycom{\# 根据智能体类型分派}
+
+\quad\quad \pykw{if} agent\_name == \pystr{SCAgent}:
+
+\quad\quad\quad \pykw{return} \pykw{await} self.SCAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{elif} agent\_name == \pystr{CoTAgent}:
+
+\quad\quad\quad \pykw{return} \pykw{await} self.CoTAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{elif} agent\_name == \pystr{ReflexionAgent}:
+
+\quad\quad\quad \pykw{return} \pykw{await} self.ReflexionAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{elif} agent\_name == \pystr{DebateAgent}:
+
+\quad\quad\quad \pykw{return} \pykw{await} self.DebateAgent(
+task\_info,
+model=global\_node\_model,
+debate\_roles=required\_args[\pystr{debate\_roles}]
+)
+
+\quad \pykw{return} forward 
+\end{subagent}
+
+\subsection{高 \masness}
+
+% \zixuan{TODO: add parser}
+
+
+\begin{subagent}[title=高 DoM 解析器]
+
+\pykw{async} \pykw{def} \pyfn{HighDoMParser}(
+\pykw{self}, response\_text, original\_task\_info):
+
+\quad \pycom{\# 步骤 1：抽取全部智能体节点}
+
+\quad agents = ExtractAllAgents(response\_text)
+
+\quad \pykw{if} \pykw{not} agents:
+
+\quad\quad \pycom{\# 没有智能体：回退到直接回答}
+
+\quad\quad answer = extract\_xml(response\_text, \pystr{answer})
+
+\quad\quad \pykw{return} \pystr{direct\_answer}, answer \\
+
+
+\quad \pycom{\# 步骤 2：抽取边（有向依赖）}
+
+\quad edges = ExtractEdges(response\_text) \\
+
+
+\quad \pycom{\# 步骤 3：处理单智能体情况}
+
+\quad \pykw{if} len(agents) == 1 \pykw{and} len(edges) == 0:
+
+\quad\quad \pykw{return} GenerateSingleAgentForward(agents[0]) \\
+
+
+\quad \pycom{\# 步骤 4：拒绝缺失边的无效多智能体情况}
+
+\quad \pykw{if} len(agents) $>$ 1 \pykw{and} len(edges) == 0:
+
+\quad\quad \pykw{raise} ValueError(\pystr{多个智能体必须通过边连接}) \\
+
+
+\quad \pycom{\# 步骤 5：验证图为恰有一个汇点的有向无环图}
+
+\quad ValidateGraph(agents, edges) \\
+
+
+\quad \pycom{\# 步骤 6：计算执行顺序与汇点节点}
+
+\quad execution\_order = TopologicalSort(agents, edges)
+
+\quad sink = FindUniqueSink(agents, edges) \\
+
+
+\quad \pycom{\# 步骤 7：生成按图执行的多智能体 forward()}
+
+\quad \pykw{return} GenerateMultiAgentForward(agents, edges, execution\_order, sink) \\
+
+
+
+\pykw{def} \pyfn{ExtractAllAgents}(response\_text):
+
+\quad agents = []
+
+\quad \pycom{\# 查找所有 \texttt{<agent>...</agent>} 块}
+
+\quad \pykw{for} block \pykw{in} FindAllAgentBlocks(response\_text):
+
+\quad\quad agent\_id = extract\_xml(block, \pystr{agent\_id})
+
+\quad\quad agent\_name = extract\_xml(block, \pystr{agent\_name})
+
+\quad\quad agent\_desc = extract\_xml(block, \pystr{agent\_description})
+
+\quad\quad args\_xml = extract\_xml(block, \pystr{required\_arguments})
+
+\quad\quad \pykw{if} \pykw{not} agent\_id \pykw{or} \pykw{not} agent\_name:
+
+\quad\quad\quad \pykw{continue} \\
+
+\quad\quad required\_args = \code{\{\}}
+
+\quad\quad agent\_input = extract\_xml(args\_xml, \pystr{agent\_input})
+
+\quad\quad \pykw{if} agent\_input == \pystr{""} \pykw{or} \pykw{not} agent\_input:
+
+\quad\quad\quad required\_args[\pystr{agent\_input}] = \pystr{""}
+
+\quad\quad \pykw{else}:
+
+\quad\quad\quad required\_args[\pystr{agent\_input}] = agent\_input \\
+
+\quad\quad debate\_roles = extract\_xml(args\_xml, \pystr{debate\_roles})
+
+\quad\quad \pykw{if} debate\_roles:
+
+\quad\quad\quad roles = ParseList(debate\_roles)
+
+\quad\quad\quad \pykw{if} agent\_name.lower() == \pystr{debateagent}:
+
+\quad\quad\quad\quad \pykw{assert} roles \pykw{is} \pykw{not} None
+
+\quad\quad\quad\quad \pykw{assert} len(roles) $\geq$ 2
+
+\quad\quad\quad\quad \pykw{assert} \pykw{all}(isinstance(r, \pykw{str}) \pykw{and} len(r) $\geq$ 2 \pykw{for} r \pykw{in} roles)
+
+\quad\quad\quad\quad required\_args[\pystr{debate\_roles}] = roles
+
+\quad\quad\quad \pykw{else}:
+
+\quad\quad\quad\quad required\_args[\pystr{debate\_roles}] = roles \\
+
+\quad\quad agents.append(\code{\{}
+
+\quad\quad\quad \jsonkey{agent\_id}: agent\_id,
+
+\quad\quad\quad \jsonkey{agent\_name}: agent\_name,
+
+\quad\quad\quad \jsonkey{agent\_description}: agent\_desc,
+
+\quad\quad\quad \jsonkey{required\_arguments}: required\_args
+
+\quad\quad \code{\}})
+
+\quad \pykw{return} agents \\
+
+
+
+\pykw{def} \pyfn{ExtractEdges}(response\_text):
+
+\quad edges = []
+
+\quad edge\_xml = extract\_xml(response\_text, \pystr{edge})
+
+\quad \pykw{if} \pykw{not} edge\_xml:
+
+\quad\quad \pykw{return} edges \\
+
+\quad \pycom{\# 按顺序读取每个 (from,to) 对}
+
+\quad \pykw{for} (u, v) \pykw{in} FindAllFromToPairs(edge\_xml):
+
+\quad\quad edges.append((u.strip(), v.strip()))
+
+\quad \pykw{return} edges \\
+
+
+
+\pykw{def} \pyfn{ValidateGraph}(agents, edges):
+
+\quad \pycom{\# 规则 1/6：每个端点都必须是已声明的 agent\_id}
+
+\quad ids = \pykw{set}([a[\pystr{agent\_id}] \pykw{for} a \pykw{in} agents])
+
+\quad \pykw{for} (u, v) \pykw{in} edges:
+
+\quad\quad \pykw{if} u \pykw{not in} ids \pykw{or} v \pykw{not in} ids:
+
+\quad\quad\quad \pykw{raise} ValueError(\pystr{边引用了未定义的智能体}) \\
+
+
+\quad \pycom{\# 规则 4：至少有一个起始节点（无入边）}
+
+\quad incoming = \pykw{set}([v \pykw{for} (u, v) \pykw{in} edges])
+
+\quad start\_nodes = ids - incoming
+
+\quad \pykw{if} len(start\_nodes) == 0:
+
+\quad\quad \pykw{raise} ValueError(\pystr{没有起始节点}) \\
+
+
+\quad \pycom{\# 规则 5/9：恰有一个汇点节点（无出边）}
+
+\quad outgoing = \pykw{set}([u \pykw{for} (u, v) \pykw{in} edges])
+
+\quad sink\_nodes = ids - outgoing
+
+\quad \pykw{if} len(sink\_nodes) != 1:
+
+\quad\quad \pykw{raise} ValueError(\pystr{必须恰有一个汇点节点}) \\
+
+
+\quad \pycom{\# 规则 3：连通性：从起点可达，且可以到达汇点}
+
+\quad sink = \pykw{list}(sink\_nodes)[0]
+
+\quad forward\_reach = BFSForward(start\_nodes, edges)
+
+\quad backward\_reach = BFSBackward(\{sink\}, edges)
+
+\quad connected = forward\_reach \pykw{and} backward\_reach
+
+\quad isolated = ids - (forward\_reach \pykw{\&} backward\_reach)
+
+\quad \pykw{if} isolated:
+
+\quad\quad \pykw{raise} ValueError(\pystr{存在孤立智能体}) \\
+
+
+\quad \pycom{\# 规则 7：必须无环（DAG）}
+
+\quad order = TopologicalSort(agents, edges)
+
+\quad \pykw{if} len(order) != len(agents):
+
+\quad\quad \pykw{raise} ValueError(\pystr{检测到环路}) \\
+
+
+
+\pykw{def} \pyfn{TopologicalSort}(agents, edges):
+
+\quad \pycom{\# Kahn 算法（入度为零节点的队列）}
+
+\quad ids = [a[\pystr{agent\_id}] \pykw{for} a \pykw{in} agents]
+
+\quad in\_deg = \code{\{}i: 0 \pykw{for} i \pykw{in} ids\code{\}}
+
+\quad adj = \code{\{}i: [] \pykw{for} i \pykw{in} ids\code{\}}
+
+\quad \pykw{for} (u, v) \pykw{in} edges:
+
+\quad\quad adj[u].append(v)
+
+\quad\quad in\_deg[v] += 1 \\
+
+\quad Q = Deque([i \pykw{for} i \pykw{in} ids \pykw{if} in\_deg[i] == 0])
+
+\quad order = []
+
+\quad \pykw{while} Q:
+
+\quad\quad u = Q.popleft()
+
+\quad\quad order.append(u)
+
+\quad\quad \pykw{for} v \pykw{in} adj[u]:
+
+\quad\quad\quad in\_deg[v] -= 1
+
+\quad\quad\quad \pykw{if} in\_deg[v] == 0:
+
+\quad\quad\quad\quad Q.append(v)
+
+\quad \pykw{return} order \\
+
+
+
+\pykw{async} \pykw{def} \pyfn{GenerateMultiAgentForward}(
+\pykw{self}, agents, edges, execution\_order, sink):
+
+\quad global\_node\_model = get\_global(\pystr{global\_node\_model})
+
+\quad \pycom{\# 将 agent\_id 映射到对应输出}
+
+\quad results = \code{\{\}} \\
+
+\quad \pykw{for} agent\_id \pykw{in} execution\_order:
+
+\quad\quad cfg = Lookup(agents, agent\_id)
+
+\quad\quad name = cfg[\pystr{agent\_name}].lower()
+
+\quad\quad args = cfg[\pystr{required\_arguments}]
+
+\quad\quad agent\_input = args.get(\pystr{agent\_input}, \pystr{""}) \\
+
+\quad\quad \pycom{\# 用先前结果替换 $\{id\}$ 占位符}
+
+\quad\quad \pykw{if} agent\_input:
+
+\quad\quad\quad \pykw{for} prev\_id, prev\_out \pykw{in} results.items():
+
+\quad\quad\quad\quad agent\_input = ReplaceAll(
+agent\_input,
+\pystr{\$\{prev\_id\}},
+prev\_out
+) \\
+
+\quad\quad \pycom{\# 准备 task\_info：始终包含原任务作为上下文}
+
+\quad\quad \pykw{if} \pykw{not} agent\_input:
+
+\quad\quad\quad task\_info = original\_task\_info
+
+\quad\quad \pykw{else}:
+
+\quad\quad\quad combined = (
+\pystr{原任务：} + original\_task\_info.content + \pystr{；当前子任务：} + agent\_input
+)
+
+\quad\quad\quad task\_info = Info(\pystr{task}, \pystr{User}, combined, \dots) \\
+
+\quad\quad \pycom{\# 分派给选定的智能体}
+
+\quad\quad \pykw{if} name == \pystr{cotagent}:
+
+\quad\quad\quad out = \pykw{await} self.CoTAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{elif} name == \pystr{scagent}:
+
+\quad\quad\quad out = \pykw{await} self.SCAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{elif} name == \pystr{reflexionagent}:
+
+\quad\quad\quad out = \pykw{await} self.ReflexionAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{elif} name == \pystr{debateagent}:
+
+\quad\quad\quad out = \pykw{await} self.DebateAgent(
+task\_info,
+model=global\_node\_model,
+debate\_roles=args[\pystr{debate\_roles}]
+)
+
+\quad\quad \pykw{elif} name == \pystr{websearchagent}:
+
+\quad\quad\quad out = \pykw{await} self.WebSearchAgent(task\_info, model=global\_node\_model)
+
+\quad\quad \pykw{else}:
+
+\quad\quad\quad \pykw{raise} ValueError(\pystr{未知智能体类型}) \\
+
+\quad\quad results[agent\_id] = out \\
+
+\quad \pykw{return} results[sink] \\
+
+
+
+\end{subagent}

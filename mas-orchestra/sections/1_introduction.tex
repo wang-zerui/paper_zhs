@@ -1,0 +1,108 @@
+
+%\vspace{-1em}
+\section{Introduction}
+\label{sec.intro}
+
+
+
+\begin{figure}[t]
+\centering
+% \vspace{-2\baselineskip}
+\includegraphics[width=0.9\columnwidth]{figs/pareto_front.png}
+\vspace{-0.5\baselineskip}
+\captionof{figure}{\small {Cost–performance trade-off computed using average accuracy and total inference cost on AIME24 and GPQA. \ourframework lie on the Pareto frontier, delivering higher accuracy at lower or comparable cost than strong baselines (see \cref{ap:cost_breakdown}). All training-time orchestration models use the released orchestrator, which may have been trained in a different environment than ours.}}
+% which may be sub-optimal for our evaluation environment.
+\label{fig:parato_front}
+\vspace{-1\baselineskip}
+\end{figure}
+
+
+
+\begin{figure*}[h]
+\centering
+% \vspace{-0.5\baselineskip}
+\includegraphics[width=\textwidth]{figs/comparison.png}
+\vspace{-15pt}
+\captionof{figure}{\small Paradigm comparison and \ourframework. \textbf{Left:} {Inference-time orchestration systems typically adopt holistic orchestration, but without training.} \ourframework lies in automatic MAS and formulate the problem as a function-calling RL problem with holistic orchestration. \textbf{Right:} When \masness is configured to be \textit{low} (dashed lines), the system instantiates at most one agent. When \masness is \textit{high}, the number of agents is unconstrained. {The details of the function-calling protocol and the parser are provided in Appendices \ref{app:prompt} and \ref{app:parser}.}
+% \zixuan{a couple point can be clearer}
+% \shafiq{
+% Some symbols are not defined (the blue snowflake, the red one). For manual MAS, show a human agent. 
+% Auto MAS (inf time) and Holistic Orchestration look similar.} 
+% \yf{Two points seems unclear: (1) what is the input and output for the orchestrator vs. sub-agents; Is there a concrete example? (2) How do they communicate? Are there specific patterns like loops?}\zixuan{query is input, answer is output. communicate via function calling}
+}
+\label{fig:main}
+\vspace{-1\baselineskip}
+\end{figure*}
+
+We have observed a clear progression from standalone large language models (LLM), to LLM-based  single-agent systems (SAS), and more recently to multi-agent systems (MAS) \citep{ke2025surveyfrontiersllmreasoning}. This shift reflects the increasing complexity of modern tasks, which often require sustained reasoning, task decomposition, and interaction with other specialized agents. {Early MAS designs were largely manually constructed, with fixed interaction patterns like debate \citep{du2023improvingfactualityreasoning}. Recently, research attention has increasingly shifted toward \textit{automatic MAS design}, where the system structure, agent roles, and interactions are generated dynamically, as manual specification is often labor-intensive and does not scale well to novel problems or  domains.}
+%\shafiq{Need to introduce automatic MAS with motivations.}
+
+
+
+
+
+While automatic MAS have shown strong empirical promise, current approaches remain limited in several important aspects: (1) \textbf{Formulation}: Most existing work \citep{Ke2025MASZero,nie2025weakforstrong,hu2024ADAS} adopts \textit{executable code} as the formulation for agent orchestration. While this  {code-based} formulation provides flexibility, it leads to significant overhead and becomes difficult to scale when sub-agents and their inter-connections grow more complex (e.g., agents that perform multi-turn search) as the orchestrator often needs  to analyze or even reproduce the full sub-agent code during orchestration. %\update{as the sub-agent’s implementation is exposed to the orchestrator and often requires the orchestrator to analyze or even reproduce the full sub-agent code during orchestration.} \shafiq{I am still not sure why it can't be treated just like a function call?} \zixuan{It can, but many existing methods (e.g., the cited methods, inclu. MAS-Zero) do not do this. The reason is that they do not formulate the sub-agent as a function. Instead, they are more like: given the the implementation of CoT and SC, generate a new MAS "based on" them. The advantage of this approach is that it does not need to strictly follow the existing implementation (that is, it can generate something entirely new unless explicitly constrained). However, the downside is that the orchestrator often needs to analyze or reproduce the full implementation repeatedly.}
+ As a result, they are often limited to relatively simple sub-agents such as sub-agents that are based on Chain-of-Thought (CoT) \citep{wei2022chain} and CoT with Self-Consistency (SC) \citep{wang2023selfconsistency}. (2) \textbf{Training}: Many  existing  approaches rely heavily on inference-time self-improvement or heuristic search~\citep{zhang2024aflowautomatingagenticworkflow,liu2024dynamicllmpowered}. Without explicit training objectives, such adaptation can be unstable, directionally incorrect, and computationally expensive. Although some recent studies incorporate training into MAS design \citep{dang2025multiagentcollaborationevolvingorchestration,chi2025eraagenticorganizationlearning}, they typically formulate orchestration as a sequential decision process—that is, incrementally adding components one at a time—and optimize it via multi-turn reinforcement learning. While effective in certain settings, this paradigm introduces substantial training overhead and encourages local, step-wise optimization, making it difficult for the orchestrator to reason about the MAS structure from a global perspective; 
+(3) \textbf{Agent-scaling principles} \citep{li2024more,qian2025scaling}. Despite the rapid adoption of MAS, there is still no principled quantitative framework that predicts when adding subagents improves performance and when it degrades it. As a result, practitioners often rely on heuristics, which limits both scientific understanding and practical deployment. It remains unclear when multi-agent coordination provides genuine value over simpler single-agent alternatives, and when it merely adds complexity {\citep{kim2025sciencescalingagentsystems,huang2024large}.} 
+%\shafiq{I meant this one: https://arxiv.org/abs/2310.01798 that shows CoTSC is better than Debate. We can cite both if relevant}.
+
+
+
+We argue that an effective automatic MAS should satisfy three core desiderata: (1) there should be an \textbf{explicit notion of ``degree of MAS (\masness)''}, capturing the degree of multi-agent coordination appropriate for a given task. This is because not all problems benefit from MAS. For example, our pilot experiments (\cref{sec:experiemnt}) suggest that even challenging mathematical tasks, such as those in AIME, often gain little from multi-agent coordination; (2) \textbf{the orchestration mechanism should be flexible and scalable}. The formulation should remain effective even when sub-agents are highly complex. In particular, the orchestrator LLM should \textit{only} focus on high-level reasoning and system design. Its role should be to decide when and which sub-agents to invoke and how they are connected, rather than reproducing the internal behavior of the sub-agents themselves; (3) \textbf{A sub-agent should be defined by its own goal, and therefore should own its context, tools, and workflows} \cite{anthropic_subagents_2024}. % \shafiq{the following lines need more clarity}
+% \ryan{should we flag here that the design doesn't always beat SAS}
+ {Most existing methods define sub-agents either in the \textit{LLM space}~\cite{jin2025controllingperformancebudgetcentralized,estornell2025trainleaderhierarchicalreasoning,dang2025multiagentcollaborationevolvingorchestration} by switching between different backbone models, which reduces the orchestrator to merely an LLM router, or in the \textit{prompt
+template space}, where sub-agents differ only by superficial prompt variations (e.g., in Debate, different roles are often instantiated by
+changing only the role description: ``You are a
+critic'' vs. ``You are a supporter''). Such definitions overlook the tool usage and workflows that are also critical for specializing a sub-agent toward its goal.}
+
+% rather than lightweight prompt variations or merely different LLMs
+% Most existing methods consider only the \textit{LLM space} \cite{jin2025controllingperformancebudgetcentralized,estornell2025trainleaderhierarchicalreasoning,dang2025multiagentcollaborationevolvingorchestration}, reduces the orchestrator to merely an LLM router or lightweight prompt variations like CoT and SC. These ignoring the tools, workflows, or configurations that also specialize a sub-agent’s goal
+
+
+
+% In \ourframework, we instead consider a \textbf{sub-agent} space \cite{anthropic_subagents_2024}: a sub-agent explicitly or implicitly has its own goal, as well as its own context window, tools, and custom prompt. a sub-agent should explicitly or implicitly has its own goal, given by its own context window, tools, and custom prompt. 
+% \zixuan{move some content from Section 5 }
+
+
+
+In this paper, we propose \textbf{\ourframework},
+% \yf{why do we use ORCH instead of sth like Orchestra? The latter seems more memorable}, 
+which formulates MAS orchestration as a \textbf{function-calling reinforcement learning (RL) problem}. Under this formulation, \textit{arbitrarily complex and goal-oriented} sub-agents (e.g., reasoning agent and search agent) are encapsulated as callable functions, with their internal mechanisms abstracted away. The orchestrator only decides when to instantiate a sub-agent, which sub-agents to create, and how they are connected by calling two primitive functions \texttt{create_agent} and \texttt{create_flow}. We also introduce \textbf{\masness} into the formulation, where the user can configure over \textit{low} (up to one sub-agent is used) and \textit{high \masness}. Based on this formulation, instead of casting MAS design as a sequence of decisions, we adopt \textbf{holistic orchestration}, where the orchestrator generates the \textit{complete}  orchestration \textbf{in a single decision step} {(see \cref{fig:main} for a comparison}). 
+% \yf{Here it is a bit abstract for first-time readers. It might be better to put an illustrative figure here. Regarding the motivation, I'm thinking about if there are some concrete cases where this design is obviously better than existing ones? Or do you have some simple experimental results to compare side-by-side? This would give readers more confidence that the proposed framework is indeed superior.}\zixuan{we can refer to figure 1.  entire MAS at once is superior, e.g., sequential orchestration can only be "sequential"} 
+This design enables the orchestrator to reason about the full system configuration jointly, rather than optimizing a sequence of local decisions. As a result, the learned orchestration reflects global coordination patterns rather than execution-order effects. {From a learning perspective, this simplifies optimization compared
+to multi-step approaches, which encourage local, step-wise optimization and
+suffer from long-horizon credit assignment and error propagation. Consequently,
+it leads to more stable training and improved scalability as MAS
+complexity increases{, as evidenced by its superior performance over sequential orchestration baselines  (\cref{sec:experiemnt}).} {It also yields substantial efficiency improvements (more than 10$\times$), placing it on the Pareto frontier, as shown in \cref{fig:parato_front}.}
+
+% (\cref{sec:experiemnt} shows suprior results of this design comparing to the seqeuntial orchesation baselines}).
+%\shafiq{Also state that framing it as a single-step RL problem makes RL optimization more stable, scalable and easier compared to multi-step (potentially long-horizon) RL.}
+
+%To quantitatively study when and why MAS outperforms single agent systems, we further introduce a controlled benchmark called  \textbf{\ourbenchmark}, where we consider \textbf{5 axes (depth, horizon, breadth, parallel, and robustness)} to characterize a problem for controlled MAS evaluation. 
+To quantitatively analyze when and why MAS outperform single-agent systems, we introduce a controlled benchmark, \ourbenchmark, which characterizes problems along five axes—\textbf{\depth, \horizon, \breadth, \myparallel, and \robustness}—enabling systematic and controlled evaluation of MAS behavior.
+% \austin{Abstract has ``parallel'' instead of ``parallelism'' -- may have something to do with macro definitions.}
+Our analysis yields several key insights. For example, we find that the benefits of multi-agent coordination depend strongly on {task structure and the underlying LLM capability}. Guided by these insights, we conduct experiments on public benchmarks and demonstrate consistent performance gains under appropriate MAS configurations. 
+
+In summary, our key contributions are:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=2pt]
+  \item We introduce a novel, scalable and effective RL formulation for MAS orchestration, featuring an explicit notion of \textit{\masness} and a function-calling abstraction that encapsulates complex sub-agents.
+  \item We propose a controlled benchmark \ourbenchmark, tailored for MAS evaluation, enabling systematic empirical analysis of when MAS outperforms single-agent systems—and when it does not. This is the first benchmark established to evaluate MAS benefits to the best of our knoweldge.
+  \item {Using \ourbenchmark, we investigate the benefits of MAS across 3 analysis directions over a broad range of MAS configurations, covering 3 orchestrator settings and 5 sub-agent settings across different model sizes and families.}
+  \item {Guided by insights from the above analysis}, we demonstrate that our approach achieves strong performance on public benchmarks, including math, multi-hop question answering, and multi-step search-based QA, {while achieving more than \textit{10$\times$} efficiency over strong baselines}.
+\end{itemize}
+% \footnote{Code and data will be publicly available upon acceptance.}
+
+  %\zixaun{orchestator: Qwen-7b, GPT-20b, DS-7b; sub-agent:  Qwen-7b, GPT-20b, GPT-120b (3 efforts)}
+
+  % \austin{Can we make this more direct? ``...tailored for MAS evaluation. Using IMAS, we rigorously analyze when MAS outperforms and underperforms SAS.'' That is, we want to explicitly claim the analysis as a contribution, whereas the current bullet only says IMAS \textit{enables} analysis/analysis is implied in 3rd bullet}. \austin{Can we also get super explicit? ``We train [x] different meta-agents across [z] configurations and [y] model families to investigate the benefits of MAS across 3 analysis directions'' or something similar?}
+
+
+
+%In summary, our key contributions are
+%\begin{itemize}[leftmargin=*,noitemsep,topsep=2pt]
+%  \item A novel and effective RL training  formulation for MAS orchestration, including an explicit notion of \masness and a function-calling abstraction for complex sub-agents.
+%  \item A controlled benchmark dedicated to MAS evaluation and gaining empirical insights that clarify when MAS outperforms single agent systems and when it does not.
+%  \item Strong performance on public benchmarks, including math, multi-hop QA and multi-step search-based QA, guided by the proposed analysis.
+%\end{itemize}
+
+

@@ -1,0 +1,61 @@
+\section{\ourframework 框架}
+\label{sec.framework}
+
+% \zixuan{TODO: Emphasize more on novelty in this part}
+\subsection{提出的 MAS 问题表述}
+
+% We study reasoning tasks where solving an input may require coordinating multiple specialized reasoning components. In such settings, directly generating an answer with a single model may be insufficient to systematically integrate diverse reasoning strategies. To address this challenge, we propose \ourframework, a reinforcement learning based framework that generates a multi-agent orchestration design to produce a final answer.
+
+% \zixuan{depende on \masness setting}
+
+%Let $\mathcal{X}$ denote the input space and $\mathcal{Y}$ the output space. 
+令 $\mathcal{D} = \{(x_i, y_i)\}$ 表示一个数据集，其中 $x_i \in \mathcal{X}$ 为任务输入，$y_i \in \mathcal{Y}$ 为真实答案。目标是从 $\mathcal{D}$ 中学习策略 $\pi_\theta$，将任意任务输入 ${x}$ 映射为潜在编排 $a$；$a$ \textbf{编码一个完整的 MAS 编排}，并作为集体推理过程得到答案 $\hat{y}$。
+
+%\textbf{\masness to configure how much multi-agent system-ness users want.} 
+令 $m \in \{\textsc{Low},\textsc{High}\}$ 表示用户选择的 \textbf{\masness 级别}。
+% \yf{We should probably illustrate what it means by Low and High \masness? e.g., Low \masness vs. SAS} 
+形式化地，编排按如下方式生成：
+\begin{equation}
+a \sim \pi_\theta(\cdot \mid x, m).
+\end{equation}
+\masness 变量 $m$ 约束允许的编排空间，例如子智能体数量，以及是否允许显式的智能体间拓扑。在本文中，低 \masness 表示编排器至多只能实例化一个子智能体，并且不能使用显式的智能体间拓扑。\footnote{提示词与示例见\cref{app:prompt}。}需要特别指出的是，低 \masness 不同于 SAS。在低 \masness 下，编排器仍须决定是委派整个任务、委派子任务，还是自行完成任务；它还必须决定使用哪个子智能体以及如何配置该子智能体（而在高 \masness 下，编排器还需确定智能体间拓扑）。
+% whether to delegate the task, when to delegate, or whether to solve the task directly without delegation.
+% Importantly, low \masness is not SAS as the orcheceator still need to design whether to delegate a task, when to delegate and delate the entire task or full tak.
+编排 $a$ 规定实例化哪些子智能体、信息如何在它们之间流动，以及如何聚合它们的输出以得到答案。
+% \ryan{might be worth to briefly mention why \masness is not learned}
+
+% A short version in case of space
+% \textbf{Goal-oriented sub-Agents as functions.} We treat each sub-agent as a goal-oriented black-box function, exposing only its
+% signature (i.e., name and configurable parameters) to the orchestrator. A predefined, rule-based deterministic executor $f$\footnote{See details in \cref{app:parser}.} interprets and executes the orchestration to produce a prediction:
+
+% A long version in case of space
+\textbf{将面向目标的子智能体视为函数。}
+我们把每个子智能体建模为面向目标的黑盒函数，调用它来解决特定子任务或实现指定目标。编排器只能看到子智能体的签名（即名称与可配置参数），其内部推理和执行细节均被抽象隐藏。整个编排完全由函数调用指定，其中既包括子智能体，也包括它们之间的连接。预先定义、基于规则的确定性解析器 $f$ 解释编排规格，\footnote{细节见\cref{app:parser}。}根据分配的目标实例化相应子智能体并执行它们，最终给出预测：
+% \yf{Previously, we have mentioned orchestrator, not the executor. Is the executor f here the same as the orchestrator?}
+\begin{equation}
+\hat{y} = f(x, a).
+\end{equation}
+作为首项训练整体式编排的工作，\ourframework 在\emph{单个决策步骤}中生成\emph{整个编排}。编排器看不到执行期间产生的中间状态或部分结果；编排质量只依据最终输出评估。\cref{fig:main}展示了这一过程。
+% \ryan{does single-step orchestration bias toward shallower MAS design? might be worth a brief mention} \zixuan{let's not make this part too obvious}
+\subsection{面向整体式编排的强化学习}
+
+我们根据最终答案是否正确来定义任务级奖励（根据\cref{tab:axes}中的验证协议，也可能纳入子任务答案的正确性）：
+% \yf{In the next section, you introduced sub-tasks. Here, it might be better to be clear if this reward is about the final task or it is also applicable to subtasks?}
+\begin{equation}
+R(x, y, \hat{y}) =
+\begin{cases}
+1, & \text{若 } \hat{y} = y, \\
+0, & \text{否则}.
+\end{cases}
+\end{equation}
+学习目标是最大化期望奖励：
+\begin{equation}
+\label{eq:general_objetive}
+\max_{\theta} \;
+\mathbb{E}_{(x,y) \sim \mathcal{D}} \;
+\mathbb{E}_{a \sim \pi_\theta(\cdot \mid x, m)}
+\left[ R(x, y, f(x,a)) \right]
+\end{equation}
+
+我们使用组相对策略优化（Group Relative Policy Optimization，GRPO）~\citep{shao2024deepseekmath}来优化策略。该方法将每个采样编排与同组其他候选编排比较，并据此更新策略。对于每个输入 $x$，我们采样一组 $K$ 个编排 $\{a_i\}_{i=1}^K \sim \pi_\theta(\cdot \mid x, m)$，并获得对应奖励 $\{R_i\}_{i=1}^K$。随后利用这些组内样本与奖励构造组相对裁剪策略梯度目标（详见\cref{ap:grpo}）。
+% \zixuan{GRPO formulation was moved to Appendix to gain some space}

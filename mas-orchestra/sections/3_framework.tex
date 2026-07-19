@@ -1,0 +1,74 @@
+\section{\ourframework Framework}
+\label{sec.framework}
+
+% \zixuan{TODO: Emphasize more on novelty in this part}
+\subsection{Proposed MAS Formulation}
+
+% We study reasoning tasks where solving an input may require coordinating multiple specialized reasoning components. In such settings, directly generating an answer with a single model may be insufficient to systematically integrate diverse reasoning strategies. To address this challenge, we propose \ourframework, a reinforcement learning based framework that generates a multi-agent orchestration design to produce a final answer.
+
+% \zixuan{depende on \masness setting}
+
+%Let $\mathcal{X}$ denote the input space and $\mathcal{Y}$ the output space. 
+Let $\mathcal{D} = \{(x_i, y_i)\}$ represent a dataset, where $x_i \in \mathcal{X}$ denotes the task input and $y_i \in \mathcal{Y}$ denotes the ground-truth answer. {The goal is to learn a policy $\pi_\theta$ from $\mathcal{D}$ that maps any task input ${x}$ to a latent  orchestration $a$, \textbf{which encodes a complete MAS orchestration} and works as a collective reasoning process to reach to an answer $\hat{y}$.} 
+
+%\textbf{\masness to configure how much multi-agent system-ness users want.} 
+Let $m \in \{\textsc{Low},\textsc{High}\}$ denote the \textbf{\masness level} chosen by the user. 
+% \yf{We should probably illustrate what it means by Low and High \masness? e.g., Low \masness vs. SAS} 
+Formally, the orchestration is generated as
+\begin{equation}
+a \sim \pi_\theta(\cdot \mid x, m).
+\end{equation}
+The \masness variable $m$ constrains the allowable orchestration space, such as number of sub-agents and whether explicit inter-agent topology is permitted. {In this work, we consider low \masness as a setting where the orchestrator is restricted to instantiating at most one sub-agent, without explicit inter-agent topology.}\footnote{Prompts and examples in \cref{app:prompt}} {Importantly, low \masness is distinct from SAS. Under low \masness, the orchestrator must still decide whether to delegate the entire task, delegate sub-tasks, or perform the task itself; it must also decide which sub-agent to use and how to configure the selected sub-agent (under high \masness, the orchestrator must further determine the inter-agent topology).}
+% whether to delegate the task, when to delegate, or whether to solve the task directly without delegation.
+% Importantly, low \masness is not SAS as the orcheceator still need to design whether to delegate a task, when to delegate and delate the entire task or full tak.
+The orchestration $a$ defines which sub-agents are instantiated, how information flows between them, and how their outputs are aggregated {to reach to an answer}. 
+% \ryan{might be worth to briefly mention why \masness is not learned}
+
+% A short version in case of space
+% \textbf{Goal-oriented sub-Agents as functions.} We treat each sub-agent as a goal-oriented black-box function, exposing only its
+% signature (i.e., name and configurable parameters) to the orchestrator. A predefined, rule-based deterministic executor $f$\footnote{See details in \cref{app:parser}.} interprets and executes the orchestration to produce a prediction:
+
+% A long version in case of space
+\textbf{Goal-oriented sub-agents as functions.}
+We model each sub-agent as a goal-oriented black-box function that is invoked to
+solve a specific sub-task or {to} achieve a designated objective. Only the sub-agent
+signature (i.e., name and configurable parameters) is exposed to the
+orchestrator, while internal reasoning and execution details remain abstracted. {With orchestration specified entirely through function calls—covering both sub-agents and their interconnections, a} predefined, rule-based deterministic {parser} $f$ interprets the orchestration specification,\footnote{See details in
+\cref{app:parser}.} instantiates the
+corresponding sub-agents with their assigned goals, and executes them to
+produce a final prediction:
+% \yf{Previously, we have mentioned orchestrator, not the executor. Is the executor f here the same as the orchestrator?}
+\begin{equation}
+\hat{y} = f(x, a).
+\end{equation}
+As the first work to train holistic orchestration, \ourframework generates the
+\emph{entire orchestration} in a \emph{single decision step}. The orchestrator does not observe intermediate states or partial results produced during execution. The quality of the orchestration is evaluated only through the final output. %We leave multi-step extensions of this holistic orchestration approach for future work.
+\cref{fig:main} illustrates this process.
+% \ryan{does single-step orchestration bias toward shallower MAS design? might be worth a brief mention} \zixuan{let's not make this part too obvious}
+\subsection{Reinforcement Learning for Holistic Orchestration}
+
+We define a task-level reward based on {final answer correctness (which may incorporate sub-task answer correctness depending on the verification protocol in \cref{tab:axes})}: 
+% \yf{In the next section, you introduced sub-tasks. Here, it might be better to be clear if this reward is about the final task or it is also applicable to subtasks?}
+\begin{equation}
+R(x, y, \hat{y}) =
+\begin{cases}
+1, & \text{if } \hat{y} = y, \\
+0, & \text{otherwise}.
+\end{cases}
+\end{equation}
+The learning objective is to maximize the expected reward:
+\begin{equation}
+\label{eq:general_objetive}
+\max_{\theta} \;
+\mathbb{E}_{(x,y) \sim \mathcal{D}} \;
+\mathbb{E}_{a \sim \pi_\theta(\cdot \mid x, m)}
+\left[ R(x, y, f(x,a)) \right]
+\end{equation}
+
+We optimize the policy using Group Relative Policy
+Optimization (GRPO)~\citep{shao2024deepseekmath}, which updates the policy by
+comparing each sampled orchestration against other candidates within the same
+group. For each input $x$, we sample a group of $K$ orchestrations
+$\{a_i\}_{i=1}^K \sim \pi_\theta(\cdot \mid x, m)$ and obtain their rewards
+$\{R_i\}_{i=1}^K$. These group-wise samples and rewards are then used to form a group-relative clipped policy gradient objective (detailed in \cref{ap:grpo}).
+% \zixuan{GRPO formulation was moved to Appendix to gain some space}
