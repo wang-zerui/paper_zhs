@@ -1,0 +1,123 @@
+% Required in preamble (if not already present):
+% \usepackage{longtable, booktabs, amssymb, array}
+
+\subsection{\texorpdfstring{Case Study: ITSM --- ``Create KB and Link''
+(\textit{claude-sonnet-4-5}, 0/2 verifiers passed)}%
+{Case Study: ITSM --- "Create KB and Link" (claude-sonnet-4-5, 0/2 verifiers passed)}}%
+\label{case-study-itsm-create-kb-and-link-claude-sonnet-4-5-02-verifiers-passed}
+
+\subsection{Task (condensed)}\label{task-condensed}
+
+Kenji Tanaka (agent, Acme Corp) resolved incident INC0000004 (VPN
+connection failure) without referencing a knowledge article. He must
+draft a new internal KB article titled ``VPN Connection Failure Guide''
+and link it to the incident.
+\textbf{Relevant policy (excerpts):}
+\begin{itemize}
+  \item \textbf{\S7 Knowledge Creation:}
+    \textit{``\ldots the Agent must create and link a new
+    \textbf{knowledge draft} before final closure.''}
+  \item \textbf{\S1 General Constraint:}
+    \textit{``Never assume or fabricate IDs \ldots\ rely solely on
+    verified API results. The same is the case for optional or default
+    arguments.''}
+\end{itemize}
+\subsection{Hidden Challenge: Duplicate Incident Numbers}%
+\label{hidden-challenge-duplicate-incident-numbers}
+
+Two incidents share external ID \texttt{INC0000004} across different
+tenants:
+
+\medskip
+\begin{longtable}[l]{@{}
+  >{\raggedright\arraybackslash\small}p{0.14\linewidth}
+  >{\raggedright\arraybackslash\small}p{0.13\linewidth}
+  >{\raggedright\arraybackslash\small}p{0.24\linewidth}
+  >{\raggedright\arraybackslash\small}p{0.13\linewidth}
+  >{\raggedright\arraybackslash\small}p{0.20\linewidth}@{}}
+\toprule
+\small Internal ID & \small Org & \small Description & \small Status & \small Assignee \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+\texttt{INC\_004} & TechCorp  & Network connectivity issues &
+  \textbf{new}      & Elena Petrov \\[4pt]
+\texttt{INC\_011} & Acme Corp & VPN connection failure &
+  \textbf{resolved} & \textbf{Kenji Tanaka} $\checkmark$ \\
+\end{longtable}
+\medskip
+
+\texttt{find\_incident\_by\_number("INC0000004")} returns
+\texttt{INC\_004} (first DB hit). Recovery requires a follow-up:\\
+\texttt{list\_incidents(number="INC0000004",\ status="resolved",\
+assigned\_to="USER\_009")} $\rightarrow$ \texttt{INC\_011}.
+
+\subsection{Gold Trajectory}\label{gold-trajectory}
+
+\begin{enumerate}
+  \item \texttt{get\_user\_using\_name("Kenji",\ "Tanaka")}
+        $\rightarrow$ \texttt{USER\_009}
+  \item \texttt{find\_incident\_by\_number("INC0000004")}
+        $\rightarrow$ \texttt{INC\_004}
+        $\rightarrow$ \textbf{detect mismatch} (wrong status,
+        description, assignee)
+  \item \texttt{list\_incidents(number=...,\ status="resolved",\
+        assigned\_to="USER\_009")} $\rightarrow$ \texttt{INC\_011}
+        $\checkmark$
+  \item \texttt{find\_incident\_knowledge\_links("INC\_011")}
+        $\rightarrow$ no existing links
+  \item \texttt{create\_knowledge\_article(...,\
+        state=}\textbf{``draft''}\texttt{,\
+        visibility="internal",\ owner\_id="USER\_009")}
+  \item \texttt{link\_knowledge\_to\_incident("INC\_011",\
+        "KB\_006",\ used\_as="resolution")}
+\end{enumerate}
+
+\subsection{Agent Behavior}\label{agent-behavior}
+
+The agent called \texttt{find\_incident\_by\_number}, received
+\texttt{INC\_004}, and accepted it without validation. It never called
+\texttt{list\_incidents} to explore the difference. It then created the
+KB article with \texttt{state="published"} (the tool default) and linked
+it to \texttt{INC\_004}.
+
+\subsection{Failure Analysis}\label{failure-analysis}
+
+\textbf{Failure 1 --- Wrong incident.} \texttt{INC\_004} contradicted
+the task on three observable signals: wrong status (\texttt{new}
+vs.\ \textit{resolved}), wrong description, and wrong assignee. The
+agent treated number-match as identity-confirmation and never
+cross-validated. Verifier checks \texttt{incident\_id = "INC\_011"} in
+the link table $\rightarrow$ \textbf{fail}.
+
+\textbf{Failure 2 --- Wrong KB state.} The tool's default is
+\texttt{state="published"}. Both \S7 and the user's verb
+(\textit{``drafts''}) mandate \texttt{state="draft"}. \S1 explicitly
+prohibits accepting defaults without policy verification. The agent
+applied the default silently. Verifier checks \texttt{state = "draft"}
+$\rightarrow$ \textbf{fail}.
+
+\subsection{Summary}\label{summary}
+
+\medskip
+\begin{longtable}[l]{@{}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  >{\raggedright\arraybackslash}p{0.28\linewidth}@{}}
+\toprule
+                     & Expected                   & Agent              & Impact \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+Incident ID          & \texttt{INC\_011}          & \texttt{INC\_004}  & KB link verifier fails \\[4pt]
+KB state             & \texttt{draft}             & \texttt{published} & New KB verifier fails \\[4pt]
+Disambiguation step  & \texttt{list\_incidents(...)} called & Never called & Root cause of wrong incident \\
+\end{longtable}
+\medskip
+
+Both failures share the same pattern: \textbf{accepting the first
+plausible result without cross-validating against task context or policy
+constraints.}

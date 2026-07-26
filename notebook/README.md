@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **45**
+- Papers: **46**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -30,6 +30,7 @@
 - [EAGLE-3](./papers/eagle-3.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Feagle-3%2Fpaper_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/eagle-3/paper_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/eagle-3/paper_zh.pdf)
 - [EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty](./papers/eagle-feature-uncertainty.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Feagle-feature-uncertainty%2Fexample_paper_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/eagle-feature-uncertainty/example_paper_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/eagle-feature-uncertainty/example_paper_zh.pdf)
 - [Elastic Attention](./papers/elastic-attention.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Felastic-attention%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/elastic-attention/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/elastic-attention/main_zh.pdf)
+- [EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings](./papers/enterpriseops-gym.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fenterpriseops-gym%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/enterpriseops-gym/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/enterpriseops-gym/main_zh.pdf)
 - [FastMTP](./papers/fastmtp.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ffastmtp%2Fcolm2024_conference_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/fastmtp/colm2024_conference_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/fastmtp/colm2024_conference_zh.pdf)
 - [FlashAttention-2](./papers/flashattention-2.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fflashattention-2%2Fflash2_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/flashattention-2/flash2_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/flashattention-2/flash2_zh.pdf)
 - [FlashAttention4](./papers/flashattention-4.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fflashattention-4%2Farxiv_main_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/flashattention-4/arxiv_main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/flashattention-4/arxiv_main_zh.pdf)

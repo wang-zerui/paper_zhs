@@ -13,6 +13,7 @@
 * [EAGLE-3](papers/eagle-3.md)
 * [EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty](papers/eagle-feature-uncertainty.md)
 * [Elastic Attention](papers/elastic-attention.md)
+* [EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings](papers/enterpriseops-gym.md)
 * [FastMTP](papers/fastmtp.md)
 * [FlashAttention-2](papers/flashattention-2.md)
 * [FlashAttention4](papers/flashattention-4.md)

@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：47
-- 含 `00README.json`：33
-- 有本地候选 PDF：45
-- 含中文 PDF：38
-- 带源码包：25
-- 含 tracked files 的目录：47
+- 论文目录：48
+- 含 `00README.json`：34
+- 有本地候选 PDF：46
+- 含中文 PDF：39
+- 带源码包：26
+- 含 tracked files 的目录：48
 - 纯本地目录（tracked files = 0）：0
 
 ## Triage
@@ -35,6 +35,7 @@
 | eagle-3 | EAGLE-3 | — | — | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 17 |
 | eagle-feature-uncertainty | EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty | — | — | example_paper_zh.pdf | example_paper_zh.pdf | ✅ | source.tar | 33 |
 | elastic-attention | Elastic Attention | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 70 |
+| enterpriseops-gym | EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 56 |
 | fastmtp | FastMTP | ✅ | colm2024_conference.tex | colm2024_conference_zh.pdf | colm2024_conference_zh.pdf | ✅ | source.tar.gz | 18 |
 | flashattention-2 | FlashAttention-2 | — | — | flash2_zh.pdf | flash2_zh.pdf | ✅ | source.tar.gz | 55 |
 | flashattention-4 | FlashAttention4 | ✅ | arxiv_main.tex | arxiv_main_zh.pdf | arxiv_main_zh.pdf | ✅ | — | 39 |

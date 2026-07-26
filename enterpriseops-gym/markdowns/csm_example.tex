@@ -1,0 +1,124 @@
+\subsection[Case Study: CSM --- ``KB Remediation and Case Setup''
+  (claude-sonnet-4-6, 4/5 verifiers passed)]{%
+  Case Study: CSM --- ``KB Remediation and Case Setup''\\
+  \normalfont\normalsize\emph{(claude-sonnet-4-6, 4/5 verifiers passed)}}
+\label{case-study-csm-kb-remediation-and-case-setup}
+
+% ── Task ──────────────────────────────────────────────────────────────────────
+\subsection{Task (condensed)}
+\label{task-condensed}
+
+An agent must link a relevant knowledge article to case CS-0000002 and
+set up the assignee. The case involves a NetApp FAS2750 product issue.
+Joanne Simpson will handle the case under a new ``Case Management''
+support group.
+
+\textbf{Relevant policy (excerpts):}
+\begin{itemize}
+  \item \textbf{KB Linking:} \emph{``Articles must be in state =
+    \texttt{published} \ldots{} when the knowledge is found through
+    automated search it should be linked as \texttt{suggested}.''}
+  \item \textbf{Case State:} \emph{``Once case linked to a knowledge
+    article marked the state = \texttt{pending}.''}
+  \item \textbf{Assignment:} \emph{``\texttt{assigned\_to} must \ldots{}
+    be member of \texttt{assignment\_group\_id}.''}
+\end{itemize}
+
+% ── Hidden Challenges ─────────────────────────────────────────────────────────
+\subsection{Hidden Challenges}
+\label{hidden-challenges}
+
+Three compounding complexities are not stated in the user prompt and must
+be inferred from system policy:
+
+\begin{itemize}
+  \item \textbf{KB state remediation:} KB-0000197 is \texttt{retired};
+    must be updated to \texttt{published} before linking.
+  \item \textbf{Group creation:} \texttt{"Case Management"} does not
+    exist; must be created with \texttt{type="support"}.
+  \item \textbf{Lifecycle transition:} KB linkage unconditionally requires
+    \texttt{update\_case(state="pending")}.
+\end{itemize}
+
+% ── Gold Trajectory ───────────────────────────────────────────────────────────
+\subsection{Gold Trajectory}
+\label{gold-trajectory}
+
+\begin{enumerate}
+  \item \texttt{search\_cases(number="CS-0000002")}
+        $\to$ \texttt{case\_id=2}, \texttt{product\_id=130}
+  \item \texttt{retrieve\_knowledge(product\_id=130)}
+        $\to$ \texttt{knowledge\_id=197}, \texttt{state="retired"}
+  \item \texttt{update\_knowledge(knowledge\_id=197, state="published")}
+        $\to$ KB now usable
+  \item \texttt{link\_case\_knowledge(case\_id=2, knowledge\_id=197,
+        used\_as="suggested")}
+        $\to$ link created
+  \item \texttt{find\_user(name="Joanne Simpson")}
+        $\to$ \texttt{user\_id=4}, \texttt{role="manager"},
+        \texttt{active=1}
+  \item \texttt{find\_user\_group(name="Case Management")}
+        $\to$ \texttt{\{\}} (absent)
+  \item \texttt{add\_new\_user\_group(name="Case Management",
+        type="support", active=true)}
+        $\to$ \texttt{group\_id=81}
+  \item \texttt{add\_new\_group\_member(group\_id=81, user\_id=4)}
+        $\to$ membership created
+  \item \texttt{update\_case(case\_id=2, assignment\_group\_id=81,
+        assigned\_to=4,}
+        \textbf{\texttt{state="pending"}}\texttt{)}
+        $\to$ case closed
+\end{enumerate}
+
+% ── Agent Behavior ────────────────────────────────────────────────────────────
+\subsection{Agent Behavior}
+\label{agent-behavior}
+
+The agent executed a near-perfect 5-turn trajectory. In Turn~1 it issued
+three parallel lookups (case, user, group). In Turns~2--3 it correctly
+pivoted from a text-based KB search (which returned wrong product
+variants) to a \texttt{product\_id=130} filter, finding the retired
+KB-0000197. In Turn~4 it published the KB and created the group in
+parallel. In Turn~5 it added Joanne to the group, linked the KB article,
+and updated the case assignment --- but omitted \texttt{state="pending"}
+from the \texttt{update\_case} call.
+
+% ── Failure Analysis ──────────────────────────────────────────────────────────
+\subsection{Failure Analysis}
+\label{failure-analysis}
+
+\textbf{Single failure --- missing state transition.} The agent's
+\texttt{update\_case} call set \texttt{case\_id},
+\texttt{assignment\_group\_id}, and \texttt{assigned\_to} correctly, but
+did not include \texttt{state="pending"}. The case remained in
+\texttt{state="new"}. The policy rule is explicit and unconditional: any
+KB linkage event requires a transition to \texttt{pending}. The agent's
+Turn~5 reasoning focused on ``update the case assignment'' without
+revisiting the lifecycle rules --- a classic lifecycle-truncation failure
+(Pattern~\#4). The \texttt{state} parameter and the \texttt{pending} enum
+value are both present in the tool schema; no tool error or ambiguity
+blocked the correct call.
+
+% ── Summary Table ─────────────────────────────────────────────────────────────
+\subsection{Summary}
+\label{summary}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Check}           & \textbf{Expected}                         & \textbf{Agent}               & \textbf{Impact} \\
+\midrule
+\texttt{update\_case.state}   & \texttt{"pending"}               & omitted (\texttt{"new"})     & V5 fail \\
+KB remediation                & \texttt{update\_knowledge(state="published")} & correct             & V1 pass \\
+KB linkage                    & \texttt{used\_as="suggested"}    & correct                      & V2 pass \\
+Group creation                & \texttt{type="support"}          & correct                      & V3 pass \\
+Membership check              & \texttt{add\_new\_group\_member} before assignment & correct    & V4 pass \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+
+The failure isolates to a single omitted parameter on an otherwise
+correct trajectory: \textbf{the agent completed the assignment but did
+not apply the KB-linkage-triggered lifecycle rule.}

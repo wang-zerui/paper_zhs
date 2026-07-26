@@ -1,0 +1,156 @@
+\subsection{\texorpdfstring{Case Study: HR --- ``Wrap Up James Hill's Portal Access Case''
+(\textit{claude-sonnet-4-5}, 1/3 verifiers passed)}%
+{Case Study: HR --- "Wrap Up James Hill's Portal Access Case" (claude-sonnet-4-5, 1/3 verifiers passed)}}%
+\label{case-study-hr-wrap-up-james-hills-portal-access-case-claude-sonnet-4-5-13-verifiers-passed}
+
+% ── Task ──────────────────────────────────────────────────────────────────────
+\subsection{Task (condensed)}
+\label{task-condensed}
+
+Karen Watkins (admin) is told that James Hill's `Access issue with HR
+portal account' has been resolved. She must wrap up his case and add a
+follow-up technical issue survey using the first task to gather his
+feedback.
+
+\medskip
+
+\textbf{Relevant policy (condensed):}
+\begin{itemize}
+  \item \textbf{§3.2 Closure Constraint:} \emph{``A case cannot move to a
+    closed status until all mandatory tasks are inactive
+    (\texttt{active=false}).''}
+  \item \textbf{§3.3 Lifecycle:} \emph{``Valid transition:
+    \texttt{awaiting\_approval} $\to$ \texttt{closed\_complete} (if
+    approved).''}
+  \item \textbf{§3.4 Approvals:} \emph{``The approval record
+    \texttt{request\_status} transitions: \texttt{requested} $\to$
+    \texttt{approved} / \texttt{rejected}.''}
+  \item \textbf{§1 General Constraint:} \emph{``Do not ask for any
+    information or confirmation from the user. Never assume or fabricate
+    IDs.''}
+\end{itemize}
+
+% ── Hidden Challenge ──────────────────────────────────────────────────────────
+\subsection{Hidden Challenge: Two Simultaneous Closure Prerequisites}
+\label{hidden-challenge-two-simultaneous-closure-prerequisites}
+
+``Wrap up'' maps to three ordered system operations --- none stated
+literally in the prompt:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Step} & \textbf{Action} & \textbf{Policy Source} \\
+\midrule
+1 & Deactivate all active tasks (\texttt{active=false})
+  & §3.2 --- prerequisite to closure \\
+2 & Set \texttt{status='closed\_complete'}
+  & §3.3 --- valid closure status for resolved cases \\
+3 & Set \texttt{request\_status='approved'}
+  & §3.4 --- clears the pending approval gate \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+
+The case seed state has \texttt{status='awaiting\_approval'} and
+\texttt{request\_status='requested'} with two active tasks (ids 6 and
+7). Steps 1--3 must all complete; failing any leaves the verifier
+returning COUNT=0.
+
+% ── Gold Trajectory ───────────────────────────────────────────────────────────
+\subsection{Gold Trajectory}
+\label{gold-trajectory}
+
+\begin{enumerate}
+  \item \texttt{get\_user\_using\_name("James",\ "Hill")}
+        $\to$ \texttt{user\_id=8}
+  \item \texttt{list\_hr\_cases(opened\_for="James Hill")}
+        $\to$ \texttt{hr\_case\_id=3},
+        \texttt{status='awaiting\_approval'},
+        \texttt{request\_status='requested'}
+  \item \texttt{list\_hr\_case\_tasks(parent\_case="3")}
+        $\to$ Tasks 6 (\texttt{url}, active=True) and 7
+        (\texttt{checklist}, active=True)
+  \item \texttt{list\_surveys(question\_1="technical issue")}
+        $\to$ \texttt{survey\_id=4}
+  \item \texttt{update\_hr\_case\_task(hr\_case\_task\_id="6",\ active=false)}
+        $\to$ Task 6 deactivated
+  \item \texttt{update\_hr\_case\_task(hr\_case\_task\_id="7",\ active=false)}
+        $\to$ Task 7 deactivated
+  \item \texttt{update\_hr\_case(hr\_case\_id="3",
+        status="closed\_complete",\ request\_status="approved")}
+        $\to$ Case closed and approved
+  \item \texttt{create\_survey\_instance(survey\_id=4,\ case\_task\_id=6,\ assigned\_to=8)}
+        $\to$ Survey instance created \checkmark
+\end{enumerate}
+
+% ── Agent Behavior ────────────────────────────────────────────────────────────
+\subsection{Agent Behavior}
+\label{agent-behavior}
+
+The agent completed all four lookup steps correctly and created the
+survey instance with the right parameters (V3 passes). It then called
+\texttt{update\_hr\_case\_task} on task 6 --- but passed
+\texttt{task\_type="survey"} and a new \texttt{short\_description}
+instead of \texttt{active=false}. It never called
+\texttt{update\_hr\_case}. The agent declared completion after six
+turns, summarising the survey as something James Hill would complete in
+the future.
+
+% ── Failure Analysis ──────────────────────────────────────────────────────────
+\subsection{Failure Analysis}
+\label{failure-analysis}
+
+\textbf{Failure 1 --- Wrong parameters on \texttt{update\_hr\_case\_task}.}
+The agent read ``add the appropriate follow-up technical issue survey
+\textit{using the first task}'' as a directive to convert task~6 into a
+survey-type task. It therefore called
+\texttt{update\_hr\_case\_task(task\_type="survey",\ short\_description=\ldots{})}
+rather than \texttt{update\_hr\_case\_task(active=false)}. The §3.2
+Closure Constraint --- visible in the system prompt and signalled by
+\texttt{update\_hr\_case\_task}'s presence in the tool set --- requires
+deactivation, not type conversion. Task~6 remained \texttt{active=true};
+the verifier checks \texttt{active=false} $\to$ \textbf{fail}.
+
+\medskip
+
+\textbf{Failure 2 --- \texttt{update\_hr\_case} never called.} The agent
+reframed ``wrap up his case'' as a future activity for James Hill
+(completing the survey) rather than an immediate system closure. Its
+final summary reads: ``James can complete the survey as part of the case
+wrap-up process.'' The agent stopped at survey creation and declared
+success. \texttt{update\_hr\_case} was present in the tool set (a
+planning signal), §3.3 specifies
+\texttt{awaiting\_approval} $\to$ \texttt{closed\_complete} as the valid
+transition, and \texttt{request\_status='requested'} was visible in the
+\texttt{list\_hr\_cases} response. The case remained in
+\texttt{awaiting\_approval}; the verifier checks
+\texttt{status='closed\_complete'\ AND\ request\_status='approved'}
+$\to$ \textbf{fail}.
+
+% ── Summary Table ─────────────────────────────────────────────────────────────
+\subsection{Summary}
+\label{summary}
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Check} & \textbf{Expected} & \textbf{Agent} & \textbf{Impact} \\
+\midrule
+Task 6 \texttt{active}        & \texttt{false}            & wrong params passed  & V1 fails \\
+Case \texttt{status}          & \texttt{closed\_complete} & tool never called    & V2 fails \\
+Case \texttt{request\_status} & \texttt{approved}         & tool never called    & V2 fails \\
+Survey instance               & correct params            & correct              & V3 passes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+
+Both failures stem from the same root: \textbf{natural-language business
+verbs (``wrap up'', ``using the first task'') misread as content
+directives rather than lifecycle commands}, causing the agent to act on
+a plausible surface reading while ignoring the policy-defined closure
+sequence.
