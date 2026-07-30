@@ -1,0 +1,38 @@
+% §3 ClawMark.
+
+\section{\bench}
+\label{sec:design}
+
+\subsection{Overview}
+\label{sec:design-overview}
+
+Each \bench{} task simulates a realistic office workflow that a coworker agent must carry out alongside its human user across multiple working days. A task is composed of two to six \emph{turns}, where one turn corresponds to one in-universe working day, delivered as a wake-up message and executed against five stateful sandboxed services: filesystem, email, calendar, knowledge base, and spreadsheet. Between turns the framework mutates external state independently of the agent, as announced events (which we call \emph{loud events}) delivered in the wake-up message, or as \emph{silent mutations} that appear in the services without notification, so a competent coworker must refresh external state at each turn rather than act on cached assumptions from the previous day. Raw multimodal artifacts (photos, audio, scanned PDFs, video, spreadsheets) are first-class evidence, delivered without pre-transcription.
+
+Scoring is fully rule-based: every task ships with 6--29 weighted Python checkers that query the post-turn state of the sandboxed services, and the task score is their weight-normalised pass rate on $[0, 1]$. The complete rule-based-scoring commitment, including the no-LLM-as-judge guarantee, is defined in \S\ref{sec:design-evaluation}. Figure~\ref{fig:task-card} illustrates these elements on \texttt{insurance\_task5}, a six-turn enterprise fire-claim adjudication.
+
+\input{figures/fig02_task_card}
+
+The current release contains 100 tasks across 13 professional scenarios and 87 distinct in-task roles, running against the five sandboxed services with 1{,}072 raw multimodal artifacts (PDFs, images, audio, video, spreadsheets) and scored by 1{,}537 deterministic Python checkers of which 55 are red-line constraints. Tasks range from two to six turns (mean 3.6) and 6 to 29 checkers (mean 15.4). The corpus was produced by a task-first construction pipeline with multi-round human and agent-assisted review, described in detail in Section~\ref{sec:construction}.
+
+\subsection{Evaluation}
+\label{sec:design-evaluation}
+
+At evaluation time the framework runs each checker against the post-turn state of the sandboxed services (not a cached snapshot), and reports both the weight-normalised task score and a stricter aggregate \emph{Task Success} metric. Throughout the paper, both are reported on a 0--100 percentage scale for readability.
+\begin{align}
+  \mathrm{score}(m, \tau) \;&=\; \frac{\sum_{c \in \mathcal{C}(\tau)} w_c \cdot \mathbf{1}[\mathrm{pass}_c(m, \tau)]}{\sum_{c \in \mathcal{C}(\tau)} w_c} \; \in\; [0, 1]\, ,
+  \label{eq:score}\\
+  \mathrm{Succ}(m) \;&=\; \frac{100}{|\mathcal{T}|} \sum_{\tau \in \mathcal{T}} \mathbf{1}\!\left[\forall c \in \mathcal{C}(\tau),\, \mathrm{pass}_c(m, \tau) \right] \, \in [0, 100] \, ,
+  \label{eq:task-success}
+\end{align}
+where $\mathcal{C}(\tau)$ denotes the checker set of task $\tau$ with per-checker weights $w_c$, $\mathcal{T}$ is the full 100-task corpus, and $\mathrm{pass}_c(m, \tau) \in \{0, 1\}$ is the deterministic pass/fail verdict that checker $c$ produces against the post-turn service state left by model $m$ on task $\tau$. Each of the 1{,}537 checkers falls into one of four categories: filesystem / artifact inspection, external-backend state queries, email state queries, and numeric-tolerance or semantic-equivalence checks. \textbf{No LLM judge is invoked at any point during scoring}, whether during pass/fail decisions, tolerance checks, or aggregation; every verdict is a deterministic function of post-turn service state. A subset of 55 checkers (3.6\%) are designated \emph{red-line} constraints capturing compliance-sensitive actions a coworker must never take, and fall into four classes: premature-decision, compliance-bypass, data-exfiltration, and irreversible-write. In implementation, these red-line constraints are ordinary checker entries with fixed high weights $w_{\mathrm{red}}$ inside the same rubric, so a task with every non-red checker passing can still score substantially below $1.0$ if a red-line checker fails. Per-scenario red-line counts are reported in Table~\ref{tab:scenarios}.
+
+\paragraph{Why report both weighted Score and strict Task Success.} The two metrics answer different questions. Eq.~\eqref{eq:score} is a continuous signal that rewards partial progress and is appropriate for leaderboard ordering when rubrics vary in length (tasks in \bench{} have 6--29 checkers). Eq.~\eqref{eq:task-success} is a binary all-or-nothing signal that asks whether an agent completed the \emph{entire} workflow a coworker was asked to perform, which is the deployment-relevant question in a professional setting. Because Task Success requires every checker to pass, it is sensitive to single-item rubric brittleness, long-tail checker dependencies, and the presence of red-line constraints (red-lines count as ordinary pass/fail items inside this metric, since the all-or-nothing aggregation does not reference per-checker weights). We therefore always report Task Success alongside weighted score rather than instead of it.
+
+\subsection{Design principles}
+\label{sec:design-principles}
+
+Relative to prior agent benchmarks, \bench{} makes three design commitments. \textbf{Multi-turn timelines}: each task spans two to six in-universe working days (one day per turn) with clock advancement between turns, so the agent must sustain progress across day boundaries rather than emit a single-shot trajectory. \textbf{Dynamic environment}: between-turn mutation is injected in two layers. An \texttt{inject/stage\{N\}/} directory (legacy field name; one entry per turn) drops new files into the workspace, and turn-entry service-side Python appends email, rewrites spreadsheet rows, edits knowledge-base entries, and shifts calendar events. The agent therefore must refresh external state at the start of each turn rather than act on a day-1 mental model. \textbf{Full multimodal evidence}: raw artifacts are delivered without pre-transcription, and models must parse them with their own tools (\texttt{whisper}, \texttt{ffmpeg}, \texttt{PyMuPDF}, etc.).
+
+At the implementation level, every task is fully specified by a single \texttt{task.py} together with per-turn inject layers and supporting artifacts, and runs against the same five services (a Docker-mounted filesystem, GreenMail for SMTP/IMAP, a Notion-compatible knowledge base, a Google-Sheets-compatible spreadsheet, and a Radicale CalDAV server) inside an isolated \texttt{docker-compose} group. Appendix~\ref{app:task-diagram} provides a compact implementation-level view of how these task files are parsed into runtime objects and checked by the rule-based evaluation pipeline.
+
+Section~\ref{sec:construction} details how this corpus is produced: task distribution (\S\ref{sec:construction-distribution}) and the task-first construction pipeline and release gate (\S\ref{sec:construction-pipeline}).

@@ -1,0 +1,93 @@
+% §Appendix.
+
+\appendix
+
+\section{Multi-turn evaluation: terminology and conventions}
+\label{app:terminology}
+
+Throughout the paper we use a small terminology set (\emph{turn}, \emph{day}, and the legacy term \emph{stage}) with the following relationships.
+
+\paragraph{Multi-turn} refers to tasks that contain \emph{multiple independent interaction episodes}; each episode is itself a multi-step interaction (the agent issues many tool calls to advance the workflow). Between episodes the environment may change actively (new emails, system notifications, calendar shifts).
+
+\paragraph{Turn = Day in \bench{}.} In this paper one \emph{turn} is exactly one in-universe working day. A two- to six-turn task therefore spans two to six in-universe working days, and the agent receives one wake-up message at the start of each turn. The vocabulary is unified accordingly: ``Day~1 / Day~2 / Day~3'' on plots and tables refers to the first, second, and third turns of a three-turn task; \S\ref{sec:exp-trajectory} reads turn-by-turn behaviour as day-by-day behaviour.
+
+\paragraph{Stage} appears only in two narrow contexts. (i)~As a legacy field name in our task source: \texttt{inject/stage\{N\}/} directories and \texttt{stage0 / stage1 / \ldots} keys in \texttt{result.json} were named before we settled on the \emph{turn} vocabulary, and the field names are preserved for code compatibility. They denote the same per-turn structures described above. (ii)~Outside this paper, ``stage'' is sometimes used in the agent literature for a step inside a single episode; we do not use it in that sense here.
+
+\paragraph{Phase} (used in \S\ref{sec:construction-pipeline}) refers to the four \emph{authoring-pipeline} phases (task authoring, evidence sourcing, review loop, release gate) and is intentionally distinct from \emph{turn}. A phase is a step in how we construct a task; a turn is a step inside how an agent executes a task.
+
+\section{Task definition, parsing, and checking}
+\label{app:task-diagram}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{fig06_mechanism}
+  \caption{\textbf{Implementation-level view of a \bench{} task.} A task is defined by a compact file bundle: \texttt{task.py} specifies per-turn prompts, service seed hooks, and the checker rubric, while \texttt{assets/} and \texttt{inject/stage\{k\}/} (legacy field name; one entry per turn) provide static evidence and between-turn updates. The loader parses these files into runtime task objects, after which the orchestrator executes turns against the sandboxed services and runs deterministic Python checkers over post-turn state. Per-turn outcomes are aggregated into the per-task result record and final score.}
+  \label{fig:task-diagram}
+\end{figure*}
+
+Figure~\ref{fig:task-diagram} shows the file bundle and runtime view at a glance. A typical \texttt{task.py} contains four kinds of declarations: (i)~\textbf{turn entries}, one async function per turn (\texttt{turn0}, \texttt{turn1}, \ldots) defining the wake-up prompt, allowed tools, and any service-side mutation hooks; (ii)~\textbf{inject layers}, one per turn, providing the new evidence files that appear at the start of that turn; (iii)~\textbf{checker functions}, one per rubric item, returning a deterministic pass/fail by inspecting post-turn service state; and (iv)~a \textbf{rubric} mapping checker IDs to weights and turn assignments. Red-line checkers are ordinary entries in the same rubric, distinguished by ID convention (\texttt{S*\_redline\_*}) and a fixed high weight.
+
+The orchestrator runs each turn end-to-end inside an isolated \texttt{docker-compose} stack containing the agent container plus the five services (Docker-mounted filesystem, GreenMail SMTP/IMAP, the Notion API against a per-task workspace, the Google Sheets API against a per-task spreadsheet, and a Radicale CalDAV server). At end-of-turn, every checker for that turn is invoked against the post-turn sandboxed-service state; outcomes are recorded but the next turn proceeds regardless of failure. After the final turn, all rubric items are aggregated under Eqs.~\ref{eq:score} and~\ref{eq:task-success}.
+
+\bench{}'s framework forms a tight correspondence between the natural-language description of a task and its executable form: the wake-up messages, the loud and silent updates, and the rubric items are each described once and executed in the same place. This keeps the cost of translating between intent and execution low, which is what makes 3--5 rounds of joint author--reviewer iteration affordable across the 100-task, 13-scenario corpus (\S\ref{sec:construction-pipeline}).
+
+Recent agent benchmarks are increasingly multi-service and multi-turn (\S\ref{sec:related-benchmarks}). \bench{}'s framework is shaped for this regime by construction, not retrofitted onto a single-service or single-turn substrate: services compose freely, and turns are first-class evaluation episodes with their own prompts and rubric items.
+
+\section{Reproducibility and framework patches}
+\label{app:reproducibility}
+
+\paragraph{Patches to OpenClaw applied to all sweeps.} The seven-model sweep used a single OpenClaw build with model-specific routing patches: (i)~disable tool-call-id sanitisation for OpenAI-compat models that reject rewritten ids (Kimi family); (ii)~replace null tool-call \texttt{arguments} with \texttt{\{\}} for MiniMax-style outputs; (iii)~declare \texttt{input: ["text"]} for text-only models when invoked through the multimodal harness; (iv)~auto-route GPT-5 series to the \texttt{openai-responses} API with high thinking effort; (v)~auto-route Gemini through the native \texttt{generateContent} endpoint to preserve \texttt{thoughtSignature} across tool-call round-trips; (vi)~strip Gemini-unsupported JSON-Schema keywords from tool definitions. These patches are applied uniformly and do not advantage any particular model.
+
+\paragraph{Container limits and timeouts.} Per-turn agent timeout is two hours (forced, regardless of task \texttt{METADATA}); the LLM idle timeout inside that window is 30 minutes. Default parallelism is 4--8 concurrent compose stacks. Containers are torn down between tasks, so per-task runs do not share state.
+
+\paragraph{Inference settings.} All seven models use provider-default sampling parameters with extended thinking enabled where supported (Claude family, GPT-5.4, Gemini~3.1~Pro) and prompt caching enabled where supported. We do not perform per-model prompt engineering. Wall-clock, token, and tool-call totals reported in Table~\ref{tab:leaderboard} reflect a single full sweep per model.
+
+\section{Run-to-run stability}
+\label{app:stability}
+
+To bound the run-to-run noise behind Table~\ref{tab:leaderboard}, we ran three independent full sweeps of the 100-task corpus for two models chosen from opposite sides of the open/proprietary divide: Kimi K2.6 (open-source) and GPT-5.4 (proprietary). The harness, container limits, and inference settings match the main sweep. The three per-model weighted scores span a 2.8\,pp range for Kimi K2.6 (68.4, 70.8, 71.2) and a 1.0\,pp range for GPT-5.4 (72.0, 72.5, 73.0). Both ranges are small relative to the 19.8\,pp cross-model spread of Table~\ref{tab:leaderboard}, indicating that the single-sweep results are stable.
+
+\section{Case studies}
+\label{app:case-studies}
+
+\paragraph{Case 1: cross-modal reasoning chain on \texttt{content\_operation\_task7}.} This DevSummit event-operations task combines a voice memo, walkthrough video, PDF quotes, floor plans, and an Excel budget. GPT-5.4 resolves it through a cross-modal reasoning chain rather than a single-source cue. Table~\ref{tab:positive-case} shows the key trajectory from its highest-scoring run (80.0\%). The important transition is from step~1 to step~2: the model first extracts an investigation lead from the audio (``capacity may be inflated''), then uses \texttt{ffmpeg} to convert the walkthrough video into image frames and searches those frames with that specific question in mind. Among the inspected runs for this task, this audio-to-vision reasoning chain appeared only in GPT-5.4's trajectory.
+
+\input{tables/tab07_positive_case}
+
+\paragraph{Case 2: red-line violation on \texttt{insurance\_task1}.} \texttt{insurance\_task1} is a four-turn auto-insurance claim adjudication. On Thursday 3/21 (turn~3), the agent receives a revised quote from the repair shop together with claimant pressure to approve the claim quickly; on Friday 3/22 (turn~4), the technical report needed for the final decision arrives. The red-line checker \texttt{S3\_redline\_no\_direct\_approve} (weight 2.0) encodes the relevant compliance constraint: the agent must not approve the claim on day~3 before the technical report is available. Kimi K2.5 nevertheless issues a direct approval on day~3, while still passing seven other turn-3 checkers on quote analysis and contradiction spotting, and the failed red-line checker lowers its task score from 58.1\% (counterfactual) to \textbf{48.8\%} (actual), a $-9.3$\,pp reduction driven entirely by the single violation. This illustrates the kind of surface-complete but compliance-violating behaviour that LLM-as-judge evaluation typically misses: the violation is defined by what the agent \emph{did} to the sandboxed service state, not by the prose it emitted. Across the full benchmark, 26 red-line trips fall into 23 distinct (task, model) pairs, most dramatically on \texttt{pm\_task2}, where \emph{all seven models} trip at least one red-line.
+
+\section{Author list}
+\label{app:authors}
+\begin{sloppypar}
+\noindent\textbf{Authors.} Fanqing~Meng$^{1,2*}$, Lingxiao~Du$^{2*}$, Zijian~Wu$^{2*}$, Guanzheng~Chen$^{2*}$, Xiangyan~Liu$^{2*}$, Jiaqi~Liao$^{23}$, Chonghe~Jiang$^{3}$, Zhenglin~Wan$^{2}$, Jiawei~Gu$^{6}$, Pengfei~Zhou$^{2}$, Rui~Huang$^{4}$, Ziqi~Zhao$^{9}$, Shengyuan~Ding$^{11}$, Ailing~Yu$^{23}$, Bo~Peng$^{12}$, Bowei~Xia$^{18}$, Hao~Sun$^{10}$, Haotian~Liang$^{13}$, Ji~Xie$^{14}$, Jiajun~Chen$^{2}$, Jiajun~Song$^{15}$, Liu~Yang$^{9}$, Ming~Xu$^{2}$, Qionglin~Qiu$^{16}$, Runhao~Fu$^{20}$, Shengfang~Zhai$^{2}$, Shijian~Wang$^{19}$, Tengfei~Ma$^{7}$, Tianyi~Wu$^{2}$, Weiyang~Jin$^{4}$, Yan~Wang$^{17}$, Yang~Dai$^{2}$, Yao~Lai$^{4}$, Youwei~Shu$^{2}$, Yue~Liu$^{2}$, Yunzhuo~Hao$^{14}$, Yuwei~Niu$^{10}$, Jinkai~Huang$^{1}$, Jiayuan~Zhuo$^{1}$, Zhennan~Shen$^{8}$, Linyu~Wu$^{2}$, Hannah~Yao$^{22}$, Charles~Chen$^{1}$, Cihang~Xie$^{21}$, Yuyin~Zhou$^{21}$, Jiaheng~Zhang$^{2}$, Zeyu~Zheng$^{5}$, Mengkang~Hu$^{1\dagger}$, Michael~Qizhe~Shieh$^{1,2\dagger}$.
+\end{sloppypar}
+\medskip
+
+\noindent\textbf{Affiliations.}
+$^{1}$Evolvent AI;
+$^{2}$National University of Singapore;
+$^{3}$Massachusetts Institute of Technology;
+$^{4}$The University of Hong Kong;
+$^{5}$University of California, Berkeley;
+$^{6}$University of Washington;
+$^{7}$The Chinese University of Hong Kong;
+$^{8}$The Hong Kong University of Science and Technology;
+$^{9}$The Hong Kong Polytechnic University;
+$^{10}$Peking University;
+$^{11}$Fudan University;
+$^{12}$Shanghai Jiao Tong University;
+$^{13}$University of Science and Technology of China;
+$^{14}$Zhejiang University;
+$^{15}$Renmin University of China;
+$^{16}$Hunan University;
+$^{17}$Tongji University;
+$^{18}$University of Electronic Science and Technology of China;
+$^{19}$Southeast University;
+$^{20}$Anhui University;
+$^{21}$University of California, Santa Cruz;
+$^{22}$Northwestern University
+$^{23}$Independent Researcher.
+
+\medskip
+
+\noindent\footnotesize{$^{*}$Equal contribution. $^{\dagger}$Corresponding authors.}
