@@ -43,6 +43,7 @@
 * [Step3.5 Turbo 2026](papers/step-3-5.md)
 * [Step-GUI](papers/step-gui.md)
 * [ThunderAgent](papers/thunderagent.md)
+* [Taming the Long-Tail: Efficient Reasoning RL Training with Adaptive Drafter](papers/tlt-adaptive-drafter.md)
 * [Time Cost Benefits](papers/time-cost-benefits.md)
 * [Training Compute-Optimal Large Language Models](papers/training-compute-optimal-large-language-models.md)
 * [VISTA-Gym](papers/vista-gym.md)

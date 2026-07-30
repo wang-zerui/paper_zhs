@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：48
-- 含 `00README.json`：34
-- 有本地候选 PDF：46
-- 含中文 PDF：39
-- 带源码包：26
-- 含 tracked files 的目录：48
+- 论文目录：49
+- 含 `00README.json`：35
+- 有本地候选 PDF：47
+- 含中文 PDF：40
+- 带源码包：27
+- 含 tracked files 的目录：49
 - 纯本地目录（tracked files = 0）：0
 
 ## Triage
@@ -66,6 +66,7 @@
 | step-gui | Step-GUI | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 57 |
 | td-pipe | TD-Pipe | ✅ | main.tex | — | — | — | — | 29 |
 | thunderagent | ThunderAgent | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 48 |
+| tlt-adaptive-drafter | Taming the Long-Tail: Efficient Reasoning RL Training with Adaptive Drafter | ✅ | arxiv.tex | arxiv_zh.pdf | arxiv_zh.pdf | ✅ | source.tar | 21 |
 | time_cost_benefits | Time Cost Benefits | — | — | time_cost_benefit_schematic.pdf | time_cost_benefit_schematic.pdf | — | — | 8 |
 | training-compute-optimal-large-language-models | Training Compute-Optimal Large Language Models | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 28 |
 | vista-gym | VISTA-Gym | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 60 |
