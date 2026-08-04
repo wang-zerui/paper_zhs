@@ -162,6 +162,10 @@ TITLE_OVERRIDES = {
     "vista-gym": "VISTA-Gym",
     "Why Low-Precision Transformer Training Fails - An Analysis on Flash Attention": "Why Low-Precision Transformer Training Fails",
     "low-precision-flash-attention": "Why Low-Precision Transformer Training Fails",
+    "enterpriseops-gym": "EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings",
+    "tlt-adaptive-drafter": "Taming the Long-Tail: Efficient Reasoning RL Training with Adaptive Drafter",
+    "clawmark": "ClawMark: A Living-World Benchmark for Multi-Turn, Multi-Day, Multimodal Coworker Agents",
+    "agentic-harness-engineering": "Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses",
 }
 ARCHIVE_ALIASES = {
     "td-pipe": (

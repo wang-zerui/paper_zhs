@@ -1,0 +1,123 @@
+\section{方法}
+\label{sec:method}
+
+AHE 把 harness 优化转化为一个由另一个智能体驱动的闭环：基础模型保持固定，只对显式的 harness 进行编辑。
+我们的设计原则是，该闭环的每一个阶段都必须是\emph{可观测的}：AHE 忠实记录每个阶段产出的产物（一次迭代写入的 harness 组件、它生成的 rollout 轨迹、它提交的编辑决策），并将它们表示为结构化、分层的形式，使另一个智能体可以读取并据以行动。
+
+三个可观测性层次实现了这一原则。
+\textbf{组件可观测性}（\S\ref{sec:method:harness}）由一个解耦的、文件级的 harness 基座实现，它把每一种失败模式映射到单一的组件类别。
+\textbf{经验可观测性}（\S\ref{sec:method:adb}）由一个分层的证据语料实现，它从原始 rollout 中蒸馏而来，并建立索引以支持逐级下钻式访问。
+\textbf{决策可观测性}（\S\ref{sec:method:evolve}）由一份变更清单实现，它为每一次编辑配上一条自我声明的预测，并由下一轮加以验证。
+这三个层次共同组成算法~\ref{alg:ahe} 所描述的迭代，该迭代一轮接一轮地无人值守运行。
+
+\subsection{NexAU：可编辑、解耦的 harness 基座}
+\label{sec:method:harness}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/method.pdf}
+    \caption{\textbf{AHE 流水线把三个可观测面串联成一个闭环。} 组件、rollout 经验与编辑决策各自以结构化产物的形式呈现，供另一个智能体读取；而每一次编辑都成为一条可证伪的预测，由下一轮验证。}
+    \label{fig:method}
+\end{figure}
+
+我们在 NexAU 框架~\citep{nex-agiNexAUAUAgent2025,teamNexN1AgenticModels2025} 上实例化 harness $H$。该框架在单一工作区中，以固定挂载点上的显式文件形式暴露七种正交的组件类型：系统提示词、工具描述、工具实现、中间件、技能、子智能体配置以及长期记忆。
+这些组件类型之间是松耦合的，因此添加一个中间件不需要编辑系统提示词，添加一个技能也不需要触碰任何工具。
+
+正是这种解耦实现了\textbf{组件可观测性}：每一种失败模式都映射到单一的组件类别，从而为 Evolve Agent 提供了干净的动作空间，并把每一次通过率变化定位到一个文件，而不是让它散落在数百行无结构的提示词文字之中。每一次逻辑上的编辑都成为工作区 git 历史上的一次提交，由此免费获得文件级的 diff 与回滚粒度。
+
+我们的种子 harness $H_0$ 刻意保持极简：只有一个 shell 执行工具，没有中间件、没有技能、没有子智能体。若种子已经针对目标基准做过适配，就会污染此后每一次编辑的归因，因为我们将无法分辨增益究竟来自闭环还是来自种子。极简的种子迫使 AHE 添加的每一个组件都必须凭实测的 rollout 来赢得自己的位置。
+
+
+\subsection{Agent Debugger：分层的轨迹证据}
+\label{sec:method:adb}
+
+我们使用 harness $H$ 为基准中的每个任务生成 $k$ 条轨迹；这些轨迹中可能包含由 harness 缺陷导致、且可据以采取行动的错误，但它们散落在数百万 token 的原始消息之中。为了从智能体轨迹中提取洞见并实现\textbf{经验可观测性}，我们采用 Agent Debugger~\citep{linAgentDebuggerUnderstanding2026} 框架：用一个智能体去探索被组织成可导航的、基于文件的环境的轨迹，其中每条轨迹消息各自存放在一个文件里，并通过通用的 shell 与脚本工具访问。同一查询对应的轨迹被放入同一个环境，debugger 被要求分析失败的根因或成功的模式，其结果为每个任务存入一份\emph{按任务分析}报告。该分析还包含任务的通过/失败状态，用以为 Evolve Agent 提供依据。最后，把每一份报告汇聚成单一文档，形成\emph{基准级总览}，作为每一次迭代的入口。
+
+除这些报告之外，我们还提供\emph{原始}轨迹，以备智能体需要核验报告中的论断。轨迹同时以原始形式以及经过轻度处理、去除不必要内容的形式提供。所有这些内容都以文件形式提供，从而支持\textit{渐进式披露}~\citep{EffectiveContextEngineering}，既节省 token，也使智能体能作出更好的决策。
+
+
+% We use the Agent Debugger~\citep{linAgentDebuggerUnderstanding2026} to convert raw rollout traces into a navigable, file-based corpus in which each trajectory message lives in its own file and is reached through generic shell and scripting tools. This design responds to two pressures of evidence-driven evolution: a single benchmark round emits roughly 10M tokens of raw trace, which would exhaust the editor's context window if served directly, yet arbitrary compression would erase the details on which attribution depends.
+
+% The pipeline distills the traces across four layers separated by information density rather than by compression ratio.
+% \ding{182}~The \emph{raw} layer stores every trace verbatim; it is the ground truth against which any higher-level claim can be verified, and the editor reaches it only when a downstream report itself becomes suspect.
+% \ding{183}~A \emph{cleaning} layer strips base64 blobs and deduplicates verbatim tool outputs while preserving message order and call structure, removing token noise without distorting causal flow, so downstream analyzers operate on a faithful skeleton at a fraction of the size.
+% \ding{184}~A \emph{per-task analysis} layer produces one focused report per task, whose template adapts to the pass/fail signature of the $k$ rollouts (root cause, success pattern, or partial-pass diff); the evolve agent reads it to ground each task-level finding.
+% \ding{185}~A \emph{benchmark-wide overview} of roughly 10K tokens aggregates every per-task report into a single document; it is the entry point for every iteration and indexes the rest of the corpus.
+
+% This four-layer pipeline is what realizes \textbf{experience observability}: the rollout history becomes an indexed corpus rather than a summary, where the editor reads the overview first, drills down to a per-task report when a finding needs grounding, and reaches the raw trace only when the report itself is in question. \textit{Progressive disclosure}~\citep{EffectiveContextEngineering} replaces lossy compression.
+
+
+
+
+% \subsection{Evidence-Driven Harness Modification}
+% \label{sec:method:evolve}
+
+% The evolution agent reads the analysis layer of \S\ref{sec:method:adb}, edits the workspace of \S\ref{sec:method:harness}, and is bound by three hard constraints that make its own behavior auditable in the next round.
+
+% \paragraph{Constraint 1: Controllability.}
+% The evolution agent may write only inside the harness workspace. The runs directory, tracer, verifier, and LLM configuration are read-only, and the framework marks the seed system prompt as non-deletable. These restrictions block the most common shortcuts an unconstrained self-modifier would take, such as disabling the verifier, swapping the model, or raising the reasoning budget, and keep every recorded gain attributable to harness edits.
+
+% \paragraph{Constraint 2: Evidence-driven changes with a recorded prediction.}
+% Each edit ships with a manifest entry recorded for that iteration. The entry names the failure evidence behind it, namely which tasks failed and how, the inferred root cause, the targeted fix actually applied, and a predicted impact comprising the tasks the edit is expected to fix together with those it might regress. The manifest is the loop's evidence ledger. In the next round, the loop intersects the predicted-fix and predicted-regression sets with the observed task-level deltas to produce a per-edit verdict. Each edit thereby becomes falsifiable by the next evaluation, which replaces rationale-driven self-justification with a measurable contract between rounds. The same ledger is the data source for the self-assessment analysis in \S\ref{sec:experiments:rq3b}.
+
+
+
+\subsection{Evolve Agent：证据驱动、可审计的编辑}
+\label{sec:method:evolve}
+
+Evolve Agent 闭合了 AHE 的闭环。在每一轮中，它读取 Agent Debugger 产出的分层证据语料，决定要添加、修改或移除哪些 harness 组件，把这些编辑应用到工作区，并记录每一次编辑背后的推理。有两条约束支配这些编辑，二者共同实现了\textbf{决策可观测性}：每一次编辑都成为一条可证伪的、文件级的论断，被记录在带版本的变更清单中；而下一轮的裁决要么确认它，要么将其回滚。
+
+第一条约束是\textit{可控性}：Evolve Agent 只能在 harness 工作区内写入，而 runs 目录、tracer、验证器与 LLM 配置均为只读，种子系统提示词（附录~\ref{app:prompts:code-seed}）被标记为不可删除。
+这些限制阻断了一个不受约束的自我修改者会采取的捷径，例如关闭验证器、替换模型或提高推理预算，从而使记录到的每一分增益都可归因于 harness 编辑。
+
+第二条约束是，每一次变更都必须是\textit{证据驱动}的，并附带一条被记录下来的预测。
+每一次编辑都附上一条变更清单条目，其中指明失败证据、推断出的根因、有针对性的修复，以及预测的影响——既包括预期会被修复的任务，也包括存在回归风险的任务；这份变更清单就是闭环的证据账本（见附录~\ref{app:prompts:evolve}）。
+在下一轮中，闭环把预测修复集合与预测回归集合同观测到的任务级变化取交集，从而给出针对每一次编辑的裁决。
+由此，每一次编辑都可被下一次评测证伪，这就用轮次之间可度量的契约取代了以理由为驱动的自我辩护。
+
+% Algorithm~\ref{alg:ahe} ties the three substrates into one iteration: rollout, clean, attribute the prior manifest and revert rejected edits, distill, edit, commit. Two design choices are worth noting. We run $k\geq 2$ rollouts per task, so each task carries a pass-rate signal rather than a single binary outcome, which both stabilizes pass@1 against rollout variance and lets partial-pass tasks anchor comparative diagnosis. Attribution runs \emph{before} distillation, so its verdict prunes the harness entering the editor and lands inside the evidence corpus, turning each prior manifest entry into a binding contract rather than an unverified rationale. A one-shot explore agent (Appendix~\ref{app:prompts:explore}) runs once in parallel with iteration~$1$, reading the NexAU source tree together with a curated set of public coding-agent design references to seed a small number of reusable skills; these skills receive no special protection, and from iteration~$2$ onward all edits flow through the Evolve Agent, which may keep, refine, or remove them on the strength of observed rollouts.
+
+
+
+% \subsection{Outer Loop}
+% \label{sec:method:loop}
+
+% An AHE run begins with a one-shot initialization that primes the workspace with reusable skills, then enters $N$ identical six-phase iterations over the artifacts of \S\S\ref{sec:method:harness}--\ref{sec:method:evolve}. Initialization comes first because it determines what the loop reads in iteration~$1$; the iteration itself is then kept deliberately short, so that the framework can replay any round from the artifacts archived for it.
+
+% \paragraph{Initialization via an explore agent.}
+% The seed harness $H_0$ of \S\ref{sec:method:harness} carries no skills and no middleware, only a single shell tool and the seed system prompt. An iteration~$1$ launched directly from this bare $H_0$ would spend most of its evidence budget on framework discovery rather than on diagnosing model failures, and the iteration~$2$ manifest would inherit that cold start. To avoid it, an explore agent runs once in parallel with iteration~$1$ rollouts: it reads the NexAU source tree together with a curated set of public coding-agent design references, then writes a small number of reusable skill files into the workspace under the controllability constraint of \S\ref{sec:method:evolve}. These skills receive no special protection. The evolution agent at iteration~$2$ may keep, refine, or remove any of them on the strength of observed rollouts, and from that round onward all further edits to $H$ flow through Algorithm~\ref{alg:ahe}.
+
+% \paragraph{Six-phase iteration.}
+% Algorithm~\ref{alg:ahe} lays out the six phases driven by the evolution agent of \S\ref{sec:method:evolve}; we walk through them below. Phase~1 runs $k$ rollouts of $(M, H_{t-1})$ on every task in $D$, producing the trajectory pool $T_t$. We use $k\geq 2$ so that each task carries a pass-rate signal rather than a single binary outcome, which both stabilizes pass@1 estimates against rollout variance and lets phase~3 attribute task-level deltas with comparative evidence. Phase~2 cleans $T_t$ into $\widetilde{T}_t$ by stripping base64 blobs and deduplicating verbatim tool outputs, keeping message order and call structure intact. Phase~3 runs from iteration~$2$ onward: it intersects the predicted-fix and predicted-regression sets in the prior manifest $C_{t-1}$ with task-level deltas between $T_{t-1}$ and $T_t$ to yield a per-edit verdict $V_t$, after which the rollback rule of \S\ref{sec:method:evolve} reverts every ineffective edit at file granularity. Phase~4 hands $\widetilde{T}_t$ to the Agent Debugger and produces the layered corpus $R_t$ of \S\ref{sec:method:adb}. Phase~5 gives $R_t$ together with $V_t$ to the evolution agent, which writes new components into $H_t$ and records the matching manifest $C_t$ under the three constraints of \S\ref{sec:method:evolve}. Phase~6 commits $H_t$ and $C_t$ as a single git-tagged checkpoint, so any later round can replay or revert it. Placing phase~3 before phase~4 is deliberate: its verdict prunes the baseline $H_{t-1}$ entering phase~5 and lands inside $R_t$ as evidence the evolution agent must reckon with, turning each prior manifest entry into a binding contract across iterations rather than an unverified rationale. The iteration ends by promoting $H_t$ to $H_{\text{best}}$ whenever its pass@1 strictly exceeds the running best.
+
+
+
+\begin{algorithm}[htbp]
+\caption{AHE 外层循环。}
+\label{alg:ahe}
+\begin{algorithmic}[1]
+\Require 种子 harness $H_0$、基础模型 $M$、基准 $D$、每个任务的 rollout 次数 $k$、最大迭代次数 $N$
+\State $H_{\text{best}} \gets H_0$
+\For{$t = 1$ to $N$}
+    \State $T_t \gets \textsc{Rollout}(M, H_{t-1}, D, k)$ \Comment{阶段 1：每个任务 $k$ 次 rollout}
+    \State $\widetilde{T}_t \gets \textsc{Clean}(T_t)$ \Comment{阶段 2：将轨迹归一化为规范形式}
+    \If{$t \geq 2$} \Comment{阶段 3：对上一轮变更清单归因，随后回滚}
+        \State $V_t \gets \textsc{Attribute}(C_{t-1}, T_{t-1}, T_t)$
+        \State $H_{t-1} \gets \textsc{Rollback}(H_{t-1}, V_t)$
+    \Else
+        \State $V_t \gets \emptyset$
+    \EndIf
+    \State $R_t \gets \textsc{AgentDebugger}(\widetilde{T}_t)$ \Comment{阶段 4：分层蒸馏}
+    \State $(H_t, C_t) \gets \textsc{Evolve}(H_{t-1}, R_t, V_t)$ \Comment{阶段 5：工作区编辑 + 新的变更清单}
+    \State $\textsc{Commit}(H_t, C_t, t)$ \Comment{阶段 6：在 git 中为该次迭代打标签}
+    \If{$\textsc{Pass@1}(T_t) > \textsc{Pass@1}(H_{\text{best}})$} $H_{\text{best}} \gets H_t$ \EndIf
+\EndFor
+\State \Return $H_{\text{best}}$
+\end{algorithmic}
+\end{algorithm}
+
+算法~\ref{alg:ahe} 把三个基座组合进同一次迭代：rollout、清洗、对上一轮变更清单归因并回滚被否决的编辑、蒸馏、编辑、提交。
+我们对每个任务运行 $k\geq 2$ 次 rollout，使每个任务携带一个通过率信号，这既稳定了 pass@1，也让部分通过的任务成为对比诊断的锚点。
+归因在蒸馏\emph{之前}运行，因此它的裁决会落入证据语料之中，并把上一轮变更清单的每一条条目约束为一份契约，而非一段说辞。
+一个一次性的 Explore Agent（附录~\ref{app:prompts:explore}）与第~$1$ 轮迭代并行运行，依据 NexAU 源码与公开的 coding agent 参考资料播种少量可复用的技能。
+这些技能不享有任何特殊保护：从第~$2$ 轮迭代起，Evolve Agent 可以依据实测的 rollout 保留、改进或移除它们。

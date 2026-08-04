@@ -1,0 +1,77 @@
+% Three-column comparison of one failing and one passing rollout for db-wal-recovery,
+% with the chg-1 rule that closes each gap shown in the middle column. Both rollouts
+% share the same seed and the same first three steps S1 to S3, summarized once in the
+% shared-prefix banner above the three columns. The four divergence steps in the failing
+% rollout each map to one chg-1 rule in the middle column and to the corresponding step
+% in the passing rollout. Color palette aheNavy / aheBlue / aheTeal / aheSky is defined
+% in the preamble.
+\begin{figure}[t]
+    \centering
+    \scriptsize
+    \begin{tcolorbox}[colback=black!3, colframe=black!50, boxrule=0.5pt,
+                      left=4pt, right=4pt, top=3pt, bottom=3pt,
+                      colbacktitle=black!55, coltitle=white,
+                      title={\scriptsize\textbf{共享前缀，两次 rollout，相同随机种子}}]
+        S1.~\texttt{ls /app} $\rightarrow$ \texttt{main.db}, \texttt{main.db-wal} \quad\textbar\quad
+        S2.~\texttt{xxd /app/main.db-wal} 揭示出 \texttt{0x42} 的 XOR 模式 \quad\textbar\quad
+        S3.~首次 \texttt{sqlite3} 调用触发自动 checkpoint，WAL 文件悄然消失
+    \end{tcolorbox}
+    \vspace{2pt}
+    \begin{tcbraster}[raster columns=3,
+                      raster equal height,
+                      raster column skip=4pt,
+                      raster row skip=0pt,
+                      raster left skip=0pt,
+                      raster right skip=0pt,
+                      boxrule=0.6pt,
+                      left=4pt,right=4pt,top=3pt,bottom=3pt,
+                      coltitle=white]
+        \begin{tcolorbox}[colback=aheSky!18,colframe=aheNavy,colbacktitle=aheNavy,
+                          title={\scriptsize\textbf{\texttt{chg-1} 之前，NexAU\textsubscript{0} 种子，迭代 1，reward 0.0}}]
+            \textbf{\textcolor{aheNavy}{分歧点：凭空编造缺失的行}} \\
+            \rule{\linewidth}{0.3pt}\\[1pt]
+            F1.~对\textbf{已缓存}的 \texttt{xxd} 标准输出做 XOR，而原始 WAL 字节早已消失 \\[2pt]
+            F2.~读取可见的 5 行，随后\textbf{假定}缺失的行满足 \texttt{value = id $\times$ 100} \\[2pt]
+            F3.~用猜测的取值对第 6 至 11 行执行 \texttt{INSERT OR REPLACE}，写出 \texttt{recovered.json} \\[2pt]
+            F4.~自检 \texttt{json length == 11}，返回通过，就此停止 \\[3pt]
+            \rule{\linewidth}{0.3pt}\\
+            \textbf{\textcolor{aheNavy}{结果}} \\
+            提交的取值：\texttt{100, 200, 300, \dots, 1100} \\
+            隐藏验证器在 \texttt{id == 1} 上断言 \texttt{value == 150} $\rightarrow$ AssertionError \\
+            $\rightarrow$ \textbf{7 项测试中 2 项失败，reward 0}
+        \end{tcolorbox}
+        \begin{tcolorbox}[colback=black!3,colframe=black!65,colbacktitle=black!75,
+                          title={\scriptsize\textbf{弥合每处缺口的 \texttt{chg-1} 规则}}]
+            \textbf{\textcolor{black!85}{R1.~契约优先。}} 测试与验证器脚本才是事实来源，shell 历史不是。 \\
+            \textcolor{black!60}{$\rightarrow$ 捕获 F1：缓存的标准输出不是契约。} \\[3pt]
+            \rule{\linewidth}{0.2pt}\\[1pt]
+            \textbf{\textcolor{black!85}{R5.~要泛化，不要过拟合可见样本。}} \\
+            \textcolor{black!60}{$\rightarrow$ 捕获 F2：5 行太少，不足以推断缺失的 6 行。} \\[3pt]
+            \rule{\linewidth}{0.2pt}\\[1pt]
+            \textbf{\textcolor{black!85}{R1，第二条款。}} 契约会指明被禁止的额外产物以及多答案要求。 \\
+            \textcolor{black!60}{$\rightarrow$ 捕获 F3：重读任务说明会暴露出``WAL changes''指的是对已有行的修改。} \\[3pt]
+            \rule{\linewidth}{0.2pt}\\[1pt]
+            \textbf{\textcolor{black!85}{R2 + R8.~收尾前先复刻评测器。}} 执行一次终态验收扫查，宁可相信失败的检查也不要相信自己的推测，不要用自创的代理指标替代。 \\
+            \textcolor{black!60}{$\rightarrow$ 捕获 F4：行数并不是验证器所做的检查。}
+        \end{tcolorbox}
+        \begin{tcolorbox}[colback=aheTeal!12,colframe=aheBlue,colbacktitle=aheBlue,
+                          title={\scriptsize\textbf{\texttt{chg-1} 之后，相同种子，迭代 2，reward 1.0}}]
+            \textbf{\textcolor{aheBlue}{分歧点：重读契约，恢复原始字节}} \\
+            \rule{\linewidth}{0.3pt}\\[1pt]
+            P1.~逐字重读任务说明，把``WAL changes''理解为\textbf{对已有行的修改} \\[2pt]
+            P2.~\texttt{find / -name "*.wal"} 返回为空，转向裸盘恢复 \\[2pt]
+            P3.~在块 203050 处从 \texttt{/dev/vda} 中切出数据，与 \texttt{0x42} 做 XOR，写回带有合法魔数 \texttt{377f0682} 的 \texttt{/app/main.db-wal} \\[2pt]
+            P4.~\texttt{sqlite3} 此时报告 11 行，取值为 \texttt{value = 150, 250, 300, \dots} \\[2pt]
+            P5.~最终验收扫查复刻验证器： \\
+            \phantom{P5.~}$\bullet$ \texttt{wal\_magic == 377f0682} \\
+            \phantom{P5.~}$\bullet$ \texttt{json length == 11}, \texttt{sorted ids == 1..11} \\
+            \phantom{P5.~}$\bullet$ \texttt{json rows == db rows} \\[3pt]
+            \rule{\linewidth}{0.3pt}\\
+            \textbf{\textcolor{aheBlue}{结果}} \\
+            提交的取值：\texttt{150, 250, 300, \dots, 1100} \\
+            $\rightarrow$ \textbf{7 项测试全部通过，reward 1}
+        \end{tcolorbox}
+    \end{tcbraster}
+    \caption{\texttt{db-wal-recovery} 在 \texttt{chg-1} 前后的三栏轨迹对比。两次 rollout 使用相同的随机种子，并共享同样的前三步 S1 至 S3，概括于各栏之上的横幅中。左栏列出失败 rollout 的四个分歧步骤 F1 至 F4。中栏列出八条 \texttt{chg-1} 规则中在该轨迹上触发的四条，并逐条标注它所捕获的失败步骤。右栏列出通过 rollout 中相对应的步骤 P1 至 P5。每条 F 到 R 到 P 的链条可沿图中的一行横向阅读：一种失败模式、指明并禁止该失败模式的规则，以及该规则在通过 rollout 中所产生的步骤。\texttt{chg-1} 是对 \texttt{workspace/systemprompt.md} 追加的 68 行内容，其中没有提及 SQLite、WAL 或 \texttt{db-wal-recovery}；完整的变更清单条目见图~\ref{fig:manifest-prompt-tool}。}
+    \label{fig:case-trajectory}
+\end{figure}

@@ -1,0 +1,72 @@
+% Three-column trajectory comparison for mcmc-sampling-stan before and after the two
+% iteration-6 harness changes: the tool-level publish-state guard chg-1 and the
+% middleware-level execution-risk hints chg-2. Both rollouts share the install and
+% authoring prefix S1 to S3, summarized once in the banner above the three columns.
+% The middle column lists the iteration-6 components that fire on this trajectory,
+% each annotated with the failure steps it catches. Color palette aheNavy / aheBlue
+% / aheTeal / aheSky is defined in the preamble.
+\begin{figure}[t]
+    \centering
+    \scriptsize
+    \begin{tcolorbox}[colback=black!3, colframe=black!50, boxrule=0.5pt,
+                      left=4pt, right=4pt, top=3pt, bottom=3pt,
+                      colbacktitle=black!55, coltitle=white,
+                      title={\scriptsize\textbf{共享前缀，两次 rollout，相同随机种子}}]
+        S1.~\texttt{ls /app} $\rightarrow$ \texttt{data.csv}，含 30 行，列为 \texttt{y}、\texttt{n} \quad\textbar\quad
+        S2.~以长时后台任务从 CRAN 安装 \texttt{rstan 2.32.7} \quad\textbar\quad
+        S3.~编写 \texttt{hierarchical\_model.stan} 与 \texttt{analysis.R}，设定 \texttt{chains = 4}、\texttt{iter = 100000}、\texttt{seed = 1}
+    \end{tcolorbox}
+    \vspace{2pt}
+    \begin{tcbraster}[raster columns=3,
+                      raster equal height,
+                      raster column skip=4pt,
+                      raster row skip=0pt,
+                      raster left skip=0pt,
+                      raster right skip=0pt,
+                      boxrule=0.6pt,
+                      left=4pt,right=4pt,top=3pt,bottom=3pt,
+                      coltitle=white]
+        \begin{tcolorbox}[colback=aheSky!18,colframe=aheNavy,colbacktitle=aheNavy,
+                          title={\scriptsize\textbf{迭代 6 变更之前，迭代 5，reward 0.0}}]
+            \textbf{\textcolor{aheNavy}{分歧点：相信代理结果，跳过真正的运行}} \\
+            \rule{\linewidth}{0.3pt}\\[1pt]
+            F1.~在 R 中对边缘后验做一次\textbf{独立}的网格积分，得到 \texttt{alpha $\approx$ 2.876}、\texttt{beta $\approx$ 16.375} \\[2pt]
+            F2.~把这些网格积分得到的取值作为交付物写入 \texttt{/app/posterior\_alpha\_mean.txt} 与 \texttt{/app/posterior\_beta\_mean.txt} \\[2pt]
+            F3.~以后台任务启动 \texttt{Rscript /app/analysis.R}，每 30 秒轮询一次 \\[2pt]
+            F4.~约 3 分钟后，为了``保住已经生成的交付物''而\textbf{杀掉}尚未完成的采样 \\[2pt]
+            F5.~最终扫查只检查文件存在且能解析为数字，返回通过 \\[3pt]
+            \rule{\linewidth}{0.3pt}\\
+            \textbf{\textcolor{aheNavy}{结果}} \\
+            验证器重新运行 \texttt{analysis.R}；真实的 MCMC 链发散 \\
+            提交结果：\texttt{alpha = 1.28e19}、\texttt{beta = 2.60e17} \\
+            $\rightarrow$ \textbf{6 项测试中 2 项失败，reward 0}
+        \end{tcolorbox}
+        \begin{tcolorbox}[colback=black!3,colframe=black!65,colbacktitle=black!75,
+                          title={\scriptsize\textbf{弥合每处缺口的迭代 6 变更}}]
+            \textbf{\textcolor{black!85}{中间件 \texttt{chg-2}。}} 模式目录会标记``用内联或自写的代理验证器代替指定的评测器''。风险提示随即注入到下一个模型轮次。 \\
+            \textcolor{black!60}{$\rightarrow$ 捕获 F1、F2、F4：网格积分是指定 MCMC 流水线的代理，而杀掉 \texttt{analysis.R} 让该代理得以保留。这条提醒把下一轮次重新导向把指定流水线跑到完成。} \\[3pt]
+            \rule{\linewidth}{0.2pt}\\[1pt]
+            \textbf{\textcolor{black!85}{中间件 \texttt{chg-2}，第二种模式。}} 目录还会标记``浅层验证''以及``基准运行时没有显式的黄金答案或阈值比较器''。 \\
+            \textcolor{black!60}{$\rightarrow$ 捕获 F5：只查文件是否存在、而不对验证器所指定输出做容差比较的扫查是被禁止的，取而代之必须做一次带交叉核对的独立重跑。} \\[3pt]
+            \rule{\linewidth}{0.2pt}\\[1pt]
+            \textbf{\textcolor{black!85}{发布态守卫 \texttt{chg-1}。}} 一旦某个脚本入口与指定的评测器绑定、且最终检查已经通过，该脚本及其消费的文件便进入受保护状态；清理或重跑需要显式的 \texttt{ALLOW\_POST\_SUCCESS\_RESET} 令牌。 \\
+            \textcolor{black!60}{$\rightarrow$ 在 P4 与 P5 处可见：每次成功提交都带有覆写令牌，这正是守卫确实生效、而非被悄悄绕过的证据。}
+        \end{tcolorbox}
+        \begin{tcolorbox}[colback=aheTeal!12,colframe=aheBlue,colbacktitle=aheBlue,
+                          title={\scriptsize\textbf{迭代 6 变更之后，相同种子，迭代 6，reward 1.0}}]
+            \textbf{\textcolor{aheBlue}{分歧点：把评测器流水线一直跑到收敛}} \\
+            \rule{\linewidth}{0.3pt}\\[1pt]
+            P1.~用覆写参数 \texttt{STAN\_ITER=2000}、\texttt{STAN\_WARMUP=1000} 对 \texttt{analysis.R} 做冒烟测试，确认可编译并有端到端输出 \\[2pt]
+            P2.~以完整的 \texttt{iter = 100000} 运行 \texttt{analysis.R} 并\textbf{等待其完成}，得到 \texttt{alpha $\approx$ 2.872}、\texttt{beta $\approx$ 16.43} \\[2pt]
+            P3.~在 \texttt{/tmp} 中以独立的临时副本重跑同一脚本，两份结果在 3 位有效数字上一致 \\[2pt]
+            P4.~带上发布态守卫新要求的 \texttt{ALLOW\_POST\_SUCCESS\_RESET} 覆写令牌，发布这组交叉验证过的取值 \\[2pt]
+            P5.~清理未被要求生成的 \texttt{hierarchical\_model.rds} 缓存，重跑针对 \texttt{/app} 的最终验收扫查 \\[3pt]
+            \rule{\linewidth}{0.3pt}\\
+            \textbf{\textcolor{aheBlue}{结果}} \\
+            提交结果：\texttt{alpha = 2.872}、\texttt{beta = 16.43} \\
+            $\rightarrow$ \textbf{6 项测试全部通过，reward 1}
+        \end{tcolorbox}
+    \end{tcbraster}
+    \caption{\texttt{mcmc-sampling-stan} 在迭代 6 开始时上线的两项 harness 变更前后的三栏轨迹对比：位于 commit \texttt{ff0cf3d} 的工具级发布态守卫 \texttt{chg-1}，以及位于 commit \texttt{9651986} 的中间件级执行风险提示 \texttt{chg-2}，后者的完整变更清单条目见图~\ref{fig:manifest-middleware}。横幅给出共享前缀 S1 至 S3。左栏列出迭代 5 中失败 rollout 的五个分歧步骤 F1 至 F5。中栏列出在该轨迹上触发的迭代 6 组件，并逐条标注它所捕获的失败步骤。右栏列出迭代 6 中通过 rollout 相对应的步骤 P1 至 P5。该任务在随后的四轮评测中一直保持 2/2。}
+    \label{fig:case-trajectory-mcmc}
+\end{figure}

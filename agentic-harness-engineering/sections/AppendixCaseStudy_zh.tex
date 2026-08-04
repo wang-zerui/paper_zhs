@@ -1,0 +1,104 @@
+\section{定性案例研究}
+\label{app:case-study}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/case_study.pdf}
+  \caption{Evolve Agent 的三个编辑示例，每个可控性层级各一个：一个中间件新文件、一次系统提示词追加，以及一次 shell 工具编辑。}
+  \label{fig:case-study-overview}
+\end{figure}
+
+图~\ref{fig:case-study-overview} 展示了 Evolve Agent 的三个编辑示例，每个可控性层级各一个。本节余下部分将展开四条轨迹，以及产生这些轨迹的八项变更。
+
+为了把 AHE 的外层循环讲具体，我们追踪四条从失败到修复的轨迹，以及产生它们的八项变更。这四条轨迹对应图~\ref{fig:training_curve} 中 best-so-far 曲线上的四个峰值：轨迹~1 对应迭代~2 的峰值~1，轨迹~2 对应迭代~5 的峰值~2，轨迹~3 对应迭代~6 的峰值~3，轨迹~4 对应迭代~8 的峰值~4。我们把案例研究分为两部分。第~\ref{app:case-study:trajectories} 节叙述四条轨迹各自的失败 rollout 与通过 rollout。第~\ref{app:case-study:changes} 节记录 Evolve Agent 在四个取胜轮次中各自交付的 chg-* 变更清单条目。轨迹~1 和轨迹~3 的轨迹可视化见图~\ref{fig:case-trajectory} 与图~\ref{fig:case-trajectory-mcmc}；四张变更清单图见图~\ref{fig:manifest-prompt-tool}、\ref{fig:manifest-publish-state}、\ref{fig:manifest-middleware} 和~\ref{fig:manifest-hardblock}。这八条变更清单条目合起来跨越三个可控性层级：提示词、工具实现与中间件。
+
+\subsection{轨迹：失败 rollout 与通过 rollout 的对比}
+\label{app:case-study:trajectories}
+
+\subsubsection{轨迹 1：\texttt{db-wal-recovery}}
+\label{app:case-study:wal}
+
+\paragraph{任务。}
+\texttt{db-wal-recovery} 要求 agent 从一个损坏的预写日志文件（write-ahead log，缩写为 WAL）中重建一个 SQLite 数据库：既要应用 WAL 中编码的新行插入，也要应用其中编码的取值更新，并把重建后的表输出为 \texttt{/app/recovered.json}。验证器是精确匹配的：它加载该 JSON，并对照已知真值断言每一行的各个字段，其中包括已有行上被更新后的取值。
+
+\paragraph{迭代~2 变更前后的轨迹。}
+在 NexAU\textsubscript{0} 种子上，该任务在 2 次 rollout 中通过 1 次。失败的那次 rollout 概括于图~\ref{fig:case-trajectory} 左栏：它从一个过期的 shell 缓冲区中恢复 WAL 字节，凭猜测出的规律臆造出缺失的行，没有注意到 WAL 中还编码了对已有行的修改，并在一次只统计条目数的自检上提交。Agent Debugger 把这次失败归入更宽泛的模式“以代理验证替代与评测器同构的验证”：rollout 以某种替代性检查（如行数、文件存在、脚本能运行）收尾，而不是以评测器的精确断言收尾。装上迭代~2 的变更之后，八条新规则中有四条在这条轨迹上触发，它们列在图~\ref{fig:case-trajectory} 的中栏，每条向左映射到它所拦截的失败步骤，向右映射到通过 rollout 中的对应步骤。契约优先规则把 agent 从缓存 stdout 的捷径上引开，强制它重新阅读规格说明，从而把“WAL 变更”重新理解为对已有行的修改。禁止过拟合规则阻止了从 5 个可见样本外推出的 \texttt{value = id} 乘以 \texttt{100} 的规律。镜像评测器规则把 \texttt{json length == 11} 的自检替换为一次末态巡检，该巡检断言的字段与隐藏验证器所断言的字段完全相同。随后 \texttt{db-wal-recovery} 在下一次评测中通过 2/2，并在该次运行其后的每一轮迭代中都保持 2/2。Evolve Agent 为 \texttt{chg-1} 填写的 \texttt{predicted\_fixes} 字段并未列出 \texttt{db-wal-recovery}；这项编辑本是针对另一簇部分通过的任务提出的，但其通用化的表述使它迁移到了这里，这说明 AHE 如何把单个任务上的症状转化为一条可复用的 harness 规则。
+
+\input{figures/case-trajectory_zh}
+\FloatBarrier
+
+\subsubsection{轨迹 2：\texttt{path-tracing}}
+\label{app:case-study:pathtracing}
+
+第一条轨迹展示的是单轮演化把一个任务翻转为通过。第二条则展示迭代~5 那一轮——它针对的是一种跨任务的“验证后状态破坏”回归——如何提升了那些 Evolve Agent 未必点名的任务的得分，其中包括 \texttt{path-tracing}。
+
+\paragraph{任务。}
+\texttt{path-tracing} 要求 agent 实现一个路径追踪器，把一份场景描述渲染为 \texttt{/app/reconstructed.ppm}。验证器只读取这一个输出文件，并将其与参考图像逐像素比对；工作树中的其他内容一概不读。
+
+\paragraph{迭代~5 变更前后的轨迹。}
+在迭代~4，该任务得分为 0/2。两次 rollout 共有的失败模式是一个四步序列：agent 渲染出了正确的 \texttt{/app/reconstructed.ppm}，运行了一次自检确认图像满足某个结构性验收标准，接着作为最后的收尾动作发出形如 \texttt{rm -rf /app/image /app/reconstructed.ppm /app/scratch} 的大范围清理命令，并以该清理命令的 shell 退出码为依据提交。随后验证器在磁盘上找不到 \texttt{reconstructed.ppm}，判定该 rollout 不通过。种子 harness 的提示词中原本就有反对“破坏已验证状态”的建议，但没有任何执行期机制去强制执行它。在迭代~5，\texttt{path-tracing} 从 0/2 翻转为 2/2。在两次通过的 rollout 中，agent 都到达了与此前相同的“渲染并自检”状态，然后发出清理命令；shell 守卫将其拦截，并返回一条消息指明 \texttt{/app/reconstructed.ppm} 属于受保护对象，agent 接受该消息，在不重新执行清理的情况下结束，验证器于是在磁盘上找到了正确的文件。同一轮迭代~5 还恢复了 \texttt{polyglot-rust-c} 和 \texttt{large-scale-text-editing}，这两项都列在变更清单的 \texttt{predicted\_fixes} 中。同样被预测到的 \texttt{configure-git-webserver} 在迭代~5 只部分恢复，因为它的失败模式涉及一条状态重置路径，而迭代~5 的守卫仍把该路径视为可覆写的；这一缺口由轨迹~4 中描述的迭代~8 变更补上。
+
+\subsubsection{轨迹 3：\texttt{mcmc-sampling-stan}}
+\label{app:case-study:mcmc}
+
+前两条轨迹各自用的是提示词与工具的组合。第三条则展示来自不同可控性层级的两个 harness 组件——工具层的发布态守卫与跨步骤的中间件——如何协同工作，把一个已经连续失败五轮迭代的任务翻转为通过。图~\ref{fig:case-trajectory-mcmc} 概括了变更前后的 rollout。
+
+\paragraph{任务。}
+\texttt{mcmc-sampling-stan} 要求 agent 安装 \texttt{rstan 2.32.7}，对 30 个观测拟合一个分层 beta-二项模型，并把 \texttt{alpha} 与 \texttt{beta} 的后验均值写入两个文本文件。验证器会自行安装该软件包，并端到端地重新运行 agent 写的 \texttt{analysis.R}，然后断言 \texttt{alpha} 落在 \texttt{[2.84, 2.91]} 内、\texttt{beta} 落在 \texttt{[16.1, 16.7]} 内。
+
+\paragraph{迭代~6 变更前后的轨迹。}
+从迭代~1 到迭代~5，该任务得分一直是 0/2。共有的失败模式概括于图~\ref{fig:case-trajectory-mcmc} 左栏，是一种分五步的“先代理、后跳过”模式：agent 独立地用网格积分算出后验的估计值，把这些数字写成交付物，把真正的 MCMC 采样作为后台任务启动，又在其完成之前将其杀掉以“保住已经产出的交付物”，最后在一次只检查文件存在且能解析为数字的末态巡检上提交。随后验证器从头重新运行 \texttt{analysis.R}；未收敛的采样器产出约 \texttt{1e19} 量级的取值，远远超出预期范围。此前各轮都没能拦住这条轨迹：迭代~2 的提示词编辑提出了契约优先原则，但 agent 本来就认为网格积分是对契约的忠实实现；迭代~5 的发布态守卫保护了交付文件，却把 \texttt{analysis.R} 本身当作不受保护的临时产物。装上迭代~6 的变更之后，两次 rollout 都以完整的 \texttt{iter = 100000} 把 \texttt{analysis.R} 跑到结束，与 \texttt{/tmp} 中一次独立的完整临时运行交叉核对，并通过新的覆写令牌发布收敛后的取值；图~\ref{fig:case-trajectory-mcmc} 右栏描绘了这次通过的 rollout。该任务在两次 rollout 中都通过了验证器的 6/6 项测试，并在接下来的四轮迭代中都保持 2/2。收敛后的取值落在 \texttt{alpha} 约 \texttt{2.872}、\texttt{beta} 约 \texttt{16.43}，接近各自预期区间的中心。同一轮迭代~6 还使 \texttt{sam-cell-seg}、\texttt{query-optimize}、\texttt{caffe-cifar-10}、\texttt{dna-assembly} 和 \texttt{train-fasttext} 受益，它们都匹配上了中间件七种模式中的一种或多种。
+
+\input{figures/case-trajectory-mcmc_zh}
+\FloatBarrier
+
+\subsubsection{轨迹 4：\texttt{configure-git-webserver}}
+\label{app:case-study:cgw}
+
+第四条轨迹展示 Evolve Agent 回过头来修正自己此前的决策。到迭代~7 时，发布态守卫已经沿用了三轮，中间件已经沿用了两轮，而得分从 75.8 回退到了 73.0。迭代~7 这一轮没有回滚其中任何一项，而是修补了守卫中的一个漏洞与中间件中的一处显著性不足；结果这两处修补对 \texttt{configure-git-webserver} 都是关键承重的。
+
+\paragraph{任务。}
+\texttt{configure-git-webserver} 要求 agent 在 \texttt{/git/server} 下建立一个 git 仓库，配置一台以 \texttt{/git/www} 下的工作树对外提供服务的 webserver，部署一个 hello-world 页面，并产出一份使外部可观察的 URL 返回预期内容的配置。验证器从 agent 的 shell 之外发起一次 HTTP 请求，并读取响应体。
+
+\paragraph{迭代~8 变更前后的轨迹。}
+在迭代~7，该任务得分为 0/2。失败的那次 rollout 已经做出了完全可用的部署，运行了一次针对 localhost 的 curl 自检并拿到了正确的响应体，随后发出了两条以 \texttt{ALLOW\_POST\_SUCCESS\_RESET} 为前缀的清理命令：一条删除 \texttt{/git/www/hello.html}，另一条把 \texttt{/git/server/refs/heads/master} 重置为空状态，两条都被辩解为“给评分留下一个干净的仓库”。shell 工具在迭代~5 引入的守卫把它们识别为可覆写的重置，并在附上覆写令牌后予以放行。外部验证器随后收到 404，判定该 rollout 不通过。\texttt{git-multibranch} 在迭代~7 因同样的结构性原因失败。与此同时，\texttt{polyglot-c-py} 和 \texttt{pytorch-model-recovery} 在迭代~7 以一种不同但相关的症状失败：迭代~6 的中间件其实已经就干净布局违规和内联辅助验证发出了正确的警告，但这些警告只被追加在工具输出之后，而在紧接着的下一个模型回合中，agent 无视了它们并直接发布。装上迭代~8 的变更之后，\texttt{configure-git-webserver} 从 0/2 翻转为 2/2。两次 rollout 都到达与此前相同的成功部署，都尝试了同样的可覆写清理命令，但这些命令在 shell 层被拒绝，并收到硬阻断消息指明受保护的 web 根目录与受保护的 ref；agent 接受这些消息，放弃清理，并以线上状态提交。\texttt{git-multibranch} 沿同一条路径翻转为通过。\texttt{polyglot-c-py}、\texttt{polyglot-rust-c}、\texttt{pytorch-model-recovery} 和 \texttt{mteb-retrieve} 则经由中间件这条路径翻转：在每一例中，注入到下一个模型回合之前的 FRAMEWORK 提醒都携带了足够的显著性，使 agent 去修复违规，而不是无视它直接发布。迭代~8 的总分达到 76.97，是图~\ref{fig:evolution-curve} 上该次运行的最高水位，也是整个运行中单轮最大的一次跃升。
+
+\subsection{四个取胜轮次交付的变更}
+\label{app:case-study:changes}
+
+\subsubsection{迭代~2：提示词规则与 shell 超时参数}
+\label{app:case-study:changes:iter2}
+
+Evolve Agent 在迭代~1 之后给出的回应是两项变更。变更 \texttt{chg-1}（提交 \texttt{c0b8a05}）是向 \texttt{workspace/systemprompt.md} 追加的 68 行内容，其中完全没有提到 SQLite、WAL 或 \texttt{db-wal-recovery}；追加的这一段包含八条编号规则，涵盖验收契约抽取、镜像评测器、最小编辑语义、候选方案打分、泛化、时间预算、末态就绪度以及一条停止规则。变更 \texttt{chg-2}（提交 \texttt{169c34c}）是一项工具实现层面的编辑，它把 shell 超时暴露为一个按调用设置、上限更高的参数，以应对种子 harness 静默截断长时间运行的安装配置命令这一类失败。这两条变更清单条目见图~\ref{fig:manifest-prompt-tool}。
+
+\input{figures/manifest-prompt-tool_zh}
+\FloatBarrier
+
+\subsubsection{迭代~5：发布态机制（提示词规则 + shell 工具守卫）}
+\label{app:case-study:changes:iter5}
+
+Evolve Agent 在迭代~4 的边界上交付了两项互补的变更，二者都是为迭代~5 编写的。变更 \texttt{chg-7}（提交 \texttt{3ba3a90}）同时修改 \texttt{workspace/systemprompt.md} 与 \texttt{run\_shell\_command} 的描述符；它向 harness 的工作记忆中加入三条规则：一条发布态规则，把验收之后的文件系统状态指认为交付面；一条临时目录规则，面向交付布局受限的任务；以及一条字面输出规则，面向 DSL、配置和脚本类输出——这类输出的等价性是在字节层面判定的。变更 \texttt{chg-8}（提交 \texttt{4e0aab9}）修改 \texttt{workspace/tools/shell\_tools/run\_shell\_command.py}；它在 shell 工具内部安装了一个有状态的发布态守卫，具有三种行为。第一，当 shell 观察到一次成功的、评测器风格的最终检查时，它会从该验收命令中解析出显式的文件路径与根目录，并把它们记录为受保护对象。第二，当后续某条命令将要删除一个受保护的输出或重置一个受保护的根目录时，守卫会在执行之前拦截该命令，并返回一条有针对性的错误，说明哪个受保护目标处于风险之中。第三，守卫接受 agent 显式给出的 \texttt{ALLOW\_POST\_SUCCESS\_RESET} 令牌，该令牌把阻断降级为警告，并强制 agent 在提交前重新验证。这两项变更是刻意配对的：\texttt{chg-7} 告诉模型什么是发布态，\texttt{chg-8} 则在模型忘记该规则时仍能阻止 agent 破坏它。这两条变更清单条目见图~\ref{fig:manifest-publish-state}。
+
+\input{figures/manifest-publish-state_zh}
+\FloatBarrier
+
+\subsubsection{迭代~6：受保护入口点与执行风险中间件}
+\label{app:case-study:changes:iter6}
+
+Evolve Agent 为迭代~6 交付了两项互补的变更。变更 \texttt{chg-1}（提交 \texttt{ff0cf3d}）扩展了发布态守卫：与被点名的评测器绑定的脚本入口点在一次通过的检查之后也成为受保护对象，要覆写则必须显式给出 \texttt{ALLOW\_POST\_SUCCESS\_RESET} 令牌；在通过的 rollout 中，每一次成功提交时出现的该令牌，正是守卫确实生效、而非被静默绕过的外部可见证据。变更 \texttt{chg-2}（提交 \texttt{9651986}）引入了 \texttt{ExecutionRiskHintsMiddleware}；该中间件监视 shell 命令与工具输出的实时序列，一旦检测到以下七种跨步骤风险模式中的任意一种，就发出一条有针对性的提示：依赖 \texttt{-h}、\texttt{py\_compile} 或纯存在性检查的浅层验证；契约点名了外部端点时却只在 localhost 上做服务验证；用内联的或自行编写的代理验证器替代被点名的评测器；契约点名了特定封装接口时却去访问更底层的模型或内部 API；没有显式标准答案或阈值比较器的基准检查；针对某个已知失败模式已经耗尽预算却仍反复长时间运行；以及针对同一错误反复重试。与轨迹~3 相关的是内联代理验证与浅层验证这两种模式，它们合起来覆盖了 F1 到 F5 的整个序列：网格积分代理以及杀掉 \texttt{analysis.R} 属于代理验证器模式，而缺少容差比较器的文件存在性巡检属于浅层验证模式。shell 工具的变更则专门覆盖 F4：由于 \texttt{analysis.R} 现在受保护，杀进程成为一个受守卫的动作，需要覆写令牌，并强制在提交前再走一遍重新验证。这两条变更清单条目见图~\ref{fig:manifest-middleware}。
+
+\input{figures/manifest-middleware_zh}
+\FloatBarrier
+
+\subsubsection{迭代~8：硬阻断与 FRAMEWORK 提醒}
+\label{app:case-study:changes:iter8}
+
+Evolve Agent 为迭代~8 交付了两项变更，它们明确保留了此前的架构，只修补其薄弱点。变更 \texttt{chg-1}（提交 \texttt{ca35f53}）修改 \texttt{workspace/tools/shell\_tools/run\_shell\_command.py}，把两条软性理由升级为硬阻断：删除任何非 \texttt{/tmp} 的受保护输出现在是硬阻断，重置任何非 \texttt{/tmp} 的受保护根目录现在也是硬阻断。\texttt{ALLOW\_POST\_SUCCESS\_RESET} 令牌仍可降级其他类别的成功后互锁，但已不能再抹除已验证的线上交付物，也不能再清空线上根目录。变更 \texttt{chg-2}（提交 \texttt{a4a4a29}）修改 \texttt{workspace/middleware/execution\_risk\_hints.py}，新增三种行为。第一，一个新的 \texttt{before\_model} 钩子会把上一步发出的任何执行风险提示提升为在下一个模型回合中可见的 FRAMEWORK 提醒，使该警告成为推理上下文的一部分，而不再只是追加在工具输出之后的文本。第二，中间件在每个任务上从用户请求中一次性推断出两类契约：干净布局或单文件交付契约，以及官方封装接口或指定版本契约。第三，中间件新增两条契约感知的工具后启发式规则：当 agent 在要求干净布局的线上目录树内编译或构建时发出警告；当契约点名了官方封装接口或版本、而命令却改用原始的 \texttt{SentenceTransformer} 或 \texttt{AutoModel} 风格 API 时发出警告。这两项变更的作用范围都是刻意界定的：\texttt{chg-1} 阻止破坏性 shell 命令本身，\texttt{chg-2} 则让正确的警告在紧接着的下一个模型回合中不可能被忽视。这两条变更清单条目见图~\ref{fig:manifest-hardblock}。
+
+\input{figures/manifest-hardblock_zh}
+\FloatBarrier
+
+\subsection{如何阅读变更清单图}
+\label{app:case-study:manifest}
+
+上文的轨迹追踪的是单项编辑在单个任务中的作用过程。变更清单把每一项编辑连同它预测的修复、预测的回归以及约束层级一起带入下一轮迭代的阶段~3，在那里由归因检查决定保留还是回滚。四个取胜轮次各配一张变更清单图，全部采用相同的 Files / What changed / Failure pattern fixed / Predicted fixes 版式。图~\ref{fig:manifest-prompt-tool} 展示迭代~2 的提示词编辑与 shell 工具编辑，二者是在种子轮次中一并写出的。图~\ref{fig:manifest-publish-state} 展示迭代~5 的提示词与描述符规则，以及引入发布态机制的 shell 守卫安装。图~\ref{fig:manifest-middleware} 展示迭代~6 把发布态守卫扩展到脚本入口点，以及引入跨步骤的 \texttt{ExecutionRiskHintsMiddleware}。图~\ref{fig:manifest-hardblock} 展示迭代~8 的“保留并改进”式修补：堵上守卫上的覆写令牌漏洞，并把中间件提醒提升为在下一个模型回合可见的 FRAMEWORK 提示。这四张图合起来覆盖了 Evolve Agent 所使用的四个约束层级中的三个，即提示词、工具实现与中间件；它们都以相同的 JSON 结构写成，也都同样地——若预测的修复未能出现——会被自动回滚。
