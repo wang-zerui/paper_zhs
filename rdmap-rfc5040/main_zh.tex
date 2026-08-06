@@ -1,0 +1,191 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=24mm]{geometry}
+\usepackage[UTF8,fontset=none,heading=true]{ctex}
+\setCJKmainfont[AutoFakeBold=2.5]{Songti SC}
+\setCJKsansfont[AutoFakeBold=2.5]{Hiragino Sans GB}
+\setCJKmonofont{Hiragino Sans GB}
+\usepackage{fontspec,booktabs,longtable,array,tabularx,enumitem,amsmath}
+\usepackage[most]{tcolorbox}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{listings}
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip = 0pt plus 1pt
+\definecolor{rfcblue}{HTML}{174A7E}
+\definecolor{rfcgray}{HTML}{F2F5F8}
+\hypersetup{linkcolor=rfcblue,citecolor=rfcblue,urlcolor=rfcblue}
+\pagestyle{fancy}\fancyhf{}
+\setlength{\headheight}{14pt}
+\lhead{RFC 5040 中文译本}\rhead{RDMAP}\cfoot{\thepage}
+\setlist[itemize]{leftmargin=2em,itemsep=2pt,topsep=3pt}
+\newcommand{\term}[1]{\textbf{#1}}
+\newcommand{\kw}[1]{\texttt{#1}}
+\newcommand{\MUST}{\textbf{MUST}}
+\newcommand{\SHOULD}{\textbf{SHOULD}}
+\newcommand{\MAY}{\textbf{MAY}}
+\lstset{basicstyle=\small\ttfamily,backgroundcolor=\color{rfcgray},frame=single,breaklines=true,columns=fullflexible}
+\title{\textbf{远程直接内存访问协议规范}\\[4pt]\large RFC 5040 中文译本}
+\author{R. Recio、B. Metzler、P. Culley、J. Hilland、D. Garcia\\\small 原文发布于 2007 年 10 月；本文为技术中文翻译}
+\date{}
+\begin{document}
+\maketitle
+\begin{tcolorbox}[colback=rfcgray,colframe=rfcblue,title=译本说明]
+本文翻译 IETF RFC 5040《A Remote Direct Memory Access Protocol Specification》。协议字段名、消息名、位值、术语缩写和规范性关键词保留英文，以免影响实现对照；\MUST、\SHOULD、\MAY 分别表示\textbf{必须}、\textbf{应当}和\textbf{可以}，其规范性含义遵循 RFC 2119。本文不是新的协议规范；发生歧义时，以\href{https://www.rfc-editor.org/rfc/rfc5040.txt}{RFC Editor 发布的英文原文}为准。
+\end{tcolorbox}
+\begin{abstract}
+本规范定义远程直接内存访问协议（Remote Direct Memory Access Protocol，RDMAP）。RDMAP 建立在直接数据放置协议（Direct Data Placement Protocol，DDP）之上，为上层协议（ULP）提供远程读和远程写服务。它使数据可直接落入 ULP 缓冲区，避免中间拷贝，并支持内核旁路实现。RDMAP 定义 RDMA Write、RDMA Read、Send 和 Terminate 消息、其头部、流管理、排序/完成规则及安全要求。
+\end{abstract}
+\tableofcontents
+\newpage
+\section{引言}
+RDMAP 的目标是在端系统之间高效地移动数据，同时保留 DDP 提供的直接放置能力。传统网络栈通常把数据在用户缓冲区、内核缓冲区和网卡缓冲区之间多次复制；RDMAP 允许 RNIC（RDMA Network Interface Card，RDMA 网络接口卡）借助 DDP 指定的标签缓冲区直接完成放置，从而降低 CPU、内存带宽和延迟开销。
+\subsection{体系结构目标}
+RDMAP 的设计目标如下：
+\begin{itemize}
+\item 支持一端把数据直接写入另一端已授权的 ULP 缓冲区；
+\item 支持一端从另一端已授权的 ULP 缓冲区读取数据；
+\item 支持以 DDP 未标记消息传递语义发送数据；
+\item 允许 ULP 同时使用这些传输方式，并可使大数据传输不经过中间复制；
+\item 将远端内存访问限制在对端明确通告、且由 STag 授权的范围内；
+\item 可运行在可靠、有序的下层传输（LLP）之上，且不自行提供拥塞控制或可靠传输。
+\end{itemize}
+RDMAP 不定义会话建立、资源协商、ULP 消息格式或对端身份验证策略；这些职责由 ULP、DDP 和 LLP 的组合承担。
+\subsection{协议概述}
+RDMAP 使用四类消息：\term{RDMA Write} 把本地数据写入远端已通告缓冲区；\term{RDMA Read Request} 请求远端读取其已通告缓冲区；\term{RDMA Read Response} 携带对读请求的响应数据；\term{Send} 则使用 DDP 未标记缓冲区按队列顺序放置数据。\term{Terminate} 用于报告致命协议错误。
+
+对于直接访问，接收方先注册内存区域并生成 \term{STag}（Steering Tag，导向标签）。发起方在消息中给出 STag、目标偏移和长度；RNIC 仅在 STag 有效、访问权限匹配且范围合法时执行传输。写操作为单向操作；读操作由请求和响应组成。Send 不能访问任意远端内存，仅能消费接收方预先提供的未标记缓冲区。
+\subsection{RDMAP 分层}
+RDMAP 位于 ULP 与 DDP 之间。ULP 向 RDMAP 提交操作、注册缓冲区并接收完成与错误；RDMAP 为 DDP 构造适合的有标记或未标记消息；DDP 再借助 LLP 将段可靠、有序地传送。RDMAP 假设 LLP 已提供连接关联、可靠传送、按流顺序交付和消息边界所需的语义。
+\section{术语表}
+\subsection{通用术语}
+\begin{longtable}{p{.25\linewidth}p{.67\linewidth}}
+\toprule 术语 & 含义\\\midrule\endhead
+ULP & 上层协议；直接使用 RDMAP 服务的协议或应用。\\
+RNIC & 实现 DDP 与 RDMAP 的网络接口硬件/软件实体。\\
+Endpoint & 通信端点；一个 RDMAP Stream 的一端。\\
+RDMAP Stream & 两端点间、建立在一个 DDP Stream 上的双向逻辑数据流。\\
+Local / Remote Peer & 执行操作的一方 / 该操作所涉及的对端。\\
+Consumer & 使用 RDMAP 服务的实体，通常是 ULP。\\
+STag & 由 RNIC 产生的导向标签，标识一个已注册缓冲区及其访问权限。\\
+STagged Buffer & 用 STag 通告、可被 RDMAP 有标记消息访问的缓冲区。\\
+Untagged Buffer & 供 DDP 未标记消息按接收队列顺序放置的缓冲区。\\
+TO & Target Offset；从 STag 所标识缓冲区起始位置开始的字节偏移。\\
+\bottomrule
+\end{longtable}
+\subsection{LLP 与 DDP 术语}
+LLP（Lower Layer Protocol，下层协议）是承载 DDP 的传输协议。DDP Stream 是一个双向的、可靠有序的数据流；DDP 以有标记（Tagged）或未标记（Untagged）消息直接放置数据。\term{M/R/S}（Message Sequence Number，消息序号）用于未标记消息排序；\term{ULP Payload} 为 DDP 段中由 ULP 提供或接收的数据。
+\subsection{RDMA 术语}
+\term{RDMA Write} 是从本地向远端目标缓冲区的推送；\term{RDMA Read} 是由本地发起、由远端响应数据的拉取。\term{Solicited Event} 是请求接收端在消费消息时产生异步提示的标志。\term{Invalidate} 使随消息携带的 STag 在接收端失效，用于撤销访问授权。
+\section{ULP 与传输属性}
+\subsection{传输要求与假设}
+RDMAP 必须运行在满足 DDP 要求的 LLP 上：同一方向内可靠、有序地交付字节；为每个 DDP Stream 提供独立的双向通信；保留连接/流边界；并使端点能检测不可恢复的连接错误。RDMAP 不重排、重传或确认 RDMAP 消息，也不定义拥塞控制。若 LLP 不能提供这些属性，不得直接用于 RDMAP。
+
+每一端必须能在流建立前配置资源限制，包括可注册内存、未标记接收缓冲区数、待处理读请求数以及完成队列容量。RNIC 或特权资源管理器必须避免一个消费者耗尽其他消费者的资源。
+\subsection{RDMAP 与 ULP 的交互}
+ULP 在使用远端访问前注册本地缓冲区，并通过其自身控制协议把 STag、TO、长度和权限安全地交给对端。ULP 提交 Write、Read 或 Send 后，RDMAP 以完成事件报告本地操作已经完成、失败或被终止；本地完成不必表示远端 ULP 已处理数据。
+
+对 RDMA Write，ULP 必须确认对端所给目标范围允许本次写入。对 RDMA Read，发起方必须提供足够的本地接收缓冲区；响应方必须确认请求所指远端源范围允许读取。Send 的接收端必须预先张贴足够的未标记缓冲区，且 ULP 负责建立流量控制，避免发送端超过接收方可用缓冲区。
+
+ULP 应在不再允许远端访问前使 STag 失效，并等待所有可能使用该 STag 的操作完成。仅凭应用层“已发送”并不能安全地释放内存。
+\section{头部格式}
+所有 RDMAP 头部都放在 DDP ULP Payload 的开头。RDMAP Control 字段为 8 位：高位保留，低位中的 \kw{Version} 标识协议版本；\kw{Opcode} 指定消息类型；\kw{Invalidate} 位表示是否携带要失效的 STag。保留位在发送时必须为零，接收时必须忽略，除非相应消息规则另有规定。
+\subsection{RDMAP Control 与 Invalidate STag 字段}
+\begin{longtable}{p{.27\linewidth}p{.64\linewidth}}
+\toprule 字段 & 规则\\\midrule\endhead
+Version & RFC 5040 定义的版本为 1。接收不支持的版本是致命协议错误。\\
+Opcode & 取值定义为 RDMA Write、RDMA Read Request、RDMA Read Response、Send、Send with Solicited Event 与 Terminate。\\
+Invalidate & 仅在 Send with Invalidate 变体中为 1；随后紧跟 32 位 Invalidate STag。\\
+\bottomrule
+\end{longtable}
+\subsection{RDMA 消息定义}
+\begin{longtable}{p{.25\linewidth}p{.67\linewidth}}
+\toprule 消息 & 用途\\\midrule\endhead
+RDMA Write & 把 ULP Payload 写入远端指定 STag/TO；使用 DDP 有标记消息。\\
+RDMA Read Request & 请求远端读取指定 STag/TO/长度；请求本身通过有标记消息发送。\\
+RDMA Read Response & 返回读出的数据；使用与请求配对的有标记消息。\\
+Send & 向对端下一可用未标记缓冲区提交数据。\\
+Send with Solicited Event & 与 Send 相同，但请求对端产生提示事件。\\
+Send with Invalidate & 与 Send 相同，并使指定远端 STag 失效；也可和 Solicited Event 组合。\\
+Terminate & 指示检测到不可恢复错误并终止流。\\
+\bottomrule
+\end{longtable}
+\subsection{Write、Read 与 Send 头部}
+RDMA Write 头部包含 Control、目标 STag 和 Target Offset。RDMA Read Request 还包含请求长度以及响应端用于放置响应数据的 STag/TO；因而响应端既验证被读的源区域，也验证返回数据的目标区域。RDMA Read Response 包含 Control，后接读取的数据。Send 头部只包含 Control；带 Invalidate 的 Send 在其后携带要撤销的 STag。Terminate 头部携带层、错误类型、错误代码和导致错误的已截断消息头，便于诊断。
+\section{数据传输}
+\subsection{RDMA Write 消息}
+发送端将 Control、目标 STag、TO 与数据作为一个 RDMAP Write 交给 DDP。接收 RNIC 必须验证 STag 存在、允许远程写、TO 与数据长度不越界，并将 ULP Payload 放置到目标位置。验证成功后，接收方可以完成该写入；发生验证失败、长度错误、非法头部或资源错误时，必须按错误管理规则报告并终止流。
+
+RDMA Write 可用于数据推送和控制信息传递。一个逻辑写操作可能由多个 DDP 段组成，但 ULP 与实现必须遵守 DDP 的分段和排序约束。接收端不得把不完整或失败写操作视为已交付的 ULP 消息。
+\subsection{RDMA Read 操作}
+读操作包含 Read Request 和 Read Response。请求端给出远端源缓冲区的 STag、TO 和读取长度，并同时给出本地用于接收响应的 STag、TO。响应端验证远端源区域的读权限和范围；请求端在响应到达时验证本地目标区域的写权限和范围。
+\subsubsection{RDMA Read Request}
+Read Request 的目标是响应端可读的源内存；请求消息还描述响应应被放进请求端的哪个本地已注册缓冲区。响应端接到请求后，不应把该请求交由 ULP 才能完成；RNIC 可直接从已注册缓冲区取数并生成响应。请求端必须在读完成前保持其接收缓冲区有效。
+\subsubsection{RDMA Read Response}
+Read Response 携带源区域的内容。读响应的长度必须等于请求长度；不匹配为协议错误。响应只代表其被构造时读到的数据，不构成远端内存的一致性或原子性保证；ULP 必须自行定义并实现同步。
+\subsection{Send 消息类型}
+Send 通过 DDP 未标记消息承载 ULP Payload。它按 M/R/S 消息序号映射到接收方张贴的未标记缓冲区；接收方未张贴相应缓冲区、序号失配或缓冲区不足均是致命错误。带 Solicited Event 的变体仅增加通知语义，不改变数据放置规则。带 Invalidate 的变体必须在数据成功放置后再使指定 STag 失效；若 STag 无效，按错误规则处理。
+\subsection{Terminate 消息}
+一端检测到不可恢复的 RDMAP 错误时，应发送 Terminate，以便对端取得错误层、类型和代码。发送 Terminate 后，该端必须进行流的异常终止；接收 Terminate 的一端也必须终止该流。Terminate 不保证一定能送达，因此 LLP 的断连错误也必须被上报。
+\subsection{排序与完成}
+同一方向上，RDMAP 操作遵循其 DDP/LLP 交付顺序；但读请求与读响应处在相反方向，且远程内存访问本身不提供跨操作的原子性。完成事件表示 RNIC 已达到该操作所规定的本地完成点。实现必须维持：此前提交的操作不会因稍后操作而违反流内可见顺序；一个缓冲区在相关完成前不得被重用；遇到终止后，尚未完成的操作必须以失败或未完成状态报告给 ULP。
+\section{RDMAP 流管理}
+\subsection{流初始化}
+RDMAP Stream 在其底层 DDP Stream 已建立、且双方已为该流配置资源后开始。初始化时，双方必须协商或由 ULP 确定使用的 RDMAP 版本、所需的未标记缓冲区与流量控制规则；RDMAP 不定义握手消息。端点不得在完成初始化前发送 RDMAP 消息。
+
+ULP 必须在任何对端访问发生前安全地传递 STag 和访问范围。STag 是能力令牌，但不是对端身份认证的替代品；发布 STag 就是在其权限范围内授予访问能力。
+\subsection{流拆除}
+正常拆除由 ULP 协调：停止提交新操作，等待已提交操作完成，撤销不再需要的 STag，随后关闭 DDP/LLP 流。异常拆除由 Terminate 或 LLP 错误触发。\subsubsection{RDMAP 异常终止}
+在本端或远端发现致命错误后，RNIC 必须阻止该流继续执行新操作，通知本地 ULP，并释放或隔离相关流资源。已注册的内存不应仅因流终止自动变为安全可复用；ULP 仍必须遵守本地注册与完成规则。
+\section{RDMAP 错误管理}
+\subsection{错误上报}
+错误可被本地 RNIC、远端 RNIC、DDP 或 LLP 发现。RDMAP 必须尽可能将错误上报给本地 ULP；若可发送，必须向远端发送 Terminate。错误报告至少应说明发生层、错误类别和原因。协议错误、保护错误、资源错误和未支持版本/操作码均可能导致终止。
+\subsection{远端检测到入站 RDMA 消息的错误}
+远端处理入站消息时必须检查版本、opcode、保留位、头部长度、STag 有效性、访问权限、TO/长度边界以及 DDP 段格式。对于 RDMA Read Request，还必须检查请求长度和响应目标描述。检测到下列情况不得执行数据访问：
+\begin{itemize}
+\item STag 不存在、已经失效，或未授予所请求的远程读/写权限；
+\item Target Offset 与长度超出注册内存区域；
+\item 消息截断、格式错误，或 Opcode 与 DDP 消息类型不匹配；
+\item 资源不足、版本不受支持或未标记序号不合法。
+\end{itemize}
+这类错误通常不可恢复，因为流两端的状态已不再可信；实现必须终止流，而不是尝试继续处理后续 RDMAP 消息。
+\section{安全考虑}
+RDMAP 暴露的是受 STag 限定的远端内存能力，因此安全设计的核心是保护 STag、限制其权限与生命周期，并防止资源耗尽。RDMAP 本身不认证对端、不加密数据，也不保证消息完整性；部署必须选择合适的 LLP/网络安全服务。
+\subsection{RDMAP 专有安全要求}
+RNIC 必须确保 STag 难以猜测，不能让一个 STag 访问注册范围以外的内存，必须在失效后拒绝访问，并在本地消费者之间隔离内存和资源。特权资源管理器必须限制单一消费者注册内存、张贴接收缓冲区、发起读操作和占用队列的能力，防止拒绝服务。ULP 不应向未认证实体泄露 STag、TO 或可访问长度。
+\subsection{RDMAP 的安全服务}
+需要机密性、对端认证、完整性或抗重放时，应由下层安全服务提供。RFC 5040 讨论 IPsec 在 RDMAP 上的使用：保护应覆盖承载 DDP/RDMAP 的数据流；安全关联必须在允许 RDMAP 流量前建立；密钥管理与策略必须同时绑定端点、流和所需服务。仅依赖 STag 不能防御窃听、伪造、重放或中间人攻击。
+\section{IANA 考虑事项}
+本规范没有要求 IANA 新建注册表或分配新的名称空间。
+\section{参考文献}
+\begin{thebibliography}{9}
+\bibitem{rfc5040} R. Recio 等，\emph{A Remote Direct Memory Access Protocol Specification}，RFC 5040，2007 年 10 月，\url{https://doi.org/10.17487/RFC5040}。
+\bibitem{rfc2119} S. Bradner，\emph{Key words for use in RFCs to Indicate Requirement Levels}，RFC 2119，1997 年 3 月。
+\bibitem{rfc5041} H. Shah 等，\emph{Direct Data Placement over Reliable Transports}，RFC 5041，2007 年 10 月。
+\bibitem{rfc5042} J. Pinkerton 等，\emph{Direct Data Placement Protocol (DDP) / Remote Direct Memory Access Protocol (RDMAP) Security}，RFC 5042，2007 年 10 月。
+\end{thebibliography}
+\appendix
+\section{附录 A：用于 RDMA 消息的 DDP 段格式}
+下表汇总 RDMAP 消息选择的 DDP 段类别。字段的精确位布局、保留位和长度限制以 RFC 5041 与 RFC 5040 原文附录 A 为准。
+\begin{longtable}{p{.31\linewidth}p{.28\linewidth}p{.31\linewidth}}
+\toprule RDMAP 消息 & DDP 段 & 放置语义\\\midrule\endhead
+RDMA Write & Tagged DDP Segment & 写入目标 STag/TO。\\
+RDMA Read Request & Tagged DDP Segment & 请求访问响应端源 STag/TO。\\
+RDMA Read Response & Tagged DDP Segment & 写入请求端给出的响应目标 STag/TO。\\
+Send / Send with SE & Untagged DDP Segment & 消费下一个匹配 M/R/S 的未标记缓冲区。\\
+Send with Invalidate & Untagged DDP Segment & 与 Send 相同；成功后执行 STag 失效。\\
+Terminate & Untagged DDP Segment & 报告错误并关闭流。\\
+\bottomrule
+\end{longtable}
+\section{附录 B：排序与完成规则摘要}
+\begin{longtable}{p{.27\linewidth}p{.31\linewidth}p{.31\linewidth}}
+\toprule 操作 & 本地完成的含义 & 关键约束\\\midrule\endhead
+RDMA Write & 本端 RNIC 已完成提交规定的发送处理。 & 远端数据可见性由写入交付决定；释放源缓冲区前等待本地完成。\\
+RDMA Read & 请求端已收到并放置完整响应。 & 保持请求端目标与响应端源在相关完成前有效。\\
+Send & 本端已完成发送处理；接收端在匹配未标记缓冲区后完成接收。 & 发送前必须有 ULP 流量控制保证可用接收缓冲区。\\
+Terminate & 终止正在进行；不保证送达。 & 后续未完成操作必须向 ULP 报错或取消。\\
+\bottomrule
+\end{longtable}
+\section{附录 C：贡献者与作者}
+原规范的主要作者为 Renato J. Recio、Bernard Metzler、Paul R. Culley、Jeff Hilland 与 Dave Garcia。RFC 5040 还列出 Uri Elzur、Hari Ghadia、Howard C. Herbert、Mike Ko、Mike Krause、Dave Minturn、Mike Penna、Jim Pinkerton、Hemal Shah、Allyn Romanow、Tom Talpey、Patricia Thaler、Jim Wendt、Madeline Vega 与 Claudia Salzberg 等贡献者。联系方式、版权声明和知识产权声明请参阅原文。
+\end{document}
