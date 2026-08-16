@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：64
-- 含 `00README.json`：49
-- 有本地候选 PDF：62
-- 含中文 PDF：54
-- 带源码包：40
-- 含 tracked files 的目录：61
+- 论文目录：65
+- 含 `00README.json`：50
+- 有本地候选 PDF：63
+- 含中文 PDF：55
+- 带源码包：41
+- 含 tracked files 的目录：62
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -37,6 +37,7 @@
 | colossal-auto | Colossal Auto | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 51 |
 | concur | CONCUR | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 33 |
 | context-folding | Context Folding | ✅ | paper.tex | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar | 34 |
+| darwin-godel-machine | Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 48 |
 | Deep-Learning-Workload-Scheduling-in-GPU-Datacenters-Taxonomy-Challenges-and-Vision | Deep Learning Workload Scheduling in GPU Datacenters Taxonomy Challenges and Vision | — | — | — | — | — | — | 15 |
 | dualpath | DualPath | ✅ | paper.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
 | eagle-3 | EAGLE-3 | — | — | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 17 |

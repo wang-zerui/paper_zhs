@@ -120,6 +120,7 @@ TITLE_OVERRIDES = {
     "hyper-parallel": "HyperParallel",
     "DualPath": "DualPath",
     "dualpath": "DualPath",
+    "darwin-godel-machine": "Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents",
     "KVPR": "KVPR",
     "kvpr": "KVPR",
     "LLM-viewer": "LLM Viewer",

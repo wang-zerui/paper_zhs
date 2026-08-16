@@ -10,6 +10,7 @@
 * [Catalyzer](papers/catalyzer.md)
 * [Colossal Auto](papers/colossal-auto.md)
 * [CONCUR](papers/concur.md)
+* [Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents](papers/darwin-godel-machine.md)
 * [DualPath](papers/dualpath.md)
 * [EAGLE-3](papers/eagle-3.md)
 * [EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty](papers/eagle-feature-uncertainty.md)
