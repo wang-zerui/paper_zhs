@@ -1,0 +1,45 @@
+\vspace{-0.3cm}
+\section{实现细节与未来方向}
+
+下面讨论 \sys 和晶圆级加速器当前的局限，并展望未来的解决方案。
+
+\mypar{硬件架构} 当前，\sys 的性能受到流水线并行所引入执行气泡的限制。若把单核本地内存增加 $5$--$6\times$，就可以不再使用流水线并行，转而像 vLLM 与 SGLang 一样完全采用张量并行。晶圆级芯片设计者已经沿这一方向推进。Cerebras WSE-3 保持相同的 NoC 配置，但提升了单核效率和本地内存；Tesla Dojo 则为每个核心配备 1MB 内存。
+
+\mypar{内存/计算比} LLM 解码要求接近 $1{:}1$ 的内存/计算比。然而，A100 等 GPU 的片上 SRAM 有限，必须频繁访问片外内存，因此 FP16 下的比例只有较差的 $1{:}312$。多 GPU 配置的大量 GPU 间通信会使这一问题进一步恶化。
+相比之下，Cerebras WSE-2 通过低延迟 NoC 把大部分模型权重映射到片上内存，获得接近理想的局部性，并趋近 $1{:}1$。要在基于网格的 NoC 上充分实现这种平衡，必须遵守 PLMR 模型；这使 \sys 的 TPR 能够以数量级优势超过基于 GPU 的系统。
+
+\mypar{处理可靠性问题} 当前，Cerebras WSE-2/3 由硬件处理故障，只向软件暴露按网格组织的健康核心，因此软件层无需显式处理。制造时还会内置冗余核心与链路，片上 SoC 在运行时动态重映射并绕过缺陷，从而以较低冗余成本保证最小的性能影响。与此同时，晶圆级芯片厂商近期报告其晶圆功能区域比例达到 93\%，高于商用 GPU 的 70--80\%~\cite{cerebras_defect_tolerance}，原因是每个核心的面积更小。我们在两年 WSE-2 部署期间观察到较高可靠性，证实这些容错机制在真实使用中的有效性。
+
+\mypar{多种模型架构} \sys 对 MoE 同样有益，因为 MoE 与稠密 LLM 共享 \gemm、\gemv 和基于移位的 KV cache 管理等关键算子。主要差别是注意力层与专家层之间的 all-to-all 通信，我们使用 WSE-2 的 NoC 多播操作实现该通信。卸载和稀疏注意力等针对稀疏模型的进一步优化，是未来的研究方向。
+
+\mypar{超越 Cerebras WSE} 尽管评测在 Cerebras WSE 上完成，PLMR 模型仍可推广到 Tesla Dojo 等新兴类网格架构；这些架构同样包含数十万个带本地内存的核心，并受到 NoC 路由约束。2D 环面或网格--交换机混合拓扑等变体也符合 PLMR。我们的 \gemm 与 \gemv 面向最坏情况下的 2D 网格设计，在这些平台上仍具竞争力。除片上网格外，Tenstorrent 核心级与板卡级网格中的芯片间网格互连也非常符合 PLMR。展望未来，台积电预计到 2027 年晶圆级集成密度将提高 $40\times$；这类进展进一步强化了我们方法的长期适用性。
+
+\vspace{-0.2cm}
+\section{相关工作}
+\vspace{-0.2cm}
+
+\mypar{深度学习框架与编译器}
+PyTorch、TensorFlow 和 XLA~\cite{pytorch,tensorflow,xla,flextensor,tvm,ansor,roller,rammer,welder,ladder} 等现有深度学习框架与编译器面向共享内存架构设计，并采用基于 tile 的“加载--计算--存储”计算模型。该模型在共享内存上有效，却忽略了 PLMR 设备的独特特性，因此在晶圆级 AI 芯片上效率较低。vLLM 和 TensorRT-LLM~\cite{vllm,tensorrt-llm} 等框架已经出现以支持现代 LLM，但它们仍依赖为共享内存架构设计的框架和编译器（例如 PyTorch~\cite{pytorch}），因此在晶圆级芯片上继承了相似局限。
+
+\mypar{分布式 GPU 与 TPU 系统} 理论上，可以把片上分布式内存架构视作一个分布式 LLM 系统，已有工作对此进行了研究~\cite{alpa,alpaserver,vllm,google2023efficiently,tensorrt-llm,loongserve}。然而，这些系统面向 GPU 或 TPU pod（最多数千个节点）设计，依赖能力更强的路由器，并且没有本地内存约束，因此与 PLMR 模型不匹配。这些方法与本文关注的片上扩展互为补充。
+
+\mypar{脉动阵列} Amazon Trainium 和 Google TPU 等 AI 加速器采用的脉动阵列架构~\cite{resa}，主要关注小型核心设计，而不是更大的晶圆级加速器。单个核心中的处理单元数量有限（通常最多数百个），因此它们不是 PLMR 设备，但可以与 \sys 互补。例如，Cerebras WSE 核心可以使用脉动阵列加速本地 GEMM。
+
+\mypar{数据流架构}
+以往研究探索了在考虑核心间连接的数据流架构上执行计算。TENET~\cite{tenet} 以数据流模式把计算映射到互连核心的空间与时间维度；DISTAL~\cite{distal} 支持用数据流方法调度分布式集群；SambaNova~\cite{sambanova} 结合模型并行与流水线并行来执行 DNN。然而，这些工作都未把计算扩展到晶圆级芯片。
+
+\mypar{晶圆级 allreduce} 近期研究~\cite{wafer-reduce} 已探索晶圆级 allreduce，但单次 allreduce 无法像 \sys 一样完整并行 GEMV，也不能支持完整 LLM 推理。此外，该工作是 \sys 所提出 K 树 allreduce 的一个特例。
+
+\vspace{-0.3cm}
+\section{结论}
+
+我们把本文视为探索晶圆级计算在 LLM 中潜力的一项基础工作。简洁而有效的 PLMR 模型揭示了重要机会，并指导我们开发出首个晶圆级 LLM 并行方案，以及可在晶圆级加速器上扩展的 GEMM、GEMV 算法。尽管当前晶圆级设备的软件栈仍有限制，本文方法在性能与能效上都取得了数量级提升。我们希望这项工作能促使研究者更加关注晶圆级计算，并推动 AI 走向更可持续的未来。
+
+\vspace{-0.3cm}
+\section{致谢}
+
+我们衷心感谢 shepherd Marco Canini 和 OSDI 审稿人富有洞见的反馈，这些意见显著改进了本文。我们也感谢 Yuqing Xia（微软）在本工作开发期间提供的宝贵意见。
+
+我们感谢 Edinburgh International Data Facility（EIDF）和 Edinburgh Parallel Computing Centre（EPCC）提供硬件资源，尤其感谢它们对 Cerebras WSE 系统访问的支持。感谢 Nick Johnson 协调访问，并感谢 Mark Parsons 支持硬件采购和本项目。
+
+最后，我们感谢 Cerebras 的 Leighton Wilson 与 Mathias Jacquelin 慷慨相助；他们耐心而详尽地回答了我们关于 CSL 与 Cerebras WSE 的许多问题。

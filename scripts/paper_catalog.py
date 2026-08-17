@@ -159,6 +159,7 @@ TITLE_OVERRIDES = {
     "molecular-structure-of-thought": "The Molecular Structure of Thought",
     "The Workload-Router-Pool Architecture for LLM Inference Optimization: A Vision Paper from the vLLM Semantic Router Project": "Workload Router Pool",
     "workload-router-pool": "Workload Router Pool",
+    "waferllm": "WaferLLM: Large Language Model Inference at Wafer Scale",
     "VISTA-Gym": "VISTA-Gym",
     "vista-gym": "VISTA-Gym",
     "Why Low-Precision Transformer Training Fails - An Analysis on Flash Attention": "Why Low-Precision Transformer Training Fails",

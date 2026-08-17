@@ -51,4 +51,5 @@
 * [Time Cost Benefits](papers/time-cost-benefits.md)
 * [Training Compute-Optimal Large Language Models](papers/training-compute-optimal-large-language-models.md)
 * [VISTA-Gym](papers/vista-gym.md)
+* [WaferLLM: Large Language Model Inference at Wafer Scale](papers/waferllm.md)
 * [Workload Router Pool](papers/workload-router-pool.md)

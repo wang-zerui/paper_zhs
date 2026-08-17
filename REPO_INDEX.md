@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-08-04 23:04:11 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-08-17 16:12:26 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：65
-- 含 `00README.json`：50
-- 有本地候选 PDF：63
-- 含中文 PDF：55
-- 带源码包：41
-- 含 tracked files 的目录：62
+- 论文目录：66
+- 含 `00README.json`：51
+- 有本地候选 PDF：64
+- 含中文 PDF：56
+- 带源码包：42
+- 含 tracked files 的目录：63
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -86,6 +86,7 @@
 | training-compute-optimal-large-language-models | Training Compute-Optimal Large Language Models | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 28 |
 | twin-router-bench | Twin Router Bench | ✅ | neurips_2026.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 34 |
 | vista-gym | VISTA-Gym | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 60 |
+| waferllm | WaferLLM: Large Language Model Inference at Wafer Scale | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 38 |
 | workload-router-pool | Workload Router Pool | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | The Workload-Router-Pool Architecture for LLM Inference Optimization: A Vision Paper from the vLLM Semantic Router Project-source.tar | 28 |
 
 ## Standalone source archives

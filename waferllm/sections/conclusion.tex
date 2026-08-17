@@ -1,0 +1,45 @@
+\vspace{-0.3cm}
+\section{Implementation Detail and Future Direction}
+
+We discuss the current limitations of \sys and wafer-scale accelerators and envision their future solutions:
+
+\mypar{Hardware architecture} The performance of \sys is currently constrained by execution bubbles caused by the need for pipeline parallelism. Increasing a core's local memory by 5-6$\times$ could eliminate the need for pipeline parallelism, enabling full tensor parallelism, as on vLLM and SGLang. Wafer-scale chip designers are already moving in this direction. Cerebras WSE-3 retains the same NoC configuration but improves per-core efficiency and local memory, while Tesla’s Dojo incorporates 1MB of per-core memory.
+
+\mypar{Memory-to-Compute Ratio} LLM decoding demands a near 1:1 memory-to-compute ratio. However, GPUs like A100 have limited on-chip SRAM, forcing frequent off-chip memory access and yielding a poor ratio of 1:312 (FP16). Multi-GPU setups exacerbate this due to heavy inter-GPU communication. 
+In contrast, Cerebras WSE-2 maps most model weights onto on-chip memory via a low-latency NoC, achieving near-ideal locality and approaching a 1:1 ratio. To fully realize this balance on mesh-based NoCs, adherence to the PLMR model is essential, enabling \sys to outperform GPU-based systems by orders of magnitude in TPR.
+
+\mypar{Handle reliability issues} Currently, Cerebras WSE-2/3 handles faults by hardware, only exposing healthy cores (organized in a mesh) to software, with no explicit handling required at the software level. Moreover, redundant cores and links are built in at fabrication, and the on-chip SoC dynamically remaps and reroutes around defects at runtime, ensuring minimal performance impact at a low redundancy cost. Meanwhile, wafer-scale chip makers recently reported a 93\% functional wafer area, higher than 70–80\% in commercial GPUs~\cite{cerebras_defect_tolerance}, due to the smaller area per core design. Over two years of WSE-2 deployment, we have observed high reliability, confirming the effectiveness of these fault-tolerance mechanisms in real-world use.
+
+\mypar{Various model architecture} \sys is also beneficial for MoE as it shares key operators with dense LLMs, including \gemm, \gemv, and shift-based KV cache management. The main difference is the all-to-all communication between attention and expert layers, which we implement using WSE-2's NoC multi-cast operations. Further optimizations for sparse models, such as offloading and sparse attention, are among our future research.
+
+\mypar{Beyond Cerebras WSE} While evaluated on Cerebras WSE, the PLMR model generalizes to emerging mesh-like architectures such as Tesla Dojo, which also feature hundreds of thousands of cores with local memory and constrained NoC routing. Variants like 2D torus or hybrid mesh-switch topologies also conform to PLMR. Our design for \gemm and \gemv targets worst-case 2D mesh and remains competitive across such platforms. Beyond on-chip meshes, chip-to-chip mesh interconnects, as seen in Tenstorrent’s core- and card-level meshes, also align well with PLMR. Looking ahead, advancements in wafer-scale integration, such as TSMC’s projected 40$\times$ density increase by 2027, further reinforce the long-term applicability of our approach.
+
+\vspace{-0.2cm}
+\section{Related Work}
+\vspace{-0.2cm}
+
+\mypar{Deep learning frameworks and compilers}
+Current deep learning frameworks and compilers, such as PyTorch, TensorFlow, and XLA~\cite{pytorch, tensorflow, xla,flextensor, tvm, ansor, roller, rammer, welder, ladder}, are designed for shared memory architectures and use a tile-based “load-compute-store” computation model. While effective for shared memory, this model ignores the unique characteristics of PLMR devices, making it inefficient for wafer-scale AI chips. LLM frameworks such as vLLM and TensorRT-LLM~\cite{vllm,tensorrt-llm} have emerged to support modern LLMs but rely on frameworks and compilers designed for shared memory architectures (e.g., PyTorch~\cite{pytorch}), inheriting similar limitations on wafer-scale chips.
+
+\mypar{Distributed GPU and TPU systems} The on-chip distributed memory architecture could theoretically be treated as a distributed LLM system, as studied in prior works~\cite{alpa, alpaserver, vllm, google2023efficiently, tensorrt-llm, loongserve}. However, such systems, designed for GPU and TPU pods (up to thousands of nodes), rely on more capable routers and lack local memory constraints, making them misaligned with the PLMR model. These approaches are complementary to our focus on on-chip scaling.
+
+\mypar{Systolic array} Systolic array architectures~\cite{resa}, used in AI accelerators such as Amazon Trainium and Google TPU, focus on the design of small cores rather than larger wafer-scale accelerators. With limited processing elements (usually up to hundreds) in a core, they are not PLMR devices but complement \sys. For example, a Cerebras WSE core could employ a systolic array to accelerate local GEMM operations.
+
+\mypar{Dataflow architectures}
+Prior research has explored computation on dataflow architectures that account for inter-core connections. TENET~\cite{tenet} maps computation spatially and temporally to connected cores in a dataflow pattern. DISTAL~\cite{distal} enables scheduling over distributed clusters using a dataflow approach. SambaNova~\cite{sambanova} combines model and pipeline parallelism for DNN execution. However, none of these works scale computation to wafer-scale chips.
+
+\mypar{Wafer-scale allreduce} Recent research~\cite{wafer-reduce} has investigated wafer-scale allreduce, but a single allreduce cannot fully parallelize GEMV or support full LLM inference as achieved by \sys. Additionally, this prior work is a specific instance of the K-tree allreduce proposed in \sys.
+
+\vspace{-0.3cm}
+\section{Conclusion}
+
+We envision this paper as a foundational step in exploring the potential of wafer-scale computing for LLMs. The simple yet effective PLMR model has revealed significant opportunities, guiding the development of the first wafer-scale LLM parallelism solution and scalable GEMM and GEMV algorithms for wafer-scale accelerators. Despite the limitations of the current software stack for wafer-scale devices, our approach achieves orders-of-magnitude improvements in both performance and energy efficiency. We hope this work inspires greater focus on wafer-scale computing and advances the path toward a more sustainable future for AI.
+
+\vspace{-0.3cm}
+\section{Acknowledgments}
+
+We sincerely thank our shepherd, Marco Canini, and the OSDI reviewers for their insightful feedback that greatly improved this paper. We are also grateful to Yuqing Xia (Microsoft) for her valuable input during the development of this work. 
+
+We acknowledge the hardware resources provided by the Edinburgh International Data Facility (EIDF) and the Edinburgh Parallel Computing Centre (EPCC), particularly their support in granting access to the Cerebras WSE systems. We thank Nick Johnson for coordinating access and Mark Parsons for supporting the hardware acquisition and our project.
+
+Finally, we appreciate the generous assistance of Leighton Wilson and Mathias Jacquelin from Cerebras for their patience and detailed responses to our many questions regarding CSL and the Cerebras WSE.

@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **50**
+- Papers: **51**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -68,4 +68,5 @@
 - [Time Cost Benefits](./papers/time-cost-benefits.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ftime_cost_benefits%2Ftime_cost_benefit_schematic.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/time_cost_benefits/time_cost_benefit_schematic.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/time_cost_benefits/time_cost_benefit_schematic.pdf)
 - [Training Compute-Optimal Large Language Models](./papers/training-compute-optimal-large-language-models.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ftraining-compute-optimal-large-language-models%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/training-compute-optimal-large-language-models/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/training-compute-optimal-large-language-models/main_zh.pdf)
 - [VISTA-Gym](./papers/vista-gym.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fvista-gym%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/vista-gym/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/vista-gym/main_zh.pdf)
+- [WaferLLM: Large Language Model Inference at Wafer Scale](./papers/waferllm.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fwaferllm%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/waferllm/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/waferllm/main_zh.pdf)
 - [Workload Router Pool](./papers/workload-router-pool.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fworkload-router-pool%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/workload-router-pool/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/workload-router-pool/main_zh.pdf)

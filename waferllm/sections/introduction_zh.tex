@@ -1,0 +1,42 @@
+\section{引言}
+\vspace{-0.3cm}
+
+大语言模型（LLM）推理是一类快速增长的工作负载。它包含两个阶段~\cite{flashdecoding++}：（i）\textit{预填充阶段}，处理输入 token（提示词），绝大多数周期用于通用矩阵乘法（GEMM）；（ii）\textit{解码阶段}，以自回归方式逐个生成 token，主要执行通用矩阵向量乘法（GEMV）。解码需要反复把整个 LLM 模型加载到片上内存，GEMV 占据了大部分周期。LLM 往往要生成大量 token，尤其是在测试时扩展场景中，例如 OpenAI-o1/o3~\cite{openaio1,openaio3} 和 DeepSeek-R1~\cite{deepseekr1}；因此推理受到 GEMV 延迟约束，在本质上受限于内存带宽。
+
+为突破内存带宽瓶颈，AI 加速器正日益采用晶圆级系统集成~\cite{tsmc-advanced-packaging}。这种方法把芯片面积扩展到一整片晶圆，最大可达到典型 GPU 裸片的 $100\times$，从而显著增加片上核心、内存与带宽。Cerebras WSE~\cite{wse} 和即将推出的 Tesla Dojo~\cite{dojo} 都是其中的例子。以 Cerebras WSE-2 为例，它集成了 850,000 个核心和 40GB 片上内存，片上内存容量是 GPU 的 $1{,}000\times$，并提供 22PB/s 内存带宽，是 GPU 的 $7{,}000\times$。台积电预计晶圆级系统集成将得到广泛采用，并指出其在性能、节能的裸片间通信和成本降低方面的优势。IEEE 同样预测，到 2027 年晶圆级计算将快速增长~\cite{tsmc-advanced-packaging}。晶圆级加速器已经投入真实部署，尤其用于模型服务。2025 年 2 月，Mixtral 和 Perplexity 采用晶圆级芯片，并在每美元 token 数上实现了与 GPU 相当的成本~\cite{perplexity,mistra}。G42 目前运营着完全配备晶圆级加速器的数据中心，Cerebras 也已获得重要商业合同~\cite{g42}。
+
+释放晶圆级加速器的潜力并不容易，因为现有 LLM 系统依赖 GPU 和 TPU 常见的\emph{共享内存架构}。晶圆级加速器则采用片上网络（NoC）设计，把数百万个带本地内存的核心互连成一种\emph{超大规模、基于网格的内存架构}。其规模远超片上交叉开关（例如 GraphCore IPU 的单跳 NUMA）、多插槽 NUMA~\cite{amd2023numa}，以及高密度 AI 集群（每个 pod 中有数百块 GPU）~\cite{tpu}。若不能充分应对这一内存架构的根本转变，直接把 T10~\cite{t10} 和 Ladder~\cite{ladder} 等最先进系统的设计应用到晶圆级设备，往往会产生极差的性能。
+
+为应对这些挑战，我们提出一种\emph{设备模型}，用来刻画晶圆级加速器的关键硬件属性，并突出其与共享内存设备之间的重要差异。借助该模型，我们可以评估现有 LLM 推理设计原则，识别其中不符合模型的部分，并确定需要采用新方法的位置。在该模型指导下，我们得以实现一项富有挑战性的系统设计：\emph{在单颗芯片上运行完整 LLM 推理}，尽量减少代价高昂的片外通信，并最大化片上内存带宽利用率。
+
+上述思路促成了首个晶圆级 LLM 推理系统 \sys，其贡献包括：
+
+\mypar{（1）晶圆级加速器的设备模型}
+我们提出 PLMR 模型\footnote{PLMR 可读作“Plummer”。}，它刻画了晶圆级加速器的关键硬件属性：
+（i）海量\textbf{并行核心（P）}：一片大晶圆上可以集成数百万个核心，系统必须有效划分 LLM 及其运算；
+（ii）高度非均匀的内存访问\textbf{延迟（L）}：跨核心数据访问存在显著差异，延迟差距最高可达 $1{,}000\times$，系统必须缓解这一问题；
+（iii）受限的单核本地\textbf{内存（M）}：每个核心只有数十 KB 到数 MB 内存，必须高效使用；
+（iv）有限的硬件辅助\textbf{路由（R）}：NoC 路由硬件受单核面积限制，只能支持有限条路由路径，例如 Cerebras WSE-2 上少于 $2^5$ 条。
+
+\mypar{（2）晶圆级 LLM 并行}
+我们为晶圆级加速器提出一种有效且符合 PLMR 的 LLM 并行策略。在预填充阶段，我们设计细粒度划分，以实现百万核心并行。在解码阶段，张量维度不足以继续划分，因此我们设计细粒度复制，以尽可能低的通信成本实现并行。由此，\sys 获得比基于 GPU 的方法规模更大、粒度更细的并行性（满足 PLMR 中的 P）。此外，我们用面向 PLMR 模型的新算法替代传统的 GPU GEMM 和 GEMV 算子（满足 L、M 和 R），并提出无需矩阵转置的张量放置策略，因为转置在网格 NoC 上代价很高（满足 L）。
+
+我们还为晶圆级设备设计了一种可扩展的 KV cache 管理方法。该方法采用新的 KV cache 移位机制，确保各核心均衡使用（满足 P 和 M），避免 GPU 上常见的 KV cache 拼接方法造成核心利用率倾斜。
+
+\mypar{（3）晶圆级 GEMM}
+我们提出可扩展的晶圆级 GEMM 算法 \gemm，用于加速预填充阶段。不同于传统分布式 GEMM 算法，\gemm 通过两个关键操作完整满足 PLMR：\emph{循环移位}与\emph{交错排列}。循环移位在保证算法正确性的同时，把本地内存用量限制在有界范围内（满足 M）。交错排列则尽量降低网格 NoC 上的通信延迟，从而有效减轻高度非均匀内存延迟（满足 L）与路由资源（满足 R）的开销。
+
+\mypar{（4）晶圆级 GEMV}
+我们提出可扩展的晶圆级 GEMV 算法 \gemv，用于加速解码阶段。与现有 GEMV 实现不同，\gemv 使用新的\emph{K 树 allreduce} 算法，在海量核心之间聚合本地 GEMV 结果。该算法使路由资源用量符合硬件限制（满足 R），并降低通信延迟（满足 L）。
+
+\vspace{0.2cm}
+\noindent
+我们在 Cerebras WSE 引擎上实现了 \sys：LLM 并行、\gemm 和 \gemv 约使用 7,000 行 CSL（一种类 C 编程语言），加载 LLM checkpoint、启动推理和制定执行并行策略约使用 2,000 行 Python。
+
+我们使用多种模型开展端到端 LLM 推理实验，包括完整的 LLaMA3-8B 和 LLaMA2-13B，以及 CodeLLaMA-34B 和 QWen2-72B 的若干层。结合晶圆级 LLM 并行、GEMM 和 GEMV 后，\sys 优于最先进（SOTA）系统：
+（i）比面向分布式片上内存架构海量核心的 SOTA 系统 T10~\cite{t10} 快 $100$--$200\times$；
+（ii）比面向共享内存架构的 SOTA 系统 Ladder~\cite{ladder} 快 $200$--$400\times$。
+
+微基准还表明，\gemm 比 Cerebras WSE 默认优化 GEMM——SUMMA~\cite{summa}，以及面向大规模网格超级计算机的 SOTA GEMM——Cannon~\cite{cannon} 快 $2$--$3\times$。\gemv 比 Cerebras 优化的 GEMV 快 $4$--$8\times$，比单块 A100 GPU 快 $606\times$。此外，\sys 的 cache 移位方法比 GPU 上的 KV cache SOTA（例如 PagedAttention~\cite{vllm}）最高可扩展 $400\times$。
+
+综合来看，Cerebras WSE-2 上的 \sys 比单块 A100 上的 SGLang 快 $30$--$40\times$。与通过 NVLink 和 RDMA 互连的多块 A100 上 SGLang 的最佳性能相比，\sys 的端到端速度快 $10$--$20\times$，能效高 $2.5\times$。从 GEMV 到完整 LLM，收益有所缩小，这是由当前软件、硬件和既有 LLM 模型设计的限制所致。我们预计，随着晶圆级 AI 计算走向成熟并逐步解决这些限制，其性能优势还会增强。
