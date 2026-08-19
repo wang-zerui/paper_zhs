@@ -7,6 +7,7 @@
 * [Baichuan M3](papers/baichuan-m3.md)
 * [BlitzScale](papers/blitzscale.md)
 * [ByteCheckpoint](papers/byte-checkpoint.md)
+* [CAKE: Compiler-Agent Co-Design for Frontier Kernel Evolution](papers/cake.md)
 * [Catalyzer](papers/catalyzer.md)
 * [Colossal Auto](papers/colossal-auto.md)
 * [CONCUR](papers/concur.md)

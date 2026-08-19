@@ -1,0 +1,1234 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[letterpaper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{colortbl}
+\usepackage{url}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{placeins}
+\usepackage{float}
+\usepackage{tikz}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks]{hyperref}
+
+% Table register: booktabs rules only, bold headers, tabularx columns sized to
+% the text block, and black!5 zebra striping. Column types keep the alignment
+% declarations out of the table bodies.
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\rowtint}{\rowcolor{black!5}}
+\newcommand{\thead}[1]{\textbf{#1}}
+% Median followed by its [min,max] range, for replicated measurements.
+\newcommand{\medrange}[2]{\mbox{$#1\,{\scriptstyle[#2]}$}}
+
+% List geometry transplanted from acmart, the class cm-draw's paper builds
+% with: a 4pt label separation and a 6.5pt description label box, with the item
+% body indented by \parindent + 2\labelsep + 6.5pt so a label never hangs to
+% the left of an adjacent indented paragraph. A description label narrower than
+% the hang sits in it; a wider one runs in and the body returns to the indent.
+\setlength{\labelsep}{4pt}
+\newlength{\listlabelwidth}
+\newlength{\listleftmargin}
+\setlength{\listlabelwidth}{6.5pt}
+\setlength{\listleftmargin}{\parindent}
+\addtolength{\listleftmargin}{2\labelsep}
+\addtolength{\listleftmargin}{\listlabelwidth}
+\setlist{leftmargin=\listleftmargin,labelsep=\labelsep,listparindent=0pt,
+  topsep=\smallskipamount,partopsep=0pt,parsep=0pt,itemsep=2pt}
+\setlist[itemize]{align=right,
+  labelindent=0pt,labelwidth=\dimexpr\listleftmargin-\labelsep\relax}
+\setlist[enumerate]{align=right,
+  labelindent=0pt,labelwidth=\dimexpr\listleftmargin-\labelsep\relax}
+\setlist[description]{font=\upshape\bfseries,labelwidth=\listlabelwidth,
+  labelindent=\dimexpr\listleftmargin-\labelsep-\listlabelwidth\relax}
+
+% Let the line-breaker add stretchable space in justified paragraphs that would
+% otherwise overflow the text block. 3em is the conventional setting; larger
+% values produce rivers.
+\setlength{\emergencystretch}{3em}
+
+% Listing style follows cm-draw's `codeminer' style: Python keywords in blue,
+% the schedule vocabulary in teal as a second keyword class, strings in amber,
+% line numbers, and top/bottom rules over a faint tint instead of a full box.
+\definecolor{cakeCodeBlue}{RGB}{34,82,145}
+\definecolor{cakeCodeTeal}{RGB}{20,112,112}
+\definecolor{cakeCodeString}{RGB}{154,83,20}
+\definecolor{cakeCodeAccent}{RGB}{112,48,140}
+
+\lstdefinestyle{cake}{
+  language=Python,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{cakeCodeBlue}\bfseries,
+  % listings' Python class 2 is its own built-in list; leave it unmarked so a
+  % stray built-in never borrows the schedule vocabulary's colour.
+  keywordstyle=[2]\color{black},
+  keywordstyle=[3]\color{cakeCodeTeal},
+  commentstyle=\color{black!55},
+  stringstyle=\color{cakeCodeString},
+  % Third class is the schedule vocabulary. The receiver `lm' is left plain: it
+  % appears on nearly every line, so colouring it drowns out the operations it
+  % calls.
+  morekeywords=[3]{role,pipeline,barrier,smem,tmem,view,tma_load,mma,wait,
+    fence_proxy,range},
+  % `lm.range' is the schedule's loop primitive, not Python's built-in, so take
+  % the token off class 2 to let class 3 claim it.
+  deletekeywords=[2]{range},
+  % The @cake decorator is the entry point the paper is named for, so it gets
+  % its own accent. A literate replacement scopes the accent to the decorator
+  % name and leaves the call parentheses in the body colour; a delimiter run to
+  % end of line would swallow them. Add an entry per decorator spelling.
+  literate={@cake.schedule}{{{\color{cakeCodeAccent}\bfseries @cake.schedule}}}{14},
+  backgroundcolor=\color{black!2},
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny\color{black!55},
+  numbersep=6pt,
+  frame=tb,
+  framerule=0.45pt,
+  rulecolor=\color{black!35},
+  xleftmargin=1.4em,
+  framexleftmargin=1.2em,
+  framexrightmargin=0.3em,
+  framesep=4pt,
+  aboveskip=0.6\baselineskip,
+  belowskip=0.4\baselineskip,
+  captionpos=b
+}
+\lstset{style=cake}
+
+\newcommand{\cake}{\textsc{Cake}}
+\newcommand{\cakeir}{\textsc{Cake IR}}
+\newcommand{\flashinferpr}[1]{%
+  FlashInfer PR~\##1%
+  \footnote{\href{https://github.com/flashinfer-ai/flashinfer/pull/#1}%
+    {github.com/flashinfer-ai/flashinfer/pull/#1}}%
+}
+\newcommand{\zihaonote}[1]{%
+  \par\noindent\textcolor{red}{\textbf{Zihao:} #1}\par%
+}
+
+\title{\textbf{CAKE}: \textbf{C}ompiler--\textbf{A}gent Co-Design\\
+for Frontier \textbf{K}ernel \textbf{E}volution}
+\author{%
+Zihao Ye\textsuperscript{1}\thanks{Equal contribution.}\quad
+Yingyi Huang\textsuperscript{1}\footnotemark[1]\quad
+Hongyi Jin\textsuperscript{2}\quad
+Bohan Hou\textsuperscript{2}\\
+Junru Shao\textsuperscript{1}\quad
+Zhongming Yu\textsuperscript{1}\quad
+Jinqi Chen\textsuperscript{1}\quad
+Meghan Cowan\textsuperscript{1}\\
+Shiyi Cao\textsuperscript{1}\quad
+Shanli Xing\textsuperscript{1}\quad
+Hanfeng Chen\textsuperscript{1}\quad
+Vinod Grover\textsuperscript{1}\\
+Tianqi Chen\textsuperscript{1,2}\quad
+Luis Ceze\textsuperscript{1}\\[0.6ex]
+\small
+\textsuperscript{1}NVIDIA\qquad
+\textsuperscript{2}Carnegie Mellon University%
+}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Work on GPU kernel agents and work on GPU programming languages have advanced
+separately, and the gap between them is where expert kernels are lost. Kernel
+agents treat the compiler as a fixed black box: they improve proposal, mutation,
+and ranking, but the environment returns only compiler errors, correctness
+outcomes, and end-to-end timing---signals that never say which program decision
+caused a synchronization failure, a hardware-contract violation, or a pipeline
+stall, and that cannot grow when a frontier workload exposes a missing
+capability. Meanwhile the languages an agent might write are not built for one.
+Tile-level DSLs hide the warp specialization, barrier choreography, and
+memory-tier placement that separate expert kernels from merely correct ones;
+low-level DSLs expose that control but demand a layout calculus that makes agent
+errors both likely and hard to localize. We present \cake{}, which co-designs
+the two. Agents author \cakeir{}, a typed, hardware-explicit schedule
+representation that gives fine-grained control without a layout algebra and
+carries enough information for a verifier and cost model to reason about a
+program before it is compiled; the harness answers with localized correctness
+and performance diagnostics and is itself a target of evolution, so
+recurring failures become new verifier rules, IR primitives, cost-model
+calibrations, and reusable tactics rather than one-off workarounds. Across
+matched implementation-hidden Flash-KMeans clean starts on B200 (three runs per
+representation), the best candidate at an 80-million-token budget reaches a
+median $1.144\times$ the tuned FlashML baseline with \cakeir{}, versus
+$0.928\times$ for direct CUDA/PTX.
+Beyond the clean-start benchmark, agent-generated Kimi Delta Attention reaches
+a $2.05\times$ geometric-mean speedup over official FlashKDA and is validated
+in end-to-end serving. Dispatcher-backed KNN and KMeans families improve
+performance by $1.42\times$--$2.12\times$ across more than 400 shapes, and four
+kernel changes are available as upstream PRs. \cake{} targets NVIDIA GPUs from
+Ampere through Blackwell and separates single-shape evolution from the
+generalization and dispatch stage required for library integration.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Coding agents can now write and revise GPU programs in settings where
+correctness and performance are measured automatically
+\cite{ouyang2024kernelbench,liao2025kernelevolve,dong2026kernelblaster,
+accelopt2025,autocomp2025,cheng2026kernelagent,dai2026cudaagent}. Most such
+systems still treat the programming environment as a fixed black box: the agent
+proposes code, compiles it, runs a numerical test, measures latency, and picks
+another edit. The loop works for local tuning, but a crash does not identify the
+violated safety or hardware condition, and one latency number does not explain
+which program decision limits performance.
+
+Expert kernel programmers work differently. They keep a compact model of the
+workload, reason over explicit hardware resources, and carry reusable rules
+between kernels. A compiler already holds most of the machinery needed to
+externalize that process---structured operation vocabularies, resource models,
+legality checks, static analyses, cost models, lowering rules. The question
+\cake{} asks is how to make that machinery agent-facing, and how to improve it
+when a frontier workload exposes a gap.
+
+\cake{} answers with three commitments. First, agents edit a typed IR rather
+than raw CUDA, so hardware decisions are inspectable before code generation.
+Second, the compiler returns localized correctness and performance diagnostics
+rather than a pass/fail bit, so cheap analysis filters candidates before they
+consume GPU time. Third, the harness is itself a target of evolution: repeated
+failures become verifier rules, calibration tasks, or new primitives, gated by
+corpus tests. \cakeir{} was designed bottom-up through agent-driven abstraction
+discovery over a corpus of production kernels, guided by the requirement that
+it reproduce the physical schedules and performance of expert-written kernels
+(Figure~\ref{fig:ir-evolution}; Appendix~\ref{app:ir-evolution}). The harness is
+likewise maintained primarily by agents under human merge gates.
+
+The system supports two entry points, which correspond to the two ways kernel
+work actually arrives. It can start from a production kernel in a library such
+as FlashInfer or CUTLASS and continue evolving that implementation; or, for a
+workload with no mature reference, it can start from a high-level description or
+a Triton implementation and let agents choose warp specialization, layout, and
+pipeline structure in \cakeir{} while the compiler verifies the program and
+generates CUDA.
+
+This paper reports on the system in that second regime as well as the first.
+\cake{} targets NVIDIA GPUs from Ampere through Blackwell, and its validated
+corpus covers dozens of kernel families---%
+attention and linear attention, dense, grouped, and quantized GEMM, MoE
+dataflows, normalization, quantization, Top-$K$, KNN and KMeans, and fused graph
+kernels. Section~\ref{sec:evaluation} evaluates repeated clean-start evolution
+against a tuned baseline, reports frontier-kernel synthesis on model
+architectures such as Kimi Delta Attention~\cite{kimi_linear2025}, Gated
+DeltaNet~\cite{gated_deltanet2025}, and sparse attention, and reports
+reproduction of established kernel families.
+Section~\ref{sec:generalization} then treats the step that benchmark numbers
+usually skip: turning a kernel tuned at one shape into a dispatcher-backed
+family that a serving library can call at any shape.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.99\linewidth]{figures/cake_overview_comparison.pdf}
+  \caption{Overview of \cake{}. Kernel evolution consumes structured compiler
+  evidence; compiler evolution is the outer loop.}
+  \label{fig:overview}
+\end{figure}
+
+\FloatBarrier
+
+\section{Program representation}
+\label{sec:representation}
+
+\cake{} exposes \cakeir{} as the agent-facing program representation and emits
+CUDA/PTX for execution. Structured analysis and performance modeling operate on
+\cakeir{}, while conventional sanitizer and profiler feedback comes from the
+generated code.
+
+\subsection{Bottom-up IR evolution}
+\label{sec:bottom-up-ir}
+
+\cake{} did not begin with a predefined \cakeir{} vocabulary. Its starting
+material was a corpus of production kernels together with hardware design
+principles. From those kernels, agents identify a recurring schedule or a
+missing capability, revise the IR and its compiler support, and then port and
+validate kernels against the revised system. The next kernel family---or a gap
+exposed by validation---starts the same cycle again. This loop both produced
+the current IR and continues to grow it (Figure~\ref{fig:ir-evolution});
+Appendix~\ref{app:ir-evolution} expands the process.
+
+\begin{figure}[!htbp]
+  \centering
+  \input{figures/ir-evolution-tikz.tex}
+  \caption{\cakeir{} evolves from kernels rather than a fixed language design.
+  The initial corpus enters once; the three-step loop repeats for each new
+  kernel family or capability gap.}
+  \label{fig:ir-evolution}
+\end{figure}
+
+\FloatBarrier
+
+\subsection{Explicit machine schedules in \cakeir{}}
+\label{sec:cake-ir}
+
+\cakeir{} records how the machine should be driven---which warps take which
+roles, which buffers are staged how deeply,
+which barrier gates which handoff, which instruction form consumes which
+operand. The corresponding division of labor is that a schedule states
+\emph{what} is to happen and lowering derives \emph{how}: barrier addresses,
+phase bits, TMEM offsets, descriptor encodings, and warp identity are all
+computed from the declarations rather than written out by the agent.
+
+A program combines explicit operations, declared resources, warp roles, and
+grid and pipeline configuration (Figure~\ref{fig:ir-example}). Four properties
+do the work. \emph{Type-checked vocabulary}: compute, memory movement,
+synchronization, math, and warp control use a fixed IR vocabulary rather than
+embedded C or PTX. \emph{Declared resources}: memory regions, synchronization
+state, and pipelines are declared once, so the IR knows the shape, dtype, and
+lifetime of every buffer. \emph{Explicit roles}: warp groups are named, and
+every cross-role handoff is visible rather than an implicit convention.
+\emph{Auto-derived metadata}: the mechanical consequences of those declarations
+are lowered, not authored.
+
+\begin{figure}[t]
+\begin{lstlisting}
+@cake.schedule()
+def fmha_fwd(lm, Q: LM.tma3d, O: LM.tma2d, seqlen_q: LM.i32):
+    # declare resources: named resources, not raw addresses
+    pool     = lm.smem(98304)
+    smem_q   = pool.view(offset=0, shape=(128,128), dtype=lm.bf16, stage=3)
+    tmem_acc = lm.tmem(cols=0, width=128, shape=(128,128), dtype=lm.f32)
+
+    # declare roles: warp groups with assigned work
+    load = lm.role(warps=[0])
+    mma  = lm.role(warps=[1])
+    pipe = lm.pipeline(stages=3)
+    q_full = lm.barrier(count=3, prod=[load], cons=[mma],
+                        init_count=1, pipeline=pipe)
+
+    with load:
+        for stage in lm.range(0, 3):
+            smem_q.tma_load(Q, coords=(0,0,stage), stage=stage, barrier=q_full)
+
+    with mma:
+        for stage in lm.range(0, 3):
+            lm.wait(q_full, stage=stage)
+            lm.fence_proxy()
+            lm.mma(tmem_acc, smem_q[stage], smem_q[stage], init=(stage == 0))
+\end{lstlisting}
+\caption{A \cakeir{} schedule fragment. Resources and roles are declared; the
+producer--consumer handoff is an explicit barrier; addresses, phases, and warp
+identity are derived by lowering.}
+\label{fig:ir-example}
+\end{figure}
+
+The payoff is that analyses can reason from explicit schedule decisions before
+code generation. The harness can therefore tie a finding to the affected
+resource, role, or stage rather than returning only a backend error or a hang.
+The language catalog, resource model, and design principles are in
+Appendix~\ref{app:cake-ir}.
+
+\paragraph{Layout.}
+\cake{} deliberately does not make layout a first-class abstraction. Rather
+than requiring agents to manipulate a layout algebra, \cakeir{} records storage
+and access decisions directly in the schedule. The compiler then checks that
+producer and consumer representations are compatible with the target hardware
+(Appendix~\ref{app:layout}).
+
+\subsection{Architecture and lowering}
+\label{sec:arch}
+
+The same schedule language targets NVIDIA GPUs from Ampere through Blackwell,
+so a role--barrier--pipeline schedule is portable in structure while instruction
+admission and lowering remain target-specific. \cake{} maps the attached GPU
+exactly, reports unsupported targets rather than silently substituting another
+architecture, and emits performance estimates only where target-specific
+calibration is available. The detailed device matrix and backend notes are
+deferred to Appendix~\ref{app:architecture}.
+
+\section{Compiler harness}
+\label{sec:harness}
+
+The harness is the agent-facing environment around \cakeir{}. Humans give
+high-level descriptions of the intended analyses; agents implement, maintain,
+and refine them under validation. During kernel evolution, cheap analyses rank
+and filter candidates before they reach expensive GPU runs.
+
+\subsection{Analysis and validation}
+\label{sec:analysis}
+
+\paragraph{Program safety and hardware conformance.}
+Before compilation, the harness checks the typed schedule for broad classes of
+synchronization, memory-safety, data-flow, resource, instruction, and data
+representation violations. These checks reject many candidates that are
+mathematically plausible but incompatible with the target execution model. A
+finding identifies the affected program region and the class of violated
+contract, giving the agent a useful repair target through a stable analysis
+interface.
+
+\paragraph{Numerical correctness.}
+For each workload, we compare the kernel and reference outputs across different
+shapes and input distributions. Final acceptance requires end-to-end evaluation
+in the corresponding target framework.
+
+\paragraph{Performance modeling.}
+A calibrated cost model estimates candidate performance and returns high-level
+bottleneck attribution and optimization guidance. The model is used to rank and
+filter candidates; on-device measurement and profiling remain the final ground
+truth.
+
+Table~\ref{tab:analysis-categories} summarizes the suite by externally visible function
+rather than by individual pass or implementation. The important interface is
+the contract: blocking checks reject candidates with a localized reason,
+reports describe likely performance limits, and hints suggest non-blocking
+optimizations.
+
+
+\begin{table}[H]
+  \caption{Analysis and validation categories exposed by the \cake{} harness.
+  Categories describe user-visible behavior rather than internal passes.}
+  \label{tab:analysis-categories}
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.06}
+  \begin{tabularx}{\linewidth}{@{}L{3.3cm}L{2.1cm}Y@{}}
+    \toprule
+    \thead{Category} & \thead{Disposition} & \thead{Purpose} \\
+    \midrule
+    \rowtint
+    Program safety & pre-compile gate &
+      Identify synchronization, ordering, and memory-use hazards \\
+    Hardware conformance & pre-compile gate &
+      Enforce supported resource, instruction, and architecture contracts \\
+    \rowtint
+    Data consistency & pre-compile gate &
+      Check data flow and producer--consumer representation compatibility \\
+    Schedule semantics & pre-compile gate &
+      Check structural invariants of the declared schedule \\
+    \rowtint
+    Numerical validation & execution gate &
+      Compare compiled outputs with an authoritative external reference \\
+    Performance analysis & report &
+      Estimate cost and identify broad bottleneck classes \\
+    \rowtint
+    Optimization guidance & hint &
+      Suggest promising revisions without blocking compilation \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\subsection{Compiler evolution}
+\label{sec:compiler-evolution}
+
+\cake{} evolves the compiler alongside the kernels. Kernel candidates,
+validation results, benchmarks, and failure reports provide evidence for
+proposing and validating compiler changes.
+
+Compiler evolution follows two complementary paths
+(Figure~\ref{fig:orchestration}).
+In the first, agents inspect production kernels and hardware
+documentation to find missing Blackwell patterns---new instruction forms,
+resource types, descriptor variants, synchronization idioms---and formulate
+compiler change proposals. Each proposal is checked against the \cakeir{} design
+principles, including performance transparency and verification-friendliness,
+before implementation. In the second, agents use feedback from failed
+candidates---sanitizer reports, failure cases, correctness mismatches, debugging
+logs---and distill recurring or high-cost failure modes into new analyses: an
+opaque runtime crash becomes a verifier rule, a repeated illegal lowering
+pattern becomes a static check, a systematic misprediction becomes a
+calibration target.
+
+The two paths are coupled. New primitives expose additional hardware facts to
+the compiler, enabling stronger analysis; new analyses in turn constrain the
+design space for future primitives. Compiler changes are test-gated across the
+kernel corpus, because a primitive and its analyses must evolve together: syntax
+without effects and legality rules makes the IR less analyzable, and a new
+verifier rule without corpus validation can reject valid kernels.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/compiler_harness.pdf}
+  \caption{Evidence-driven compiler evolution. Corpus and runtime evidence
+  drive validated compiler changes.}
+  \label{fig:orchestration}
+\end{figure}
+
+\section{Agent workflow}
+\label{sec:workflow}
+
+The external workload contract is the stable authority. A run has four stages:
+generate structurally distinct \cakeir{} candidates; filter them with IR
+construction checks, verifier hard gates, and cost-model ranking before spending
+GPU time; evaluate survivors against the external oracle with benchmarking and
+profiler evidence; and route the resulting evidence to the candidate, verifier,
+cost model, or IR vocabulary according to the diagnosis. The workload contract
+fixes the shapes, oracle, tolerances, hardware, and permitted references, while
+retained results make decisions auditable and recurring findings reusable.
+
+All reported agent tasks use GPT-5.6-sol \cite{openai2026gpt56} at reasoning
+effort \texttt{xhigh}. Holding the model and agent scaffold fixed makes the
+comparisons in Section~\ref{sec:evaluation} attributable to the environment
+rather than to model capability.
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+The evaluation asks three questions: whether the compiler harness can drive
+repeated clean-start evolution past a tuned baseline, whether \cake{} can
+synthesize frontier kernels without low-level implementation references, and
+whether it can reproduce expert kernels against state-of-the-art baselines.
+
+\paragraph{Protocol.}
+All measurements use on-GPU correctness checks and CUPTI timing on B200, with
+the L2 cache flushed before each timed sample. Each reported candidate is
+compiled, checked for correctness, and benchmarked at the listed shape.
+
+The replicated clean-start runs fix the coding agent and scaffold, model and
+reasoning effort, task statement, correctness oracle, benchmark harness, and
+single target shape. The Flash-KMeans runs use an isolated B200 clean-start
+environment that provides the task specification, correctness oracle, and
+benchmark interface while withholding low-level target implementations. The
+treatment arm authors typed \cakeir{}; the control arm authors CUDA C++ and
+inline PTX directly. We report provider-token consumption and active evolve
+time. Table~\ref{tab:kmeans-cleanstart} summarizes three matched runs per arm at
+the 80-million-token budget, while
+Figure~\ref{fig:clean-start-evolution-token-performance} shows their eligible
+performance checkpoints. Summary entries use median
+$[\mathrm{min},\mathrm{max}]$; detailed stopping and timing accounting is
+retained in the artifact.
+
+\paragraph{Reference access.}
+Reference access depends on the question. For clean-start and frontier-kernel
+synthesis, agents may inspect the mathematical specification, evaluation
+contract, correctness oracle, and high-level code, but not low-level target
+implementations such as CUDA, PTX, SASS, or equivalent generated source. Those
+references already encode the scheduling decisions the experiment asks the
+agent to discover. An external implementation may still be executed through the
+benchmark harness as a black-box performance baseline; its internals remain
+unavailable to the agent. For known-kernel reproduction, the agent may inspect
+the reference. The Flash-KMeans restriction was enforced in isolated
+clean-start environments and audited afterward. The direct CUDA/PTX arm changes
+the authored representation, not the reference policy: it may write low-level
+code but may not inspect an existing target implementation.
+
+\paragraph{Flash-KMeans clean-start workload.}
+To test repeatability from an implementation-hidden clean start, we use
+Flash-KMeans
+\cite{Yangetal2026FlashKMeans}, an exact $k$-means workload motivated by
+semantic-aware token permutation in Sparse VideoGen2
+\cite{Yangetal2025SparseVideoGen2}. A Lloyd iteration is dominated by two BF16
+kernels accounting for more than 95\% of end-to-end time: \texttt{assign},
+which computes squared Euclidean distances from each token to all $K$ centroids
+and returns an arg-min, and \texttt{centroid\_update}, which reduces tokens
+within each cluster into per-cluster sums and counts. The two have different
+profiles---\texttt{assign} is a compute-bound BF16 GEMM-and-reduction kernel,
+while \texttt{centroid\_update} is bandwidth- and
+atomic-contention-sensitive. We focus on \texttt{assign}, which exercises the
+tensor-core pipeline and scalar epilogue at $B{=}32$, $N{=}65{,}536$,
+$K{=}1024$, and $D{=}128$ with BF16 inputs and FP32 accumulators. All runs use
+the same model, oracle, and benchmark. Performance is normalized to the tuned
+FlashML KMeans Triton implementation, measured at $0.938$\,ms.
+
+\begin{table}[H]
+  \caption{Matched three-run Flash-KMeans clean-start comparison on B200.}
+  \label{tab:kmeans-cleanstart}
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{3pt}
+  \renewcommand{\arraystretch}{1.12}
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    \thead{Representation} &
+      \thead{\shortstack{Plateau\\by 80M}} &
+      \thead{\shortstack{Active\\evolve (h)}} &
+      \thead{\shortstack{Best at\\80M}} \\
+    \midrule
+      \cakeir{}
+      & 3/3
+      & \medrange{1.89}{1.02,2.33}
+      & \medrange{1.144}{1.041,1.205} \\
+      Direct CUDA/PTX
+      & 0/3
+      & \medrange{3.73}{3.59,4.34}
+      & \medrange{0.928}{0.852,1.151} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Trajectory.}
+Figure~\ref{fig:clean-start-evolution-token-performance} complements the
+terminal summary in Table~\ref{tab:kmeans-cleanstart} by showing when gains
+arrive. The \cakeir{} mean crosses the tuned FlashML baseline by 55 million
+tokens and continues to improve, while the direct CUDA/PTX mean remains below
+baseline at the 80-million-token cutoff.
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics
+    {figures/flash_kmeans_cleanstart_three_run.pdf}
+  \caption{Flash-KMeans fixed-shape clean-start attainment on B200. At each
+  5-million-token budget from 10M through 80M, every run contributes its best
+  validated speedup so far. Curves show three-run means, bands show run
+  minimum--maximum, and the horizontal line is the tuned FlashML K-means
+  baseline.}
+  \label{fig:clean-start-evolution-token-performance}
+\end{figure}
+
+Across the matched runs, \cakeir{} meets the prespecified plateau criterion in
+3/3 runs by 80 million tokens, versus 0/3 for direct CUDA/PTX. Its median best
+attainment is $1.144\times$ the tuned FlashML baseline, versus $0.928\times$,
+with median active evolve time of 1.89 versus 3.73 hours.
+
+
+\FloatBarrier
+\subsection{Frontier-kernel synthesis}
+\label{sec:eval-frontier}
+
+A kernel is frontier here in the operational sense that the agent must discover
+its physical schedule without inspecting a low-level target implementation.
+Existing implementations may still serve as black-box evaluation baselines.
+This is the regime a co-evolving IR should help most, because the search cannot
+be anchored to a known-good design, and it is also the regime where the harness
+is most exposed, since a missing capability appears as a schedule the agent
+cannot express at all.
+
+\paragraph{Emerging model architectures.}
+Kimi Delta Attention (KDA) is the clearest case. Official FlashKDA is used only
+as a black-box timing baseline; its source and generated code are not provided
+to the agent. A FlashKDA-compatible prefill covers fixed, packed-variable, and
+tail inputs and reaches a $2.05\times$ geometric-mean speedup over that baseline
+across six B200 BF16 shapes. It is bitwise correct on its validation contract
+and was verified in end-to-end Kimi-K3 serving under SGLang. The generated CUDA
+is available in
+\flashinferpr{4262}, so downstream users take on no dependency on \cake{}.
+Separate decode paths reach a $1.14\times$ geometric mean over upstream
+FlashInfer across 30 public-API shapes (\flashinferpr{4279}). Unlike a GEMM with
+an epilogue, KDA contains a recurrent state that must remain live across chunks,
+making it a useful test of the schedule representation. Appendix~\ref{app:kda-evolution} reports the corresponding two-phase
+source-session trajectory.
+
+Against FlashInfer, the Gated DeltaNet prefill and speculative-decode paths
+improve performance while preserving the model's recurrent state. MiniMax
+sparse attention further shows that the same representation supports
+sparse-attention families across prefill and decode paths. These are dispatch
+families rather than single kernels: alternative physical schedules remain
+separate \cakeir{} programs behind one logical entry point.
+
+\paragraph{Reference-guided production evolution.}
+TinyGEMM provides a complementary production case to the clean-start frontier
+experiments above. Starting from FlashInfer's TensorRT-LLM-derived small-$M$
+BF16 kernel, the agent produced an adaptive family of shallow and deep
+pipelines, including PDL variants and batch sizes below eight.
+\flashinferpr{4274} reports an 18--23\% geometric-mean kernel-time reduction
+across 35 canonical shapes and a broader regression suite.
+Greedy decoding on B200 and GB300 remained bitwise-identical for GPT-OSS-20B
+and GPT-OSS-120B; a separate SGLang GPT-OSS-120B experiment reported up to
+7.6\% higher output throughput at concurrency 128 on TP1 and differences
+within measurement noise on TP4. Appendix~\ref{app:tinygemm-evolution} reports the preceding four-shape search
+and targeted small-shape follow-up.
+
+\paragraph{Communication-rich megakernel evolution.}
+The original Alpha-MoE implementation \cite{alpha_moe2025} targeted Hopper.
+Starting from that implementation, \cake{} agents successfully rewrote its W8A8
+fused MoE megakernel for Blackwell. The resulting implementation tests whether
+the evolving compiler can express the data exchange around tensor-core
+computation, not only the computation itself. It fuses routed gather, two
+projections, activation, requantization, and route-weighted output accumulation
+into one device program.
+Against FlashInfer's TensorRT-LLM-derived pre-routed API, its end-to-end
+API-level speedups are $6.204\times$ at $N{=}256$ and $4.025\times$ at
+$N{=}512$. A GPU-span remeasurement gives $1.215\times$ and $1.170\times$,
+respectively, isolating the improvement in effective GPU execution. The larger
+API-level gains additionally reflect fewer scheduling gaps through
+launch/schedule fusion and simpler workspace handling: the reference launches
+five GPU activities, whereas Alpha-MoE uses an output reset and one megakernel.
+The corresponding FlashInfer contribution is \flashinferpr{4287}.
+Appendix~\ref{app:alphamoe-evolution} reports the normalized rewrite trajectory,
+whose denominator is the initial correct \cake{} checkpoint rather than
+TensorRT-LLM.
+
+\FloatBarrier
+\subsection{Known-kernel reproduction}
+\label{sec:eval-known}
+
+To validate production-quality output, we also target known operator families
+with state-of-the-art baselines on modern LLM execution paths: attention
+forward/backward and decode, low-precision GEMM, and MQA/MLA logits and decode
+kernels. The references come from TensorRT-LLM \cite{tensorrtllm}, CUTLASS
+\cite{cutlass}, DeepGEMM \cite{deepgemm2025}, FlashAttention-4
+\cite{zadouri2026flashattention4algorithmkernelpipelining}, and FlashInfer
+\cite{flashinfer}. These cases test a different question from frontier-kernel
+synthesis: when expert structure already exists, can the co-evolved harness help
+agents preserve correctness while matching or improving highly optimized
+kernels? The comparison itself---the kernel set, the listed reference for each
+variant, and the evaluation shape---is fixed, so a rerun changes the values, not
+the claim under test. Appendix~\ref{app:known-kernel-details} reports the full
+per-kernel matrix, including measured shapes, relative performance, and audited
+implementation size (Table~\ref{tab:known-kernel-loc}).
+
+
+Across the eleven currently measured fixed comparisons, ten entries meet or
+exceed the listed reference, and the remaining one reaches 96.5\% of its
+reference. The strongest results are the two MQA indexers at roughly
+$1.27\times$. All comparisons pass their kernel-specific correctness gates and
+use median CUPTI GPU span.
+
+Two effects shape how these results should be read. Variants that land below
+their reference generally reflect compiler-integration maturity rather than a
+different algorithmic target: where a feature a kernel wants is still being
+integrated into the compiler and code generator, the submitted artifact uses
+the closest supported strategy. Conversely, the strongest indexer wins are not
+faithful transcriptions of the reference kernels. During porting, the agent
+explored optimizations absent from the original implementation and retained
+variants that passed correctness and benchmarking, so the above-parity entries
+reflect search rather than transcription fidelity alone.
+
+The line-count columns are descriptive rather than a cross-language
+productivity or readability metric. Every \cakeir{} implementation in the table
+is shorter than its audited reference device core, but the languages and
+counting scopes differ. The comparison shows only that the evaluated hardware
+schedules can be represented compactly in \cakeir{} while retaining the
+decisions needed for analysis and lowering.
+
+\subsection{Kernel portfolio}
+\label{sec:eval-portfolio}
+
+The preceding evaluations do not convey the breadth of what the harness now
+sustains. The validated corpus contains more than 400 static and compile cases
+and 399 GPU correctness cases across roughly 28 families, including attention,
+dense and sparse GEMM, MoE, quantization, normalization, state-space models,
+KNN, and KMeans. It includes architecture-specific paths from Ampere through
+Blackwell.
+
+Beyond the frontier kernels of Section~\ref{sec:eval-frontier}, the corpus's
+other distinguishing property is composition. Because roles, barriers, and
+buffers are declared rather than implied, schedules that would normally be
+separate kernels can be expressed as one device program. BatchAttention combines
+decode and prefill work, while the Alpha-MoE and mega-MoE families fuse routing,
+expert computation, and output accumulation without materializing intermediate
+results. The corpus also contains more than 100 TensorRT-LLM ports across
+attention, MLA decode, and MoE kernels. The Alpha-MoE W8A8 kernel, originally
+written for Hopper, was rewritten by \cake{} agents for Blackwell, illustrating
+that schedule structure can survive even when target instructions change.
+
+The four upstream changes cover KDA prefill, KDA decode, TinyGEMM2, and
+Alpha-MoE.
+
+\section{From a tuned shape to a library}
+\label{sec:generalization}
+
+Everything to this point optimizes a shape. A library takes whatever shape the
+caller passes. Closing that gap is not a matter of running the inner loop on
+more shapes; it is a separate stage with a different objective, a different
+ranking signal, and a different failure mode, and \cake{} treats it as such.
+
+\paragraph{Separate objectives.}
+An exact shape gives the inner loop a clean denominator and permits aggressive
+specialization. Scoring that loop on broad coverage would weaken this signal.
+Generalization therefore begins only after strong per-shape seeds exist and is
+scored on dispatcher-inclusive performance over a fixed workload. Incorrect or
+slow seeds return to the inner loop rather than being hidden behind routing.
+
+\paragraph{Building and validating portfolios.}
+The generalization stage groups measured seeds into shape buckets, produces
+specialized or shared variants, and orders their guards behind an explicit
+fallback. Tuning may change implementation parameters but not the input shape.
+Before reporting an aggregate, validation covers representative and held-out
+inputs, boundary and tail cases, overlapping or missing guards, and the
+fallback path.
+
+\paragraph{Preventing evaluation leakage.}
+The valid shape domain is declared before tuning. Dispatcher predicates may
+partition that domain, but they may not introduce convenient new evaluation
+rows. Coverage expands through deterministic unseen shards of the same source.
+This separation prevents the dispatcher from being tuned on the set used to
+claim generalization.
+
+\paragraph{What this looks like in the corpus.}
+Several of the kernels in Section~\ref{sec:eval-frontier} are already portfolios
+rather than single schedules. KNN build uses coarse outer families with
+shape-specific routes within them, whereas KMeans dispatches to a smaller set of
+final-route buckets. Attention portfolios similarly route distinct decode and
+prefill schedules behind one logical entry point. The route-level breakdown
+appears in Appendix~\ref{app:dispatcher-details}
+(Figure~\ref{fig:dispatcher-portfolios}).
+
+The classic machine-learning workloads give the cleanest read on what the stage
+buys, because their portfolios are large enough that a single shape cannot carry
+the result. On GB200, the generalized KNN build, KNN search, and KMeans
+implementations contributed to FlashLib achieve dispatcher-inclusive results.
+We report $G_{\mathrm{span}}$, the unweighted geometric mean of per-shape
+speedups, where each speedup is the reference median CUPTI GPU span divided by
+the \cake{} median CUPTI GPU span. The $G_{\mathrm{span}}$ values are
+$1.418\times$, $2.116\times$, and $1.803\times$ across 112, 198, and 124 shapes,
+respectively, with no incorrect outputs and recall 1.0 for KNN. These
+full-portfolio results answer a different question from the three-run,
+single-shape Flash-KMeans clean-start cohort in
+Table~\ref{tab:kmeans-cleanstart}: the former evaluate complete shape sets after
+dispatch, whereas the latter evolves one exact shape. Because the measurements use
+different hosts, shape distributions, baselines, and protocols, their difference
+is not, by itself, a measured cost of generalization.
+
+One policy limits the practical cost of generalization. The stage reuses a
+single physical schedule across as much of the shape domain as it can, and
+introduces another only when the domain requires a material schedule change.
+Routing complexity must be justified by measured workload gain. Because each
+route is a separate \cakeir{} program, alternatives remain independently
+analyzable and benchmarkable.
+
+\section{Related work}
+\label{sec:related}
+
+\paragraph{GPU programming systems.}
+Existing DSLs fall into two camps, both awkward for agent-driven kernel
+development. High- and mid-level tile DSLs---Triton \cite{tillet2019triton},
+Helion \cite{helion2026}, TileLang \cite{ye2025tilelang}, cuTile
+\cite{cutile2026}---hide hardware behind tile abstractions and often automatic
+scheduling, but that opacity prevents an agent from expressing the warp
+specialization, barrier choreography, and memory-tier placement that separate
+expert kernels from merely correct ones. Low-level DSLs such as CuTe DSL
+\cite{cutedsl2025} expose hardware control but demand domain-specific expertise
+like layout algebra, which is a substantial learning burden and produces brittle
+code when layout choices are wrong. Gluon \cite{gluon2026} sits between the two,
+reusing Triton's compiler stack while exposing lower-level control over layouts,
+memory movement, and asynchrony. \cake{} addresses the gap by co-designing the
+IR \emph{with} agents: \cakeir{} gives fine-grained hardware control without
+requiring a layout calculus, and it evolves---new primitives when agents find
+inexpressible patterns, refined passes when they hit new bug classes,
+recalibrated cost models when predictions fail.
+
+\paragraph{Compiler analysis and scheduling.}
+TVM \cite{chen2018tvm}, XLA \cite{xla2017}, MLIR \cite{lattner2021mlir},
+TensorIR \cite{feng2023tensorir}, Ansor \cite{zheng2020ansor}, and MetaSchedule
+\cite{shao2022metaschedule} structure programs for analysis and optimization.
+Graphene \cite{hagedorn2023graphene,hagedorn2026time}, Twill
+\cite{soi2024twill}, and Tawa \cite{chen2025tawa} model asynchronous GPU
+execution, pipelining, or warp specialization. \cake{} shares the principle that
+structured programs enable useful analysis, but places compiler findings inside
+an agent evolution loop and lets recurring kernel evidence evolve the harness.
+
+\paragraph{Kernel agents.}
+KernelBench \cite{ouyang2024kernelbench} established a common evaluation setting
+for translating high-level operators into efficient kernels. Several systems
+use a human-designed loop in which an LLM revises kernels from compilation,
+correctness, or profiling feedback
+\cite{accelopt2025,autocomp2025,cheng2026kernelagent}. KernelBlaster
+\cite{dong2026kernelblaster} adds a persistent, retrievable CUDA knowledge base
+populated from prior optimization experience. KernelEvolve
+\cite{liao2025kernelevolve} and EvoEngineer
+\cite{guo2025evoengineermasteringautomatedcuda} support evolutionary search over
+kernel candidates. AVO \cite{chen2026avo}
+replaces fixed mutation and crossover heuristics with autonomous coding agents
+as evolutionary variation operators. K-Search \cite{cao2026ksearch} separates
+planning from implementation and uses an LLM world model to guide search.
+AutoTriton \cite{li2025autotriton} trains a Triton model with supervised
+fine-tuning and reinforcement learning. CUDA Agent \cite{dai2026cudaagent}
+scales agentic reinforcement learning for CUDA generation and optimization.
+These methods evolve the search process, accumulated memory, or model weights
+while retaining a chosen DSL and evaluation environment. \cake{}
+targets that complementary layer: it changes the representation being searched
+and the structured compiler evidence returned to the agent.
+
+\paragraph{Evolving systems.}
+FunSearch and AlphaEvolve
+\cite{romeraparedes2024funsearch,novikov2025alphaevolve} use population-based
+evolutionary search with LLM-generated program mutations. Automated Design of
+Agentic Systems \cite{hu2025automated} uses a meta-agent and an archive of prior
+discoveries to iteratively propose agent implementations in code. The Darwin
+G{\"o}del Machine \cite{zhang2026darwingodelmachineopenended} iteratively modifies coding-agent
+implementations, empirically evaluates each variant, and retains variants in an
+open-ended archive. Meta-Harness
+\cite{lee2026metaharnessendtoendoptimizationmodel} optimizes the code around a
+fixed LLM. The self-defining-systems
+agenda \cite{anderson2025sds} more broadly considers AI-operated systems that can
+change their own mechanisms and abstractions. \cake{} differs in the object
+evolved: the coding agent and foundation model remain fixed, while recurring
+kernel evidence drives changes to a domain-specific compiler harness: its IR
+vocabulary, analyses, and cost calibration, under corpus tests and predefined
+merge gates.
+
+\section{Discussion and conclusion}
+\label{sec:discussion}
+
+\cake{} now targets NVIDIA architectures from Ampere through Blackwell. The
+schedule language, role model, and analysis substrate carry across those
+targets, while instruction forms, legality rules, and cost anchors remain
+architecture-specific. That cost is the honest measure of transfer. It remains
+unmeasured for non-NVIDIA targets, where the backend lowering path would also
+have to be rebuilt. Coverage is uneven: most performance evidence is B200, and
+the timing model is calibrated only for B200 and H100 and declines to predict
+elsewhere. Static analyses and performance models remain intentionally
+incomplete---they rank and filter during evolution while GPU execution stays
+ground truth
+(Appendix~\ref{app:soundness})---and compiler evolution is still human-guided at
+merge gates.
+
+\cake{} treats the compiler environment as an evolving collaborator for kernel
+agents. \cakeir{} exposes hardware decisions to structured analysis, and the
+compiler-evolution loop turns recurring failures into reusable compiler
+knowledge. We hope this encourages further work on compiler evolution and
+compiler--agent co-design.
+
+{\small
+% unsrtnat numbers references in order of first citation; sort&compress keeps
+% multi-key groups ascending and collapses runs into ranges.
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+}
+
+\appendix
+
+\section{IR abstraction evolution process}
+\label{app:ir-evolution}
+
+Figure~\ref{fig:ir-evolution} summarizes the feedback loop that produced
+\cakeir{} without a predefined language vocabulary. This appendix expands that
+agent-driven abstraction-discovery process.
+
+\begin{enumerate}
+  \item \textbf{Corpus collection.} High-quality CUDA kernels are collected from
+  production libraries \cite{alpha_moe2025,cutlass,bentz2025cutile,
+  deepgemm2025,zadouri2026flashattention4algorithmkernelpipelining,
+  Yangetal2026FlashKMeans,flashinfer,guo2025sonicmoeacceleratingmoeio,
+  ye2025tilelang}. Kernels originally written in other DSLs are first translated
+  to CUDA with inline PTX by coding agents.
+  \item \textbf{Abstraction extraction.} Agents analyze the corpus and summarize
+  recurring patterns---barrier choreography, pipeline staging, warp-role
+  partitioning, TMA descriptor setup, TMEM accumulator lifecycles---into
+  candidate abstractions.
+  \item \textbf{Hardware-informed design.} Human expertise biases the
+  abstraction toward the Blackwell programming model: TMEM as a first-class
+  resource, warp specialization as the primary parallelism idiom, asynchronous
+  barriers as the synchronization primitive, cluster-scoped operations for
+  multi-SM coordination.
+  \item \textbf{Principle-driven iteration.} Each candidate is validated against
+  the eight principles in Appendix~\ref{app:cake-ir}; violations are refined or
+  rejected.
+  \item \textbf{Port-driven expansion.} New kernels are continuously ported.
+  Each port either succeeds, validating the abstraction, or reveals a gap,
+  triggering a proposal to extend the IR or its lowering.
+\end{enumerate}
+
+The process is ongoing: every new kernel family stress-tests the IR and drives
+further evolution.
+
+\section{\cakeir{} design and language constructs}
+\label{app:cake-ir}
+
+\subsection{Design principles}
+
+\cakeir{} is guided by eight design goals.
+
+\begin{description}
+  \item[P1 Ergonomic.] Keep the editing model familiar to NumPy/PyTorch users
+  and avoid unnecessary destination-passing or grid bookkeeping.
+  \item[P2 Performance-transparent.] Keep performance-relevant hardware
+  decisions visible and lowering behavior inspectable.
+  \item[P3 Canonical.] Prefer one canonical form for each operation over
+  equivalent alternative spellings.
+  \item[P4 Statically type-checked.] Use typing rules to constrain operation
+  lowering and reject ill-typed programs during construction.
+  \item[P5 Analysis-friendly.] Expose the information required by the supported
+  static analyses.
+  \item[P6 Test-gated.] Evaluate IR changes against the kernel-matrix tests for
+  static analysis and compilation.
+  \item[P7 Analysis-consistent.] Accompany changes to the IR data model with
+  corresponding analysis updates.
+  \item[P8 Hardware-grounded.] Document the intended hardware behavior of each
+  operation.
+\end{description}
+
+P5 and P7 keep new primitives amenable to static analysis; P6 guards against
+regressions as the IR evolves; P2 and P8 keep the mapping to hardware legible to
+humans and agents alike. This serves \cake{}'s goal of inspectable, reusable
+artifacts---a framing related to Tao's observation, on AI-generated
+mathematical proofs, that
+abundance of generation shifts the bottleneck from producing artifacts to
+verifying and understanding them \cite{tao2026digestion}.
+
+\subsection{Capability classes}
+
+\cakeir{} groups its operation vocabulary into four broad classes.
+
+\begin{description}
+  \item[Compute.] Matrix, elementwise, and reduction operations across the
+  precision modes supported by the target.
+  \item[Memory movement.] Explicit transfers among global and on-chip memory
+  tiers, including asynchronous and collective transfer patterns.
+  \item[Synchronization.] Ordering and coordination across roles, pipeline
+  stages, and hardware scopes.
+  \item[Control and scheduling.] Warp-role assignment, pipeline management,
+  persistent execution, and multi-block coordination.
+\end{description}
+
+\subsection{Declarative resource model}
+
+Programs declare five broad kinds of resources: shared-memory regions,
+tensor-memory regions, synchronization objects, warp roles, and pipelines.
+Their declarations record the information needed to lower and analyze the
+schedule, including data shape, ownership, and lifetime.
+
+Hardware-sensitive choices remain visible in the program, while purely
+mechanical metadata is derived during lowering. This balance keeps generated
+code inspectable and gives the analyses concrete schedule decisions without
+requiring the agent to manipulate raw addresses.
+
+\subsection{Layout verification}
+\label{app:layout}
+
+Recent compiler systems make layout an explicit algebraic object: CuTe's layout
+algebra, Triton's linear layouts over $\mathbb{F}_2$, and Axe's named-axis
+abstraction \cite{cecka2026cute,zhou2025linear,hou2026axe}. \cake{} takes the
+opposite position. Layout is not a first-class citizen of \cakeir{}; the agent
+writes down the concrete commitments---an SMEM view offset, an operand byte
+offset, a TMEM column range, a swizzle tag, a TMA descriptor coordinate---and
+the compiler carries the burden of deciding whether those commitments are legal.
+
+The compiler checks that these commitments remain mutually consistent along the
+program's data flow and satisfy the target instruction and resource contracts.
+This catches representation errors before execution while keeping the agent's
+editing surface concrete.
+
+Diagnostics point to the relevant IR decision and a broad mismatch category.
+This interface preserves the co-evolution property: new primitives can extend
+verification coverage without requiring agents to manipulate a separate layout
+language. This paper therefore characterizes the verifier through its contract
+and coverage rather than its internal representation or decision procedure.
+
+\subsection{Architecture and backend coverage}
+\label{app:architecture}
+
+Table~\ref{tab:arch} records the target-specific coverage behind the summary in
+Section~\ref{sec:arch}.
+
+\begin{table}[H]
+  \caption{Detailed architecture coverage.}
+  \label{tab:arch}
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.06}
+  \begin{tabularx}{\linewidth}{@{}L{1.6cm}L{4.4cm}Y@{}}
+    \toprule
+    \thead{Target} & \thead{SKU} &
+    \thead{Tensor-core path and notable features} \\
+    \midrule
+    \rowtint
+    \texttt{sm\_80} & A100 &
+      \texttt{mma.sync}, \texttt{ldmatrix}, \texttt{cp.async}; no TMA,
+      clusters, or TMEM \\
+    \texttt{sm\_89} & L40S / RTX 6000 Ada &
+      \texttt{mma.sync}, \texttt{ldmatrix}, \texttt{cp.async}; FP8 tensor
+      cores, no TMA or TMEM \\
+    \rowtint
+    \texttt{sm\_90a} & H100 / H200 &
+      WGMMA + \texttt{mma.sync}; TMA, thread-block clusters, async barriers,
+      DSM \\
+    \texttt{sm\_100a} & B200 &
+      \texttt{tcgen05.mma} + TMEM; 2-CTA MMA (\texttt{cta\_group::2}),
+      \texttt{tcgen05.\{ld,cp,shift\}} \\
+    \rowtint
+    \texttt{sm\_103a} & B300 &
+      adds \texttt{tcgen05.ld.red}, $K{=}96$ block-scaled MMA \\
+    \texttt{sm\_120a} & RTX 5090 / RTX PRO 6000 &
+      \texttt{mma.sync} + \texttt{ldmatrix}, TMA, clusters, DSM; no
+      \texttt{tcgen05}/TMEM \\
+    \rowtint
+    \texttt{sm\_121a} & DGX Spark (GB10) &
+      same instruction surface as \texttt{sm\_120a}, separate cubin, different
+      SFU rates \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The compiler requires an exact target match and reports missing device or
+toolchain support rather than stepping a schedule down to another architecture.
+Timing-model coverage is separately evidence-gated: B200 is the measured
+baseline, H100 is calibrated independently, and other targets report a coverage
+limitation instead of inheriting estimates.
+
+After static checks, \cakeir{} lowers deterministically to inspectable CUDA/PTX
+and then through the standard NVIDIA toolchain to a GPU binary. Generated source
+remains available as an escape hatch, while the default editing path keeps
+hardware decisions in \cakeir{} where they remain analyzable. External numerical
+comparison and on-device timing remain authoritative.
+
+\FloatBarrier
+
+\section{Analysis scope and validation}
+\label{app:analysis-contract}
+\label{app:soundness}
+
+The harness evaluates typed schedules against the safety, conformance, semantic,
+and data-consistency categories in Table~\ref{tab:analysis-categories}. For
+supported constructs, it either accepts the candidate or returns a localized
+finding. Missing information or analysis coverage is reported explicitly rather
+than treated as a successful check.
+
+Static analysis is a pre-compile gate only within its modeled domain; it does
+not prove global GPU correctness or capture all microarchitectural behavior.
+Coverage continues to expand, and both false positives and false negatives can
+occur. 
+
+\section{Production-kernel evolution trajectories}
+\label{app:production-evolution}
+
+These figures supplement the production endpoints in
+Section~\ref{sec:eval-frontier}, using each source session's own objective and
+denominator.
+
+\subsection{KDA prefill}
+\label{app:kda-evolution}
+
+Figure~\ref{fig:kda-prefill-evolution-token-performance} separates fixed-shape
+bring-up from the later six-shape campaign because the phases use different
+metrics.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]
+    {figures/flashkda_prefill_evolution_token_perf.pdf}
+  \caption{KDA prefill evolution on B200. Orange is fixed
+  $H{=}96$, $S{=}8192$ bring-up; blue is six-shape geometric-mean speedup over
+  official FlashKDA. All points pass correctness.}
+  \label{fig:kda-prefill-evolution-token-performance}
+\end{figure}
+
+\subsection{TinyGEMM}
+\label{app:tinygemm-evolution}
+
+Figure~\ref{fig:tinygemm-evolution-token-performance} shows four-shape
+evolution and a follow-up for the remaining small-shape regression. The
+follow-up raises the target from $0.940\times$ to $1.020\times$ and the
+four-shape mean from $1.274\times$ to $1.334\times$.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]
+    {figures/tinygemm_evolution_token_perf.pdf}
+  \caption{TinyGEMM evolution on B200. Orange tracks
+  $N{=}8$, $M{=}2048$, $K{=}2048$; blue is the geometric mean over four
+  recurring shapes, including orange. Dots are valid checkpoints, staircases
+  are best-so-far, and the dotted line begins the follow-up.}
+  \label{fig:tinygemm-evolution-token-performance}
+\end{figure}
+
+\subsection{Alpha-MoE}
+\label{app:alphamoe-evolution}
+
+Figure~\ref{fig:alphamoe-evolution-token-performance} normalizes five shapes to
+their first correct \cake{} checkpoint. The final geometric mean is
+$1.137\times$; this is an internal evolution metric, not a TensorRT-LLM
+comparison.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]
+    {figures/alphamoe_w8a8_evolution_token_perf.pdf}
+  \caption{Alpha-MoE W8A8 Hopper-to-Blackwell rewrite on B200. Gray shows
+  per-shape CUPTI medians; orange is the five-shape geometric mean (GM); blue is
+  the best GM; shading is pre-checkpoint bring-up.}
+  \label{fig:alphamoe-evolution-token-performance}
+\end{figure}
+
+\FloatBarrier
+
+\section{Known-kernel reproduction details}
+\label{app:known-kernel-details}
+
+Table~\ref{tab:known-kernel-loc} gives the fixed shapes, relative performance,
+and audited implementation sizes summarized in
+Section~\ref{sec:eval-known}.
+
+\begin{table}[H]
+  \caption{Known-kernel reproduction for LLM-critical kernels. Relative
+  performance is measured against the listed reference at the same B200 shape.
+  \cakeir{} LOC counts the kernel IR; reference columns report audited device
+  and supporting source where available. For DSv4, reference LOC is restricted
+  to source reachable under the fixed S8 route and runtime constants.}
+  \label{tab:known-kernel-loc}
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.06}
+  \begin{tabularx}{\linewidth}{@{}lYcrrrr@{}}
+    \toprule
+    & & & & \multicolumn{3}{c}{\thead{Physical LOC}} \\
+    \cmidrule(lr){5-7}
+    \thead{Family} & \thead{Variant} & \thead{Shape} & \thead{Rel. perf.} &
+      \thead{\cakeir{}} &
+      \shortstack{\thead{Ref.}\\[-1pt]\thead{dev.}} &
+      \shortstack{\thead{Ref.+}\\[-1pt]\thead{support}} \\
+    \midrule
+    \rowtint
+      & FWD, BF16 non-causal & S1
+      & 1.0045 & 430 & 2369 & 3039 \\
+    \rowtint
+    \multirow{-2}{*}{FA4}
+      & BWD, BF16 non-causal & S1
+      & 1.0470 & 514 & 2552 & 3690 \\
+    TRTLLM GQA
+      & Decode, FP16 & S2
+      & 1.043 & 783 & 8515 & 8515 \\
+    \rowtint
+      & 1D1D GEMM, FP8 & S3
+      & 1.0370 & 221 & 516 & 657 \\
+    \rowtint
+      & \mbox{Grouped GEMM, BF16 masked} & S4
+      & 1.0174 & 401 & 442 & 559 \\
+    \rowtint
+      & MQA indexer, FP8 & S5
+      & 1.2700 & 480 & 704 & 972 \\
+    \rowtint
+      & MQA indexer, FP4 & S5
+      & 1.2730 & 392 & 704 & 972 \\
+    \rowtint
+    \multirow{-5}{*}{DeepGEMM}
+      & \mbox{Paged MQA indexer, FP4} & S6
+      & 1.0036 & 395 & 779 & 1177 \\
+    CUTLASS MLA
+      & Decode, BF16, TMA & S7
+      & 1.2174 & 845 & 1860 & 2449 \\
+      & Decode, BF16 & S8
+      & 1.1297 & 1299 & 13609 & 13790 \\
+    \multirow{-2}{*}{\shortstack[l]{DSv4 sparse MLA}}
+      & Decode, FP8 & S8
+      & 0.9649 & 1393 & 8942 & 9125 \\
+    \bottomrule
+  \end{tabularx}\par
+  \vspace{3pt}
+  \parbox{\linewidth}{\scriptsize\raggedright
+    \textit{Shape key.}
+    S1: $B=4$, $H=32$, $S=8192$, $D=128$;
+    S2: $B=128$, $QH=64$, $KVH=8$, $S_{\mathrm{kv}}=4096$, $D=128$, page 16;
+    S3: $M=4096$, $N=7168$, $K=4096$;
+    S4: 256 groups $\times$ $M=128$, $N=4096$, $K=7168$;
+    S5: $H=32$, $D=128$, $S_q=1024$, $S_{\mathrm{kv}}=2048$;
+    S6: $B=256$, $H=64$, $D=128$, avgKV 4096, block 64, next 1;
+    S7: DeepSeek-V3, $B=128$, $S_{\mathrm{kv}}=4096$, page 128;
+    S8: DeepSeek-V4 sparse MLA, $B=3$, ragged query
+    lengths $[3,4,5]$, $H=128$, and $D_{qk}=D_v=512$.}
+\end{table}
+
+\FloatBarrier
+
+\section{Dispatcher portfolio details}
+\label{app:dispatcher-details}
+
+Figure~\ref{fig:dispatcher-portfolios} reports the route-level composition
+behind the aggregate generalization results in
+Section~\ref{sec:generalization}.
+
+\input{figures/dispatcher_portfolios.tex}
+
+\FloatBarrier
+
+\end{document}
