@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-08-22 11:38:53 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-08-22 12:18:11 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：67
-- 含 `00README.json`：52
-- 有本地候选 PDF：65
-- 含中文 PDF：57
-- 带源码包：43
-- 含 tracked files 的目录：64
+- 论文目录：68
+- 含 `00README.json`：53
+- 有本地候选 PDF：66
+- 含中文 PDF：58
+- 带源码包：44
+- 含 tracked files 的目录：65
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -34,6 +34,7 @@
 | byte-checkpoint | ByteCheckpoint | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 62 |
 | catalyzer | Catalyzer | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 36 |
 | clawmark | ClawMark: A Living-World Benchmark for Multi-Turn, Multi-Day, Multimodal Coworker Agents | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 37 |
+| coact-1 | CoAct-1: Computer-using Multi-Agent System with Coding Actions | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 18 |
 | colossal-auto | Colossal Auto | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 51 |
 | concur | CONCUR | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 33 |
 | context-folding | Context Folding | ✅ | paper.tex | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar | 34 |

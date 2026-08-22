@@ -9,6 +9,7 @@
 * [ByteCheckpoint](papers/byte-checkpoint.md)
 * [CAKE: Compiler-Agent Co-Design for Frontier Kernel Evolution](papers/cake.md)
 * [Catalyzer](papers/catalyzer.md)
+* [CoAct-1: Computer-using Multi-Agent System with Coding Actions](papers/coact-1.md)
 * [Colossal Auto](papers/colossal-auto.md)
 * [CONCUR](papers/concur.md)
 * [Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents](papers/darwin-godel-machine.md)
