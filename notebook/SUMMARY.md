@@ -41,6 +41,7 @@
 * [MPK](papers/mpk.md)
 * [Multi-stage Flow Scheduling for LLM Serving](papers/multi-stage-flow-scheduling.md)
 * [NVIDIA SuperPOD](papers/nvidia-superpod.md)
+* [Post-Training on Office Work Improves Software Engineering: A Behavioral Account of Cross-Domain Transfer](papers/office-work-cross-domain-transfer.md)
 * [PAACE: A Plan-Aware Automated Agent Context Engineering Framework](papers/paace.md)
 * [Pangu Ultra](papers/pangu-ultra.md)
 * [PhyPrompt](papers/phyprompt.md)

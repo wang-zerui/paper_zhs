@@ -1,0 +1,83 @@
+\section{Exact Metric Definitions}
+\label{app:metrics}
+
+This appendix gives the exact classification rules behind the metrics in Table~\ref{tab:metrics}. All patterns are regular expressions applied case-insensitively to individual assistant shell commands. Long patterns are wrapped across lines for readability; the implemented patterns contain no whitespace at the wrap points.
+
+\subsection{Retrieval calls}
+\label{app:retrieval}
+
+A command is classified as a retrieval call in three steps. Occurrences of \verb!>/dev/null! are ignored; any other output redirection disqualifies the command. A command matching the exclusion pattern below is disqualified. The remaining commands qualify if they match the inclusion pattern.
+
+Inclusion pattern:
+
+\begin{verbatim}
+(?:^|[;&|()]\s*)(?:
+  ls|find|fd|rg|grep|egrep|fgrep|cat|head|tail|wc|stat|file|tree|pwd|
+  readlink|realpath|which|whereis|type|jq|awk|cut|sort|uniq|
+  git\s+(?:show|log|grep|ls-files|rev-parse|branch|remote|blame)
+)\b
+\end{verbatim}
+
+Exclusion pattern:
+
+\begin{verbatim}
+\b(?:rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|tee|truncate|patch)\b|
+\bgit\s+(?:add|commit|apply|checkout|restore|reset|clean|am|
+         cherry-pick|rebase|merge)\b|
+\bsed\s+-[^\n;|&]*i\b|\bperl\s+-[^\n;|&]*i\b|
+\b(?:python|python3|node|ruby|php)\b|
+\b(?:pytest|unittest|jest|vitest|mocha|rspec|go\s+test|cargo\s+test|
+    npm\s+test|yarn\s+test|pnpm\s+test)\b|
+\b(?:make|cmake|ninja|npm\s+install|yarn\s+install|pnpm\s+install|
+    pip\s+install)\b|
+<<
+\end{verbatim}
+
+Although \texttt{git branch} and \texttt{git remote} can mutate repository state with other arguments, all matched uses in this corpus were read-only: \texttt{git branch} appeared only in listing or inspection forms such as \verb!-a!, \verb!--contains!, and \verb!--show-current!, and \texttt{git remote} appeared only as \verb!git remote -v!. No branch creation, branch deletion, or remote mutation was counted as retrieval.
+
+\subsection{Information spans}
+\label{app:spans}
+
+Retrieval-call outputs are processed as follows: ANSI escape sequences are removed, the text is tokenized with the pattern \verb![A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|[^\s]! and lowercased, and every overlapping window of 12 consecutive tokens forms one span; an output shorter than 12 tokens forms a single span. Distinct retrieved information is the number of unique spans in a run. Repeated retrieved information is the share of spans that already occurred in an earlier output of the same run.
+
+\subsection{Formal tests and mutations}
+\label{app:tests}
+
+A command contains a formal test if it matches any of:
+
+\begin{verbatim}
+(?:^|[;&|]\s*|\s)(?:python\d*\s+-m\s+)?pytest(?:\s|$)
+(?:^|[;&|]\s*|\s)py\.test(?:\s|$)
+\bgo\s+test\b
+\bcargo\s+test\b
+\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test(?:\s|$|:)
+\b(?:npx\s+)?(?:jest|vitest|mocha)(?:\s|$)
+\bmake\s+(?:[\w.-]*test[\w.-]*|check)(?:\s|$)
+(?:^|[;&|]\s*|\s)(?:tox|nosetests|unittest)(?:\s|$)
+\bpython\d*\s+-m\s+unittest\b
+\bbazel\s+test\b
+\bgradle\w*\s+test\b
+\bmvn\w*\s+(?:test|verify)\b
+\bdotnet\s+test\b
+\brspec(?:\s|$)
+\end{verbatim}
+
+A test counts as passing when it returns code zero, is not part of a status-masking pipeline or fallback, and its output contains no explicit failure marker. A command counts as a mutation if it matches any of:
+
+\begin{verbatim}
+\bapply_patch\b
+\b(?:sed|perl)\b[^\n]*(?:\s-i\b|--in-place)
+\bgit\s+(?:apply|checkout|restore|reset|cherry-pick)\b
+\b(?:cp|mv|rm|touch)\s+(?![^\n]*(?:/tmp/|/dev/))
+\.(?:write_text|write_bytes)\s*\(
+\bopen\s*\([^\n]{0,180},\s*['"](?:w|a|x|w\+|a\+)['"]
+\b(?:cat|printf|echo)\b[^\n]*(?:>>|>)\s+(?!/tmp/|/dev/)[^\s;&|]+
+\btee\s+(?:-a\s+)?(?!/tmp/|/dev/)[^\s;&|]+
+\end{verbatim}
+
+First-test position is the ordinal position of the first formal-test command among all of a run's assistant shell commands, normalized to the range zero to one.
+
+\subsection{Patch metrics}
+\label{app:patches}
+
+The agent patch is the final submitted diff for a run. The reference patch is the task's gold code patch; the task's separate test patch is not included. File paths are read from \verb!diff --git! headers. Reference-patch files touched is the number of distinct files appearing in both the agent patch and the reference patch. Added lines is the number of lines beginning with \verb!+!, excluding \verb!+++! file headers, summed over all files in the agent patch.

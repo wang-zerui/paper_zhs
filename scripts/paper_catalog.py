@@ -128,6 +128,7 @@ TITLE_OVERRIDES = {
     "llm-viewer": "LLM Viewer",
     "MinerU_latex_RA11338001-DSPGB200-ReferenceArch_2027704574230851584": "MinerU Reference Architecture",
     "nvidia-superpod": "NVIDIA SuperPOD",
+    "office-work-cross-domain-transfer": "Post-Training on Office Work Improves Software Engineering: A Behavioral Account of Cross-Domain Transfer",
     "paace": "PAACE: A Plan-Aware Automated Agent Context Engineering Framework",
     "Magma": "Magma",
     "magma": "Magma",

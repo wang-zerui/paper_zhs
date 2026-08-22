@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **58**
+- Papers: **59**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -58,6 +58,7 @@
 - [MPK](./papers/mpk.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmpk%2Fpaper_arxiv_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/mpk/paper_arxiv_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/mpk/paper_arxiv_zh.pdf)
 - [Multi-stage Flow Scheduling for LLM Serving](./papers/multi-stage-flow-scheduling.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fmulti-stage-flow-scheduling%2Fpaper_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/multi-stage-flow-scheduling/paper_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/multi-stage-flow-scheduling/paper_zh.pdf)
 - [NVIDIA SuperPOD](./papers/nvidia-superpod.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fnvidia-superpod%2FMinerU_latex_RA11338001-DSPGB200-ReferenceArch_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/nvidia-superpod/MinerU_latex_RA11338001-DSPGB200-ReferenceArch_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/nvidia-superpod/MinerU_latex_RA11338001-DSPGB200-ReferenceArch_zh.pdf)
+- [Post-Training on Office Work Improves Software Engineering: A Behavioral Account of Cross-Domain Transfer](./papers/office-work-cross-domain-transfer.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Foffice-work-cross-domain-transfer%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/office-work-cross-domain-transfer/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/office-work-cross-domain-transfer/main_zh.pdf)
 - [PAACE: A Plan-Aware Automated Agent Context Engineering Framework](./papers/paace.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fpaace%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/paace/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/paace/main_zh.pdf)
 - [Pangu Ultra](./papers/pangu-ultra.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fpangu-ultra%2Fsrc%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/pangu-ultra/src/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/pangu-ultra/src/main_zh.pdf)
 - [PhyPrompt](./papers/phyprompt.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fphyprompt%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/phyprompt/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/phyprompt/main_zh.pdf)
