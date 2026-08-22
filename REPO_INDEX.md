@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-08-17 16:12:26 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-08-22 11:38:53 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：66
-- 含 `00README.json`：51
-- 有本地候选 PDF：64
-- 含中文 PDF：56
-- 带源码包：42
-- 含 tracked files 的目录：63
+- 论文目录：67
+- 含 `00README.json`：52
+- 有本地候选 PDF：65
+- 含中文 PDF：57
+- 带源码包：43
+- 含 tracked files 的目录：64
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -42,6 +42,7 @@
 | dualpath | DualPath | ✅ | paper.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
 | eagle-3 | EAGLE-3 | — | — | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 17 |
 | eagle-feature-uncertainty | EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty | — | — | example_paper_zh.pdf | example_paper_zh.pdf | ✅ | source.tar | 33 |
+| efficient-agent-training-for-computer-use | Efficient Agent Training for Computer Use | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 20 |
 | elastic-attention | Elastic Attention | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 70 |
 | enterpriseops-gym | EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 56 |
 | epistemic-gain-aleatoric-cost | Epistemic Gain Aleatoric Cost | ✅ | example_paper.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 32 |

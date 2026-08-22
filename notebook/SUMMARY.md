@@ -15,6 +15,7 @@
 * [DualPath](papers/dualpath.md)
 * [EAGLE-3](papers/eagle-3.md)
 * [EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty](papers/eagle-feature-uncertainty.md)
+* [Efficient Agent Training for Computer Use](papers/efficient-agent-training-for-computer-use.md)
 * [Elastic Attention](papers/elastic-attention.md)
 * [EnterpriseOps-Gym: Environments and Evaluations for Stateful Agentic Planning and Tool Use in Enterprise Settings](papers/enterpriseops-gym.md)
 * [FastMTP](papers/fastmtp.md)
