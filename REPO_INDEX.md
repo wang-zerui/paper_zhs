@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：69
-- 含 `00README.json`：54
-- 有本地候选 PDF：67
-- 含中文 PDF：59
-- 带源码包：45
-- 含 tracked files 的目录：66
+- 论文目录：70
+- 含 `00README.json`：55
+- 有本地候选 PDF：68
+- 含中文 PDF：60
+- 带源码包：46
+- 含 tracked files 的目录：67
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -70,6 +70,7 @@
 | mtrouter | Mtrouter | ✅ | acl_latex.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 70 |
 | multi-stage-flow-scheduling | Multi-stage Flow Scheduling for LLM Serving | ✅ | paper.tex | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar | 89 |
 | nvidia-superpod | NVIDIA SuperPOD | — | — | MinerU_latex_RA11338001-DSPGB200-ReferenceArch_zh.pdf | MinerU_latex_RA11338001-DSPGB200-ReferenceArch_zh.pdf | ✅ | — | 32 |
+| paace | PAACE: A Plan-Aware Automated Agent Context Engineering Framework | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 12 |
 | pangu-ultra | Pangu Ultra | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 27 |
 | phyprompt | PhyPrompt | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 33 |
 | pivot-rl | PivotRL | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 76 |

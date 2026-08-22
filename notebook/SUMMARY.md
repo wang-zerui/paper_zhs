@@ -41,6 +41,7 @@
 * [MPK](papers/mpk.md)
 * [Multi-stage Flow Scheduling for LLM Serving](papers/multi-stage-flow-scheduling.md)
 * [NVIDIA SuperPOD](papers/nvidia-superpod.md)
+* [PAACE: A Plan-Aware Automated Agent Context Engineering Framework](papers/paace.md)
 * [Pangu Ultra](papers/pangu-ultra.md)
 * [PhyPrompt](papers/phyprompt.md)
 * [PivotRL](papers/pivot-rl.md)
