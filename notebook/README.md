@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **55**
+- Papers: **56**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -63,6 +63,7 @@
 - [R2 Router](./papers/r2-router.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fr2-router%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/r2-router/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/r2-router/main_zh.pdf)
 - [RollArt](./papers/roll-art.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Froll-art%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/roll-art/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/roll-art/main_zh.pdf)
 - [SageSched](./papers/sage-sched.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fsage-sched%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/sage-sched/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/sage-sched/main_zh.pdf)
+- [ScaleCUA: Scaling Open-Source Computer Use Agents with Cross-Platform Data](./papers/scalecua.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fscalecua%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/scalecua/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/scalecua/main_zh.pdf)
 - [Speculative Actions](./papers/speculative-actions.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fspeculative-actions%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/speculative-actions/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/speculative-actions/main_zh.pdf)
 - [Step3.5 Turbo 2026](./papers/step-3-5.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstep-3-5%2Fstep3p5_turbo_2026.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/step-3-5/step3p5_turbo_2026.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/step-3-5/step3p5_turbo_2026.pdf)
 - [Step-GUI](./papers/step-gui.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstep-gui%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/step-gui/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/step-gui/main_zh.pdf)

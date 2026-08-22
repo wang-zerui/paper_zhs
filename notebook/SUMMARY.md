@@ -46,6 +46,7 @@
 * [R2 Router](papers/r2-router.md)
 * [RollArt](papers/roll-art.md)
 * [SageSched](papers/sage-sched.md)
+* [ScaleCUA: Scaling Open-Source Computer Use Agents with Cross-Platform Data](papers/scalecua.md)
 * [Speculative Actions](papers/speculative-actions.md)
 * [Step3.5 Turbo 2026](papers/step-3-5.md)
 * [Step-GUI](papers/step-gui.md)
