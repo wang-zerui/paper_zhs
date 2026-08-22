@@ -1,0 +1,144 @@
+\section{Prompt Formulation for \model}\label{apdx:agent_prompt}
+The design of the observation space is pivotal, as it directly constrains the upper bound of the agent’s performance.
+In this section, we detail the integration of the API set with GUI operations, alongside the incorporation of contextual information from the desktop environment, to systematically construct both the agent’s observation space and action space. 
+This unified framework ensures that the designed observation and action spaces capture the complexity of real-world tasks, providing a solid foundation for robust agent learning and generalization.
+
+\vpara{Action space formulation}
+The integration of a large number of APIs with GUI operations, while ensuring effective agent interaction, remains a significant challenge. 
+In practice, we mitigate this complexity by dynamically detecting the currently active application to infer potentially relevant APIs, thereby reducing the number of available APIs and lowering the agent’s adaptation overhead. 
+Furthermore, we use Python classes and descriptive docstrings to delineate each operation type, ensuring they are clearly interpretable by most LLMs. This object-oriented strategy enhances the model’s understanding and precision in performing operations.
+These classes are provided to the agent via the system prompt, enabling interaction through Python function calls. 
+This design facilitates rapid agent adaptation and efficient generalization of operations across diverse applications. 
+Additionally, the agent’s output format is standardized in the system prompt, which encourages the agent to interleave reasoning and action execution. This approach promotes enhanced planning and reflective capabilities within the agent, thus improving its overall performance in complex task execution scenarios.
+
+\vpara{Observation formulation}
+To facilitate the effective perception and manipulation of GUIs by the model, we leverage the Python Accessibility Toolkit Service Provider Interface (pyatspi) to extract comprehensive attributes of desktop elements systematically. Each GUI element encompasses the element’s semantic type, visible text content, precise screen coordinates, and spatial dimensions. This structured representation enables the LLM agent to parse, ground, and reason over the GUI in a manner analogous to human users.
+
+We present the element format of the environment a11y tree in our observation space as follows:
+\lstset{
+ backgroundcolor=\color[RGB]{245,245,244},
+ breaklines=true,
+ basicstyle=\ttfamily\small
+}\begin{lstlisting}
+tag    text    position (center x & y)    size (w & h)
+\end{lstlisting}
+
+The \texttt{tag} is the XML tag of the element, such as \texttt{div} or \texttt{button}. The \texttt{text} is the text content of the element, which can be empty for elements that do not have text. The \texttt{position} is represented by the center coordinates (x, y) of the element, and the \texttt{size} is represented by its width (w) and height (h).
+
+For the multimodal model, the a11y tree is removed from the input. Instead, we capture the GUI screenshot at a resolution of 1920 × 1080 pixels (1080p) and subsequently resize it to 1280 × 720 pixels (720p), which serves as the input representation of the desktop environment. 
+
+Beyond the extraction of individual GUI components, we augment the input space with rich contextual metadata to provide a holistic depiction of the agent’s operational environment. Specifically, we provide a comprehensive enumeration of open desktop windows, including their hierarchical relationships, as well as the name and additional information of the currently focused application. To promote consistent and adaptive behavior, we also deliver feedback from the most recent GUI action or tool call, which may include environmental status updates, confirmations, or error signals.
+
+The app format of the observation space is as follows:
+\lstset{
+ backgroundcolor=\color[RGB]{245,245,244},
+ breaklines=true,
+ basicstyle=\ttfamily\small
+}\begin{lstlisting}
+Window ID    App Name    Title
+\end{lstlisting}
+
+The \texttt{Window ID} is the unique identifier of the application window, \texttt{App Name} is the name of the application, and \texttt{Title} is the title of the application window.
+
+\vpara{History formulation}
+Given the extensive length of GUI observations and the inherent constraints imposed by the model’s context window, it is necessary to efficiently manage the input history across multiple interaction rounds. For each interaction, we omit redundant and detailed interface information while preserving the complete sequence of the agent’s reasoning process, actions taken, and the corresponding operation feedback. This approach ensures the retention of the essential operational trajectory, thereby maximizing the informativeness of the historical context while maintaining compatibility with the model’s capacity limitations.
+
+Collectively, the components above constitute the observation space and action space of our agent. This representation not only enhances the agent’s environmental cognition but also enables better strategies for long-horizon planning and reasoning. 
+As a result, the agent is better equipped to execute complex, multi-step tasks across diverse applications in the desktop environment. 
+
+Below is our detailed prompt organization for \model:
+\lstset{
+    backgroundcolor=\color[RGB]{245,245,244},
+    breaklines=true,
+    basicstyle=\ttfamily\small
+}\begin{lstlisting}
+You are an agent which follow my instruction and perform desktop computer tasks as instructed.
+You have good knowledge of computer and good internet connection and assume your code will run on a computer for controlling the mouse and keyboard.
+For each step, you will get an observation of the desktop by 1) screenshot; 2) current application name; 3) accessibility tree, which is based on AT-SPI library; 4) application info; 5) last action result.
+You should first generate a plan for completing the task, confirm the previous results, reflect on the current status, then generate operations to complete the task in python-style pseudo code using the predefined functions.
+
+Your output should STRICTLY follow the format:
+<think>
+{**YOUR-PLAN-AND-THINKING**}
+</think>
+```python
+{**ONE-LINE-OF-CODE**}
+```
+
+You will be provided access to the following methods to interact with the UI:
+    1. class Agent, a grounding agent which provides basic action space to interact with desktop.
+    2. class {tool_class_name}, which provides tools to interact with the current application {app_name}.
+
+Here are the defination of the classes:
+```python
+{class_content}
+```
+
+* Note:
+- Your code should be wrapped in ```python```, and your plan and thinking should be wrapped in <think></think>.
+- Only **ONE-LINE-OF-CODE** at a time.
+- Each code block is context independent, and variables from the previous round cannot be used in the next round.
+- Do not put anything other than python code in ```python```.
+- You **can only use the above methods to interact with the UI**, do not invent new methods.
+- Return with `Agent.exit(success=True)` immediately after the task is completed.
+- If you think cannot complete the task, **DO NOT keep repeating actions, just return with `Agent.exit(success=False)`.**
+- The computer's environment is Linux, e.g., Desktop path is '/home/user/Desktop'
+- My computer's password is 'password', feel free to use it when you need sudo rights
+
+**IMPORTANT** You are asked to complete the following task: {instruction}\end{lstlisting}
+
+Below is our history and input prompt for \model:
+\lstset{
+    backgroundcolor=\color[RGB]{245,245,244},
+    breaklines=true,
+    basicstyle=\ttfamily\small
+}\begin{lstlisting}
+<|user|>
+**Environment State (Omitted)**
+
+<|assistant|>
+<think>
+{round0_thinking}
+</think>
+```python
+{round0_operation}
+```
+
+<|user|>
+**Environment State (Omitted)**
+Previous Action Result: {round0_operation_feedback}
+
+<|assistant|>
+<think>
+{round1_thinking}
+</think>
+```python
+{round1_operation}
+```
+
+<|user|>
+**Environment State (Omitted)**
+Previous Action Result: {round1_operation_feedback}
+
+<|assistant|>
+<think>
+{round2_thinking}
+</think>
+```python
+{round2_operation}
+```
+...
+
+<|user|>
+{screenshot_for_multimodal}
+* Apps: {all_apps}
+
+* Current App: {cur_window_id}
+
+* A11y Tree: {a11y_tree_for_text}
+
+* App Info: {app_info}
+
+* Previous Action Result: {operation_feedback}\end{lstlisting}
+
+\newpage

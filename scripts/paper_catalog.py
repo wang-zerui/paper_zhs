@@ -95,6 +95,7 @@ TITLE_OVERRIDES = {
     "byte-checkpoint": "ByteCheckpoint",
     "Colossal-Auto": "Colossal Auto",
     "colossal-auto": "Colossal Auto",
+    "computerrl": "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents",
     "CONCUR": "CONCUR",
     "concur": "CONCUR",
     "EAGLE-3": "EAGLE-3",

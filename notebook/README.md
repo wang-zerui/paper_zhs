@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **54**
+- Papers: **55**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -28,6 +28,7 @@
 - [Catalyzer](./papers/catalyzer.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcatalyzer%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/catalyzer/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/catalyzer/main_zh.pdf)
 - [CoAct-1: Computer-using Multi-Agent System with Coding Actions](./papers/coact-1.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcoact-1%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/coact-1/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/coact-1/main_zh.pdf)
 - [Colossal Auto](./papers/colossal-auto.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcolossal-auto%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/colossal-auto/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/colossal-auto/main_zh.pdf)
+- [ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents](./papers/computerrl.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcomputerrl%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/computerrl/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/computerrl/main_zh.pdf)
 - [CONCUR](./papers/concur.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fconcur%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/concur/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/concur/main_zh.pdf)
 - [Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents](./papers/darwin-godel-machine.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fdarwin-godel-machine%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/darwin-godel-machine/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/darwin-godel-machine/main_zh.pdf)
 - [DualPath](./papers/dualpath.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fdualpath%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/dualpath/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/dualpath/main_zh.pdf)

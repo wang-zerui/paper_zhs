@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-08-22 12:18:11 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-08-22 12:51:27 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：68
-- 含 `00README.json`：53
-- 有本地候选 PDF：66
-- 含中文 PDF：58
-- 带源码包：44
-- 含 tracked files 的目录：65
+- 论文目录：69
+- 含 `00README.json`：54
+- 有本地候选 PDF：67
+- 含中文 PDF：59
+- 带源码包：45
+- 含 tracked files 的目录：66
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -36,6 +36,7 @@
 | clawmark | ClawMark: A Living-World Benchmark for Multi-Turn, Multi-Day, Multimodal Coworker Agents | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 37 |
 | coact-1 | CoAct-1: Computer-using Multi-Agent System with Coding Actions | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 18 |
 | colossal-auto | Colossal Auto | — | — | main_zh.pdf | main_zh.pdf | ✅ | — | 51 |
+| computerrl | ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 57 |
 | concur | CONCUR | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 33 |
 | context-folding | Context Folding | ✅ | paper.tex | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar | 34 |
 | darwin-godel-machine | Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 48 |
