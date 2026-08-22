@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **56**
+- Papers: **57**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -47,6 +47,7 @@
 - [HyperParallel](./papers/hyper-parallel.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fhyper-parallel%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/hyper-parallel/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/hyper-parallel/main_zh.pdf)
 - [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](./papers/iclr-camera-ready-v0.md) · 主论文 · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2FICLR_camera_ready_v0%2Fmain.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/ICLR_camera_ready_v0/main.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/ICLR_camera_ready_v0/main.pdf)
 - [KVPR](./papers/kvpr.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fkvpr%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/kvpr/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/kvpr/main_zh.pdf)
+- [LEGOMem: Modular Procedural Memory for Multi-agent LLM Systems for Workflow Automation](./papers/legomem.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flegomem%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/legomem/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/legomem/main_zh.pdf)
 - [LLM Viewer](./papers/llm-viewer.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2FLLM-viewer%2Fsrc%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/LLM-viewer/src/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/LLM-viewer/src/main_zh.pdf)
 - [LMetric](./papers/lmetric.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flmetric%2Flmetric_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/lmetric/lmetric_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/lmetric/lmetric_zh.pdf)
 - [Why Low-Precision Transformer Training Fails](./papers/low-precision-flash-attention.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Flow-precision-flash-attention%2Ficlr2026_conference_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/low-precision-flash-attention/iclr2026_conference_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/low-precision-flash-attention/iclr2026_conference_zh.pdf)

@@ -30,6 +30,7 @@
 * [HyperParallel](papers/hyper-parallel.md)
 * [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](papers/iclr-camera-ready-v0.md)
 * [KVPR](papers/kvpr.md)
+* [LEGOMem: Modular Procedural Memory for Multi-agent LLM Systems for Workflow Automation](papers/legomem.md)
 * [LLM Viewer](papers/llm-viewer.md)
 * [LMetric](papers/lmetric.md)
 * [Why Low-Precision Transformer Training Fails](papers/low-precision-flash-attention.md)
