@@ -9,6 +9,7 @@
 * [ByteCheckpoint](papers/byte-checkpoint.md)
 * [CAKE: Compiler-Agent Co-Design for Frontier Kernel Evolution](papers/cake.md)
 * [Catalyzer](papers/catalyzer.md)
+* [Claw-Anything: Benchmarking Always-On Personal Assistants with Broader Access to User's Digital World](papers/claw-anything.md)
 * [CoAct-1: Computer-using Multi-Agent System with Coding Actions](papers/coact-1.md)
 * [Colossal Auto](papers/colossal-auto.md)
 * [ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents](papers/computerrl.md)

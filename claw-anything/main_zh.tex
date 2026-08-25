@@ -1,0 +1,467 @@
+\documentclass[10pt]{article}
+
+\usepackage[UTF8,scheme=plain,fontset=none]{ctex}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\setCJKmonofont{STFangsong}
+\usepackage[letterpaper,margin=0.82in]{geometry}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+\hypersetup{hidelinks}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{pifont}
+\usepackage{multirow}
+\usepackage{colortbl}
+\usepackage{tabularx}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{setspace}
+
+\definecolor{linkblue}{HTML}{006FE6}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\setstretch{1.12}
+\captionsetup{font=small,labelfont=bf}
+\renewcommand{\figurename}{图}
+\renewcommand{\tablename}{表}
+\renewcommand{\abstractname}{摘要}
+\renewcommand{\refname}{参考文献}
+\floatname{algorithm}{算法}
+
+\title{\textbf{Claw-Anything：面向更广泛用户数字世界访问的常驻个人助理基准}\\[3pt]
+\large Claw-Anything: Benchmarking Always-On Personal Assistants with Broader Access to User's Digital World}
+
+\author{Yusong Lin$^{1,2,\dagger}$，Xinyuan Liang$^{2,3,\dagger}$，Haiyang Wang$^{2,*}$，Qipeng Gu$^{2}$，Siqi Cheng$^{2}$\\
+Jiangui Chen$^{2}$，Shuzhe Wu$^{2}$，Feiyang Pan$^{2}$，Lue Fan$^{4}$，Sanyuan Zhao$^{1,*}$，Dandan Tu$^{2,*}$\\[3pt]
+\small $^1$北京理工大学；$^2$华为技术有限公司；$^3$北京大学；$^4$中国科学院自动化研究所\\
+\small $^*$通讯作者；$^\dagger$华为实习生\\[2pt]
+\small 代码：\href{https://github.com/LiberCoders/CLaw-Anything}{\textcolor{linkblue}{LiberCoders/Claw-Anything}}\quad
+数据集：\href{https://huggingface.co/datasets/LiberCoders/Claw-Anything}{\textcolor{linkblue}{LiberCoders/Claw-Anything}}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.98\linewidth]{Figures/demo_merge_2.pdf}
+  \caption{Claw-Anything 概览及其实证价值。\textbf{左：}Claw-Anything 使常驻个人助理能够更广泛地访问用户的数字世界，覆盖服务、设备和长时程事件流，从而扩大其可完成的任务范围。\textbf{右：}借助我们的数据流水线，我们的模型在开放权重模型中取得最佳 Pass@1。黄色区域表示闭源模型；横轴并不对应模型规模。}
+  \label{fig:teaser}
+\end{figure}
+
+\begin{abstract}
+大语言模型智能体日益被设想为常驻个人助理，能够访问用户数字世界中一切相关的信息。然而，当前系统只能操作这一世界的狭窄切片，这限制了上下文敏感推理和有效协助。现有基准同样只提供部分用户状态，因此无法刻画智能体在如此广泛的常驻场景中的表现。为弥补这一缺口，我们提出 Claw-Anything：一个沿三个维度扩展智能体上下文的基准，即长时程活动历史、相互依赖的后端服务，以及跨多设备整合 GUI 与 CLI 的交互。为实例化这一场景，我们通过多轮事件注入模拟用户数月的活动，生成复杂的世界状态和真实噪声，包括无关事件与冲突信号。智能体必须在丰富的上下文环境中推理，同时对这些噪声保持鲁棒。扩大的范围还使主动式协助的评测成为可能：智能体需要预判用户需求并及时给出建议。实验表明，GPT-5.5 的 Pass@1 仅为 34.5\%，显著低于其在既有基准上的表现，凸显了当前智能体能力与常驻个人助理需求之间的差距。除基准外，我们还发布了一条自动化数据生成流水线，可产出 2,000 个训练环境，并使基础模型提升 23.7\%，证明了其作为可扩展数据基础设施的效用。
+\end{abstract}
+
+\section{引言}
+\label{sec:intro}
+
+近期的智能体系统，例如 OpenClaw 系列~\citep{openclaw2026,nanobot2026,nanoclaw2026} 和 Hermes Agent~\citep{nous2026hermes}，正从一次性任务求解转向常驻个人协助。这些系统部署在用户的数字环境中，具备长期记忆和后台执行能力，并被期待持续提供随时间变化、对上下文敏感的支持。然而，用户意图和活动天然分散在异构的数字产物中，包括历史事件、后端服务和多种设备。有效协助因此要求智能体能够广泛访问用户的数字世界，从而在闭环中感知相关状态并据此采取行动。
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{Figures/Figure1.pdf}
+  \caption{Claw-Anything 扩展智能体上下文的三个维度。\textbf{左：}长时程事件流更完整地呈现用户的数字活动，并支持对持续演化上下文的推断。\textbf{中：}访问多个后端服务，使智能体能够在统一工作流中开展跨服务协调。\textbf{右：}跨设备访问使智能体能够整合分散的信息与操作，扩大其可完成的任务范围。}
+  \label{fig:demo_of_three}
+\end{figure}
+
+受这一转变启发，我们认为，个人助理的有效性从根本上取决于其操作范围，即它能够观察的数字状态集合和能够执行的动作集合。如图~\ref{fig:teaser} 所示，扩大这一范围既能扩展智能体可处理的任务空间，也能扩大其推理所覆盖的上下文，使其能够协调用户数字世界中原本彼此割裂的部分。人工智能的其他领域也呈现类似规律：编码智能体需要访问完整代码库和可执行环境，才能解决真实缺陷~\citep{swebench,zhu2026swecontextbench,terminalbench2026}；自动驾驶车辆则依赖广泛的传感器覆盖来保障安全运行~\citep{sun2020scalability}。与此趋势一致，近期系统正向智能体开放更丰富的数字接口。CLI-Anything~\citep{cli-anything2026}、Gym-Anything~\citep{aggarwal2026gym} 等开源项目，以及 Google Workspace~\citep{gws-cli2026}、飞书~\citep{lark-cli2026} 等商业平台，提供了统一接口或可编程端点，使智能体能够访问多样的软件系统。这些进展表明，要让智能体在真实数字环境中完成复杂任务，扩大其操作范围至关重要。
+
+然而，当前评测范式与这一目标仍严重错位。现有基准~\citep{clawbench,wildclawbench,pinchbench,clawmark,qwenclawbench} 通常只开放用户状态的狭窄、静态切片，忽略长时程活动、跨服务依赖和跨设备交互。因此，它们只能有限说明智能体在更丰富、更真实的数字环境中如何表现。为弥补这一缺口，我们提出 Claw-Anything，用于评测个人助理智能体在可更广泛访问用户数字世界时的能力。
+
+如图~\ref{fig:demo_of_three} 所示，Claw-Anything 沿三个维度扩展智能体上下文：i）通过数月的细粒度活动记录连接过去与现在的长时程事件流；ii）覆盖用户主要数字空间、彼此依赖的多样后端服务；iii）具有异构界面的多种设备，包括 GUI 和 CLI 交互。在此场景中，智能体必须跨时间、服务和设备整合碎片化信息并协调行动。扩大的上下文范围还使主动式协助~\citep{ProAgentBench,yang2026contextagent} 的评测成为可能：智能体不能只对明确请求作出反应，还必须从上下文中预判用户需求并及时给出建议。
+
+要大规模构建这类环境十分困难：它既要建模长时间跨度、大量服务和多种设备，又要保持真实性与跨组件一致性。因此，我们开发了一条联合合成数字世界与任务的自动化流水线。从最小人物画像种子出发，基于 LLM 的模拟器通过多轮事件注入逐步扩展用户的数字世界。每一步都会从种子池中采样日常事件，并更新持久世界状态和动态服务轨迹，包括电子邮件、日历和社交平台等来源。随着时间推进，事件历史持续累积，人物画像逐步具体化，环境也获得更丰富的状态和更真实的噪声，包括无关或相互矛盾的事件。给定生成的数字世界，下一事件会被实例化为一个以人物画像为基础、带有可执行验证器的任务，从而把评测转化为完成持续演化数字生活中的下一步。我们利用这条流水线构建了 200 个经人工验证的评测任务和 2,000 个训练环境，使 Claw-Anything 同时成为基准和可扩展的数据基础设施。
+
+\begin{table}[t]
+  \caption{代表性数字智能体基准与 Claw-Anything 的比较。比较维度包括三类上下文扩展因素：事件流、设备界面和服务，以及主动性。“事件流”指用户在数字环境中的活动记录；“设备界面”指每个任务中的交互界面；“服务”指每项任务使用的平均/最大服务数；“按词计的上下文长度”指文本化静态状态和动态事件流的长度；“主动式”表示任务是否会奖励智能体在用户提出明确请求之前采取行动。}
+  \label{tab:rw-comparison}
+  \centering
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{lccccc|rr}
+    \toprule
+    基准 & \begin{tabular}[c]{@{}c@{}}事件\\流\end{tabular} & \begin{tabular}[c]{@{}c@{}}设备\\界面\end{tabular} & \begin{tabular}[c]{@{}c@{}}服务数\\（均值/最大值）\end{tabular} & 主动式 & \begin{tabular}[c]{@{}c@{}}按词计的\\上下文长度\end{tabular} & \begin{tabular}[c]{@{}c@{}}评测\\实例数\end{tabular} & \begin{tabular}[c]{@{}c@{}}训练\\实例数\end{tabular}\\
+    \midrule
+    ClawBench \citep{clawbench}         & \ding{55} & CLI & 1.6 ~(5)  & \ding{55} & ~~2.2k & 313 & 0\\
+    WildClawBench \citep{wildclawbench} & \ding{55} & CLI & 0.5 ~(3)  & \ding{55} & ~~2.6k & 60 & 0\\
+    PinchBench \citep{pinchbench}       & \ding{55} & CLI & 0.1 ~(3)  & \ding{55} & ~~1.7k & 53 & 0\\
+    ClawMark \citep{clawmark}           & \ding{55} & CLI & 3.9 ~(5)  & \ding{55} & ~~2.0k & 100 & 0\\
+    QwenClawBench \citep{qwenclawbench} & \ding{55} & CLI & 0.3 ~(6)  & \ding{55} & 12.1k & 100 & 0\\
+    Claw-Eval \citep{claweval}          & \ding{55} & CLI & 1.3 ~(6) & \ding{55} & ~~5.3k & 300 & 0\\
+    \midrule
+    \textbf{Claw-Anything（本文）}       & \ding{51} & \textbf{CLI + GUI} & \textbf{10.1 ~(18)} & \ding{51} & ~\textbf{191.7k} & \textbf{200} & \textbf{2000}\\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+实验揭示了当前能力与全访问个人协助需求之间的显著差距。在 Claw-Anything 上，GPT-5.5 的 Pass@1 仅为 34.5\%，远低于既有基准报告的表现。若干在现有基准上表现强劲的模型在本基准上同样失败，这表明 Claw-Anything 暴露了以往评测中代表不足的失败模式，也说明即使获得更广泛的用户数字世界访问权限，当前模型仍不可靠。此外，在前述训练环境中生成的 1,500 条成功轨迹上微调 Qwen3.5-27B，可带来 23.7\% 的提升，说明 Claw-Anything 不仅是一个具有挑战性的基准，也能成为可扩展监督信号的实用来源。
+
+总之，本文有四项贡献。1）我们将智能体访问范围与用户数字世界之间的对齐确定为个人助理智能体的核心挑战，其中涵盖长时程事件流、互联服务和多设备交互。2）我们开发了一条可大规模联合模拟数字世界并合成任务的自动化流水线，并用它构建 Claw-Anything：一个包含 200 个经人工验证的任务环境的基准；该基准联合扩展上述各维度的上下文，并将主动性作为独立能力进行评测，如表~\ref{tab:rw-comparison} 所示。3）我们在 Claw-Anything 上的评测表明，即使 GPT-5.5 的成功率也只有约 34.5\%。4）同一流水线还生成 2,000 个训练环境；在其中产生的成功轨迹上微调 Qwen3.5-27B，可使成功率提升约 23.7\%，从而确立 Claw-Anything 既是基准，也是一条可扩展的数据生成流水线。
+
+\section{相关工作}
+\label{sec:related}
+
+\textbf{个人助理基准。}随着 Claw 风格智能体迅速发展，衡量其能力的基准家族也在不断扩大。ClawBench~\citep{clawbench} 将覆盖范围扩展到大量标准化数字任务；WildClawBench~\citep{wildclawbench} 把评测带入更真实的开放环境；PinchBench~\citep{pinchbench} 聚焦实用的个人生产力场景；ClawMark~\citep{clawmark} 研究更长时程的专业工作流；QwenClawBench~\citep{qwenclawbench} 强调在现实、由用户分发的 CLI 任务中执行；Claw-Eval~\citep{claweval} 则通过基于评分细则的开放轨迹评估推进评测方法。这些基准共同推动了对数字智能体规划、工具使用和具身交互的研究。然而，它们仍大多把智能体视为局部任务求解器，而不是嵌入用户更广泛数字世界中的常驻助理。多数基准仍局限于隔离、短时程且相对干净的环境，难以有效研究对含噪事件流的推理、跨设备与后端系统的协调，或基于累积个人上下文采取行动。为弥补这一缺口，Claw-Anything 评测智能体面对用户数字世界的更广切片时的表现，其中包括长时程活动流、互联系统、异构设备和主动协助机会。
+
+\textbf{扩展智能体训练环境。}在软件智能体研究中，先前关于可扩展环境的工作主要沿两条路线展开：一是以代码为中心的场景~\citep{swebench,featurebench}，如 SWE-smith~\citep{swesmith} 和 SWE-Gym~\citep{swe-gym}；二是以终端为中心的场景~\citep{terminalbench2026}，如 CLI-Gym~\citep{cli-gym} 和 TermiGen~\citep{termigen}。这些工作共同表明，可扩展环境不仅对评测重要，也对更广泛的智能体开发重要。然而，在个人助理场景中，这一范式仍未得到充分探索，因为可验证环境往往依赖人工构建，既限制真实性，也限制可扩展性。本文通过多轮自动化流水线联合模拟人物画像、历史和跨服务状态，把跨服务、跨时间和跨设备的真实场景结合起来，以填补这一缺口。所得框架能够受控地改变任务难度和环境复杂度，为可扩展地评测与开发个人助理智能体提供实用基础。
+
+\section{方法}
+\label{sec:benchmark}
+
+Claw-Anything 用于评测智能体在被赋予广泛访问用户数字世界的能力后，能否完成反应式和主动式个人助理任务。每个任务都基于一致的人物画像，并嵌入跨越三个上下文维度的环境：长时程历史、多样的后端服务，以及跨多种设备、通过异构界面（例如 GUI 和 CLI）开展的协同交互。在这一场景中，智能体必须从大量背景噪声中分离与任务相关的信号，并执行所需操作。
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{Figures/Figure2_v3.pdf}
+  \caption{Claw-Anything 环境与自动化数据流水线。\textbf{左：}环境由互联设备构成，其中包含系统事件流，以及具有持久状态和服务专属历史的多个服务。\textbf{右：}流水线从基于人物画像的初始状态出发，迭代采样任务模板或噪声模板，并使用基于 LLM 的模拟器调整事件和更新世界状态。最后一次模拟生成任务查询、参考解和评分器；自动过滤随后产出任务实例，基准用例还可选择接受人工验证。}
+  \label{fig:pipeline}
+\end{figure}
+
+\subsection{任务形式化}
+\label{sec:task-formulation}
+
+如图~\ref{fig:pipeline} 左侧所示，Claw-Anything 首先将智能体置于一个能够尽可能访问用户数字世界的数字环境中，然后在该环境内提出反应式和主动式个人助理查询，最后使用可执行验证器，根据所得交互轨迹和任务结果评估任务是否完成。
+
+\textbf{上下文丰富的数字环境。}我们在上下文丰富、真实且含噪的数字环境中实例化每项任务。形式化地，每个环境定义为 $\mathcal{E}=(\mathcal{P},\mathcal{D},\mathcal{F},\mathcal{L})$，其中，$\mathcal{P}$ 表示规定用户资料与偏好的人物画像；$\mathcal{D}$ 表示具有异构界面的设备集合，包括基于 CLI 的计算机和基于 GUI 的手机；$\mathcal{F}$ 表示覆盖生活、工作及相关领域四十余种后端服务的持久状态库；$\mathcal{L}$ 表示覆盖三个多月系统级日志和服务专属日志的长时程活动流。我们还向这些环境填充无关事件、服务和状态，以更接近真实场景，要求智能体在大规模上下文上推理并闭环完成任务。
+
+\textbf{跨时间、服务和设备的查询。}每条查询都采用自然、且有时信息不足的语言，以反映用户在真实个人助理场景中的沟通方式。要解决这些查询，智能体需要在事件流中识别与任务相关的信号，并整合跨服务、跨设备的信息；设备既包括基于 CLI 的 Linux Docker 环境，也包括基于 GUI 的 Android Docker 环境。除明确请求外，我们还纳入 OpenClaw 的心跳式机制：智能体周期性监控用户数字环境，在没有直接提示的情况下给出有上下文依据的建议。
+
+\textbf{面向多路径任务的结果导向评测。}我们的评测以 Claw-Eval~\citep{claweval} 的评分细则框架为基础，结合规则检查和 LLM 判断，同时给出软分数与二元通过/失败标签。由于许多任务允许多条有效求解路径，我们提高最终结果的权重，相应降低中间操作的权重。这一修改保留了基于评分细则的评测优势，同时更准确地反映个人助理任务的开放性。
+
+\begin{algorithm}[t]
+  \caption{自动化任务生成流水线。}
+  \label{alg:algo}
+  \small
+  \textbf{输入：}种子人物画像 $\mathcal{P}_0$；任务种子池 $\mathcal{S}$；噪声事件池 $\mathcal{N}$；展开时域 $R$；快照轮次 $\mathcal{I}_{\mathrm{task}}$。\\
+  \textbf{初始化：}持久状态 $\mathcal{F}\!\leftarrow\!\emptyset$，事件日志 $\mathcal{L}\!\leftarrow\!\emptyset$，人物画像状态 $\mathcal{P}\!\leftarrow\!\mathcal{P}_0$，任务集 $\mathcal{T}\!\leftarrow\!\emptyset$。\\
+  \textbf{对} $r=1,\dots,R$ \textbf{执行}
+  \begin{enumerate}[leftmargin=1.8em,itemsep=0.1em]
+    \item $e\!\leftarrow\!\mathrm{Sample}(\mathcal{S},\mathcal{N},\mathrm{noise\_ratio})$\hfill 采样任务事件或噪声事件
+    \item $\tilde{e}\!\leftarrow\!\mathrm{AdaptToEnv}(e,\mathcal{P},\mathcal{F},\mathcal{L})$\hfill 将其植根于当前环境
+    \item 使用 LLM 根据 $\tilde{e}$ 生成更新 $\Delta\mathcal{F},\Delta\mathcal{L},\Delta\mathcal{P}$
+    \item 更新环境：$\mathcal{F}\!\leftarrow\!\mathcal{F}\cup\Delta\mathcal{F}$，$\mathcal{L}\!\leftarrow\!\mathcal{L}\cup\Delta\mathcal{L}$，$\mathcal{P}\!\leftarrow\!\mathcal{P}\cup\Delta\mathcal{P}$
+    \item \textbf{若} $r\in\mathcal{I}_{\mathrm{task}}$，\textbf{则}
+    \item[] \hspace*{1em}$X_r\!\leftarrow\!\mathrm{Snapshot}(\mathcal{F},\mathcal{L},\mathcal{P},r)$\hfill 为当前环境建立快照
+    \item[] \hspace*{1em}$Q_r\!\leftarrow\!\mathrm{GenTaskQuery}(X_r)$\hfill 生成任务查询
+    \item[] \hspace*{1em}$V_r,A_{\mathrm{ref},r}\!\leftarrow\!\mathrm{GenVerifier}(Q_r,X_r)$\hfill 生成验证器与参考答案
+    \item[] \hspace*{1em}$\tau_r\!\leftarrow\!\mathrm{AutoFilter}(X_r,Q_r,V_r,A_{\mathrm{ref},r})$\hfill 过滤任务实例
+    \item[] \hspace*{1em}\textbf{若} $\tau_r\neq\varnothing$，\textbf{则} $\mathcal{T}\!\leftarrow\!\mathcal{T}\cup\{\tau_r\}$
+  \end{enumerate}
+  \textbf{输出：}任务集 $\mathcal{T}$。\hfill 基准用例可再接受人工验证。\\
+\end{algorithm}
+
+\subsection{构建流水线}
+\label{sec:construction}
+
+人工构建上下文丰富的数字世界及其配套任务成本高得难以承受，也难以扩展。因此，我们使用图~\ref{fig:pipeline} 和算法~\ref{alg:algo} 所示的自动化流水线生成评测与训练数据：该流水线逐步构建持续演化的用户环境，从中间状态抽取任务，并移除低质量实例。
+
+\textbf{阶段 I：迭代式数字环境合成。}我们首先通过迭代生成循环构建持续演化的数字环境。每一轮，流水线从预定义种子池采样任务模板或噪声模板，并让 LLM 以当前人物画像和世界状态为条件，生成对应的持久状态、事件日志和人物画像更新。经过多轮后，最初稀疏的人物画像被转化为时间上连贯的环境，其中累积了事件流并形成更丰富的跨组件依赖，为后续任务构建提供基础。
+
+\textbf{阶段 II：任务与验证器生成。}随后，我们从模拟过程的指定轮次派生任务。对每个选定轮次，流水线捕获相应环境状态，并让 LLM 据此生成三个相互耦合的产物：用户查询、可执行验证器和参考解。因此，每项任务都植根于同一个持续演化数字世界的具体时间切片，而不是从孤立静态状态中合成。
+
+\textbf{阶段 III：自动过滤。}由于流水线依赖 LLM 生成，因此必须实施自动化质量控制。我们将规则检查与基于 LLM 的过滤相结合，在人工审核前移除无效实例。规则检查针对表层不一致，例如引用不存在的工具或服务。随后，基于 LLM 的过滤会利用环境状态和参考解评估更高层次的有效性，判断任务能否求解，以及验证器在逻辑上是否与规范一致。
+
+\textbf{阶段 IV：由执行支持的人工验证。}最后，我们在执行验证的辅助下开展人工核验。我们把参考解交给一个强智能体，请它在带有验证器的环境中执行任务。执行成功表明任务至少存在一条符合预期逻辑的有效求解路径，从而使人工审核者能够集中评估查询、环境和验证器之间的一致性。执行失败的实例则升级为人工复核，以确定应修订还是丢弃。
+
+\subsection{Claw-Anything 数据集}
+\label{sec:bench-stats}
+
+\begin{figure}[t]
+  \centering
+  \begin{minipage}[t]{0.61\linewidth}
+    \vspace{0pt}\centering\scriptsize
+    \setlength{\tabcolsep}{4pt}
+    \renewcommand{\arraystretch}{1.15}
+    \resizebox{0.98\linewidth}{!}{%
+    \begin{tabular}{ll|c|>{\columncolor{gray!12}}c>{\columncolor{gray!12}}c}
+      \toprule
+      \multirow{2}{*}{\textbf{类别}} & \multirow{2}{*}{\textbf{指标}} & \multirow{2}{*}{\textbf{Claw-Eval}} & \multicolumn{2}{c}{\textbf{Claw-Anything}} \\
+      \cmidrule(lr){4-5}
+      & & & 评测 & 训练 \\
+      \midrule
+      规模 & 实例数 & 300 & 200 & 2000 \\
+      \midrule
+      \multirow{2}{*}{文本上下文} & 持久状态词数 & 5.3k & 108.0k & 97.3k \\
+      & 日志词数 & 0 & 83.7k & 65.7k \\
+      \midrule
+      \multirow{2}{*}{服务} & 任务涉及数 & 1.3 & 10.1 & 9.2 \\
+      & 环境支持数 & 19 & 35 & 35 \\
+      \midrule
+      设备 & 支持类型 & CLI & CLI + GUI & CLI + GUI \\
+      \bottomrule
+    \end{tabular}}
+  \end{minipage}
+  \begin{minipage}[t]{0.34\linewidth}
+    \vspace{0pt}\centering
+    \includegraphics[width=\linewidth]{Figures/distribution.pdf}
+  \end{minipage}
+  \caption{Claw-Anything 的基准统计。\textbf{左：}在规模、上下文长度、每项任务涉及的服务数和支持设备方面与 Claw-Eval 比较。\textbf{右：}评测实例的类别分布。}
+  \label{tab:claweval-comparison}
+\end{figure}
+
+\textbf{基准统计。}如图~\ref{tab:claweval-comparison} 所示，包括第四阶段人工验证在内的完整流水线最终生成 200 项评测任务，其中包含 150 项纯 CLI 任务和 50 项 CLI+GUI 任务，横跨 9 个主要类别。与 Claw-Eval 相比，Claw-Anything 提供显著更丰富的感知上下文，具有更长的时间跨度、更广的服务覆盖、更密集的跨服务依赖，以及需要跨多设备协调的任务环境。
+
+\textbf{利用 Claw-Anything 收集轨迹。}在训练轨迹收集阶段，我们执行自动化流水线的前三个阶段，生成 2,000 个任务环境。为防止评测集污染，这些环境取自与评测人物画像完全不相交的人物画像池。随后，我们从这些环境收集 1,500 条成功轨迹，用于后续训练 Qwen3.5-27B。
+
+\begin{table}[t]
+  \caption{Claw-Anything 基准上的主要结果。为公平比较，我们在统一的 OpenHarness 框架下评测当前先进的开放权重和闭源模型。每列最佳结果以粗体标示。}
+  \label{tab:main}
+  \centering\small
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{lrccc>{\columncolor{gray!20}}c|r}
+    \toprule
+    模型 & 参数量 & 分数 & Pass@1 & Pass@3 & Pass\textasciicircum{}3 & Token 数（输入/输出）\\
+    \midrule
+    \textbf{开放权重} & & & & & & \\
+    Qwen3.5-27B~\citep{qwen3p5}       & 27B & 0.50 & 9.8 & 19.0 & 2.0 & 83.8M~/~0.9M  \\
+    MiniMax-M2.7~\citep{minimax_m27}   & 229B & 0.52 & 13.5 & 28.5 & 3.5 & 79.0M~/~1.1M\\
+    Qwen3.6-27B~\citep{qwen3p6-27b}   & 27B & 0.58 & 22.5 & 42.0 & 6.0 & 99.4M~/~2.0M \\
+    Kimi-K2.6~\citep{kimi26}           & 1.1T & 0.57 & 22.8 & 44.0 & 6.5 & 178.1M~/~2.3M\\
+    GLM-5.1~\citep{GLM51}             & 754B & 0.59 & 31.7 & 47.0 & \textbf{17.0} & 125.0M~/~2.2M\\
+    \textbf{Claw-Anything-Qwen3.5-27B（本文）} & 27B & \textbf{0.61} & \textbf{33.5} & \textbf{52.0} & 15.5 & 117.8M~/~1.1M\\
+    \rowcolor{blue!10}相对 Qwen3.5-27B 的增益 & -- & \textit{+0.11} & \textit{+23.7} & \textit{+33.0} & \textit{+13.5} & -- \\
+    \midrule
+    \textbf{闭源} & & & & & & \\
+    Claude Sonnet 4.5~\citep{sonnet45} & -- & 0.59 & 28.0 & 45.0 & 12.0 & 149.0M~/~1.5M\\
+    Claude Opus 4.7~\citep{opus47}     & -- & 0.62 & 31.8 & 48.0 & 13.5 & 123.5M~/~1.5M\\
+    GPT-5.5~\citep{openai_gpt55}       & -- & \textbf{0.65} & \textbf{34.5} & \textbf{53.5} & \textbf{20.0} & 77.7M~/~0.9M\\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\section{实验}
+\label{sec:experiments}
+
+\subsection{Claw-Anything 的主要结果}
+
+\textbf{前沿基线。}我们评测了一组广泛的前沿 LLM，既包括 Qwen 系列~\citep{qwen3p5,qwen3p6-27b}、MiniMax 2.7~\citep{minimax_m27}、GLM 5.1~\citep{GLM51} 和 Kimi 2.6~\citep{kimi26} 等开放权重模型，也包括 Claude Opus 4.7~\citep{opus47} 与 GPT-5.5~\citep{openai_gpt55} 等闭源模型。所有模型均在 OpenHarness~\citep{openharness} 下评测；这是一个被广泛采用、由纯 Python 实现的超轻量个人智能体脚手架。遵循 Claw-Eval，我们以 Claude Sonnet 4.5 作为裁判模型，并报告 Pass@1、Pass@3 和 Pass\textasciicircum{}3 作为主要指标，其中 Pass\textasciicircum{}3 要求三次独立运行全部成功。我们还使用连续执行分数和 token 消耗量作为求解质量的补充指标。表~\ref{tab:main} 汇总了结果。即便最强闭源模型的 Pass\textasciicircum{}3 也只有 20.0\%；这表明，使智能体的感知范围更接近用户会实质性提高基准难度，因为成功既依赖于准确理解用户的数字环境，也依赖于在该上下文中正确行动。
+
+\textbf{收集训练轨迹带来的改进。}我们进一步评估自动化流水线是否不仅能充当评测基础设施，也能成为有效训练数据的来源。具体而言，我们构建 2,000 项训练任务，收集 1,500 条成功轨迹，并用它们微调 Qwen3.5-27B 共 10 个 epoch。所得模型在 Pass@1 上比基础模型提升 23.7\%，在 Claw-Anything 上优于所有其他开放权重基线，并缩小了与闭源模型的差距。图~\ref{fig:scaling_law} 还表明，性能会随收集训练轨迹数量的增加而稳定提升。这些结果共同说明，流水线产生的数据对后训练有效，并能在本基准上带来显著增益。
+
+\subsection{消融研究}
+
+我们对 Claw-Anything 的关键设计选择进行消融，包括第~\ref{sec:ab_scaling_context} 节的上下文扩展、第~\ref{sec:ab_data_pipeline} 节的数据流水线，以及第~\ref{sec:ab_eval_setting} 节的评测设置。受篇幅所限，更多实验细节在附录中给出。
+
+\subsubsection{上下文扩展}
+\label{sec:ab_scaling_context}
+
+本节消融两个问题：扩大智能体的操作范围是否能解锁先前无法完成的任务，以及更大的上下文是否构成当前智能体的根本瓶颈。
+
+\textbf{长时程事件流。}我们同时消融事件流的可用性和暴露给智能体的历史长度。如表~\ref{tab:ablate_three_dim} 所示，移除事件流后成功率显著下降，因为许多任务本质上依赖事件历史中的信息，而非仅依赖静态服务状态。这一发现支持我们的核心主张：事件流通过使智能体的操作范围更接近用户而扩大了可解任务集合。图~\ref{fig:scaling} 进一步表明，即使事件流可用，随着历史变长，性能仍会下降；这说明尽管视野更广，当前模型依然难以有效利用长时程上下文。
+
+\textbf{跨后端服务。}我们通过屏蔽跨多个后端服务任务所需的工具，对多服务协调进行消融。如表~\ref{tab:ablate_three_dim} 所示，移除这些工具后，成功率降至接近零，说明许多任务内在地要求智能体跨服务检索信息并执行操作，而不能只在单个隔离后端内完成。这一结果凸显了允许个人助理智能体访问数字生态系统的重要性。图~\ref{fig:scaling} 还表明，即使所有相关工具均可用，性能仍会随所涉及服务数量增加而下降。这一趋势说明，跨服务协调仍是当前模型面临的主要挑战，也是未来改进的关键目标。
+
+\textbf{CLI--GUI 协作。}我们进一步通过移除 GUI 访问、把智能体限制为纯 CLI 执行，对跨界面协调进行消融。如表~\ref{tab:ablate_three_dim} 所示，本质上需要 CLI--GUI 协作的任务在此设置下几乎无法解决，而恢复 CLI+GUI 联合访问后才重新变得可处理。同时，图~\ref{fig:scaling} 表明，即使两种界面均可用，CLI--GUI 协作任务的性能仍显著低于纯 CLI 任务。综合来看，连接 CLI 与 GUI 为智能体开启了新的可解任务边界，但在异构交互模态之间进行鲁棒协调，仍是当前智能体系统的重大挑战。
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[t]{0.32\textwidth}
+    \centering\includegraphics[width=\linewidth]{Figures/event_stream.pdf}
+    \caption{长时程事件流。}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\textwidth}
+    \centering\includegraphics[width=\linewidth]{Figures/num_servers.pdf}
+    \caption{多个后端服务。}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\textwidth}
+    \centering\includegraphics[width=\linewidth]{Figures/GUI_ab.pdf}
+    \caption{跨设备（CLI+GUI）。}
+  \end{subfigure}
+  \caption{上下文规模消融：展示事件流规模和服务数量对平均分的影响，以及 GUI 访问对 Pass@1 的影响。}
+  \label{fig:scaling}
+\end{figure}
+
+\begin{figure}[t]
+  \centering\small
+  \begin{minipage}[t]{0.47\textwidth}
+    \vspace{0pt}\centering
+    \captionof{table}{事件流、跨服务环境和跨设备交互访问对基准性能的影响，并比较主动式与反应式任务。所有结果均为 Pass@1。}
+    \label{tab:ablate_three_dim}
+    \begin{tabular}{lcc}
+      \toprule
+      因素 & 有 & 无 \\
+      \midrule
+      事件流 & 21.0 & 0.0\\
+      跨服务 & 24.0 & 0.0\\
+      跨设备 & 16.0 & 2.0\\
+      \midrule
+      任务类型 & 反应式 & 主动式 \\
+      \midrule
+      Pass@1 & 25.9 & 6.7 \\
+      \bottomrule
+    \end{tabular}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.47\textwidth}
+    \vspace{0pt}\centering
+    \includegraphics[width=\linewidth]{Figures/scaling_law.pdf}
+    \captionof{figure}{轨迹规模扩展。}
+    \label{fig:scaling_law}
+  \end{minipage}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \begin{subfigure}[t]{0.32\textwidth}
+    \centering\includegraphics[width=\linewidth]{Figures/noise_ratio.pdf}
+    \caption{噪声轮次比例。}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\textwidth}
+    \centering\includegraphics[width=\linewidth]{Figures/simulation_rounds.pdf}
+    \caption{模拟轮数。}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.32\textwidth}
+    \centering\includegraphics[width=\linewidth]{Figures/fixture_conflict.pdf}
+    \caption{持久状态层冲突。}
+  \end{subfigure}
+  \caption{自动化数据生成流水线消融：展示噪声轮次比例、模拟轮数和持久状态层冲突数量的影响。}
+  \label{fig:ablatedatapipeline}
+\end{figure}
+
+\begin{figure}[t]
+  \centering\small
+  \begin{minipage}[t]{0.47\textwidth}
+    \vspace{0pt}\centering
+    \captionof{table}{技能加载消融：比较不同模型的完整加载与惰性加载。惰性加载要求智能体自主选择工具，因此更具挑战性。所有结果均为 Pass@1。}
+    \label{tab:skill_loading}
+    \begin{tabular}{lcc}
+      \toprule
+      模型 & 完整加载 & 惰性加载 \\
+      \midrule
+      MiniMax 2.7       & 22.7 & 10.0 \\
+      Qwen3.6-27B       & 24.7 & 23.7 \\
+      GLM-5             & 29.3 & 14.0\\
+      Claude Sonnet 4.6 & 43.0 & 26.7 \\
+      \bottomrule
+    \end{tabular}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.47\textwidth}
+    \vspace{0pt}\centering
+    \includegraphics[width=\linewidth]{Figures/faliure_mode.pdf}
+    \captionof{figure}{失败模式可视化。}
+    \label{fig:failure_mode}
+  \end{minipage}
+\end{figure}
+
+\subsubsection{数据流水线}
+\label{sec:ab_data_pipeline}
+
+\textbf{噪声注入比例。}我们的生成流水线会向用户数字环境注入数量可控的背景噪声。如图~\ref{fig:ablatedatapipeline} 所示，任务成功率随噪声比例上升而单调下降，说明更密集的无关事件流会加大智能体恢复成功完成任务所需信号的难度。这一结果既表明流水线能够逼近更真实的含噪环境，也表明环境噪声本身就是重要的困难来源。
+
+\textbf{人物画像丰富度。}在我们的数据生成流水线中，增加模拟轮数会产生更丰富的人物画像和纠缠程度更高的任务上下文。如图~\ref{fig:ablatedatapipeline} 所示，任务成功率随轮数增加而持续下降，说明人物画像丰富度是驱动基准难度的关键因素。这一趋势还表明，更充分发展的人物画像能为个人助理智能体带来更真实、更具挑战性的评测。
+
+\textbf{持久状态层冲突。}我们的自动化流水线从种子任务派生冲突密集型任务，迫使智能体协调不同后端服务中的不一致信息。如图~\ref{fig:ablatedatapipeline} 所示，随着冲突程度增加，任务成功率显著下降，说明跨服务不一致是主要困难来源。该结果进一步支持了流水线所生成环境的真实性。
+
+\subsubsection{评测设置}
+\label{sec:ab_eval_setting}
+
+\textbf{主动性。}如表~\ref{tab:ablate_three_dim} 所示，主动式任务显著难于对应的反应式任务。这一差距凸显了主动性是个人助理智能体未来模型开发的重要方向。
+
+\textbf{技能加载策略。}我们研究技能加载策略如何影响智能体性能。在完整加载下，系统提示包含所有候选工具的完整规范；在惰性加载下，系统只提供简短工具描述和一个技能加载工具，由智能体在测试时决定使用哪些技能。如表~\ref{tab:skill_loading} 所示，惰性加载显著降低成功率和稳定性。Qwen3.6-27B 在这一设置下相对更鲁棒，可能是因为它更善于从不完整技能上下文中恢复，工具选择也更可靠。
+
+\subsection{失败模式分析}
+
+图~\ref{fig:failure_mode} 表明，各模型最主要的失败模式都是“调查--执行”鸿沟。智能体常能识别相关上下文，却无法把这种理解转化为成功行动，说明执行仍是广泛、常驻数字环境中的首要瓶颈。除这一共同模式外，Qwen3.6-27B 的执行不精确和信息源遗漏错误率更高，而 Claude Opus 4.7 更常过度澄清或陷入循环。与幻觉相关的错误相对少见。
+
+\section{结论}
+\label{sec:conclusion}
+
+本文提出 Claw-Anything，用于评测操作范围显著扩大的个人助理智能体。它结合长时程事件流、多样的后端服务、多设备交互和主动式任务，刻画了现有评测大多缺失的核心挑战。结果揭示了当前前沿模型与真实世界协助需求之间的明显差距：上下文广度增加时性能下降，而主动式场景尤其困难。配套的自动化数据生成流水线还支持可扩展的环境构建，为未来个人助理智能体研究提供实用基础。
+
+\appendix
+
+\section{任务生成流水线细节}
+
+\subsection{人物画像创建与丰富化}
+
+在生成 Claw-Anything 任务时，人物画像在引导环境演化、使任务个性化和多样化方面发挥关键作用。在构建流水线的阶段 I（迭代式数字环境合成）中，我们先生成一个初始的粗略人物画像，再从任务或事件池持续采样；这些样本为用户事件模拟提供元信息，人物画像也随之不断丰富。
+
+初始人物画像刻画用户的基本信息，例如角色与特征。它简单而粗略，可通过提示任意现代 LLM 轻松生成；官方源文件中的相应附录图给出了具体示例。
+
+为引导生成更个性化、更多样且更真实的任务，我们会精细地丰富原始人物画像，加入具体用户偏好与活动。丰富过程由模拟一系列用户事件驱动。具体而言，给定一个预先准备、描述冲突因素或干扰因素的“元”任务/事件池，我们不断从中采样。对每个采样项，将当前人物画像和采样事件信息提示给 LLM，把一个“人物画像专属”事件实例化为对应的前因、后果和伴随噪声。随后，通过向应用数据库或日志注入数据，把该事件实例施加到当前环境；同时修改人物描述并增加活动记录，将它施加到当前人物画像。经过多轮更新，人物画像逐渐偏离初始化状态，并在偏好和行为模式上体现多样性。官方源文件中的相应附录图展示了人物画像丰富化示例，以及用于生成个性化任务描述和相应应用数据的人物画像专属事件实例化提示。
+
+为描述冲突因素和干扰因素，元任务分别包含两类；为方便叙述，我们称前者为种子任务，后者为噪声事件。种子任务呈现真实世界常见的特定冲突模式，例如时段冲突、信息矛盾和财务限制。官方源文件中的相应附录图给出了信息存在冲突的种子任务示例。此类冲突给目标任务求解带来很大挑战，要求进行审慎推理并恰当处理冲突。
+
+噪声事件则加入与待解决目标任务无关的干扰。我们整理了一套日常活动模式库，例如扫描收件箱、起草后丢弃电子邮件、写下后删除笔记、浏览日历或 RSS 源，以及检查库存仪表板。这些活动可被实现为分散在人物画像工作日中的具体、有日期的会话。其中有些纯属“瞬时”活动，只出现在活动日志中；另一些会“留下痕迹”，还会在相应应用数据库中留下残余记录，例如已删除笔记、已丢弃草稿或已取消待办。这会进一步增加环境的复杂性和真实性，同时不干扰目标任务。
+
+\subsection{任务查询与验证器生成}
+
+在构建流水线阶段 II，我们生成待解决目标任务及对应验证器。首先从阶段 I 生成的人物画像出发，随机采样一个描述冲突的种子任务，并按照前述方式使其适配当前人物画像，从而实例化人物画像专属事件。随后提示 LLM 生成触发该事件的前因，并阐明预期由智能体解决的问题。最后，从上帝视角（即能够完整观察整个环境）生成验证器或评分器及参考解，用于评测时对智能体结果打分。值得注意的是，负责生成评分器的 LLM 只接收与任务共同合成的、具有明确目的且无噪声的信息；因此，评分器相对被评测智能体享有显著的信息优势，而这反过来为其判断的可靠性提供支撑。
+
+\subsection{任务验证}
+
+为验证所生成任务，我们把任务及其参考解交给一个智能体，让它在模拟环境中端到端执行，从而验证该任务沿评分器建议的求解路径既可解又定义良好。
+
+\section{Claw-Anything 评测细节}
+
+评测时，我们对智能体的系统提示和工具界面作定向修改，构建模拟应用后端环境的服务以满足智能体运行需求，并采用定制评分方案。下面依次介绍这些设计。
+
+\subsection{系统提示与工具的修改}
+
+每项任务生成时都有固定的内部“当前日期”；若允许智能体自行确定日期，结果会随实际评测日期漂移。因此，我们将任务专属日期直接注入系统提示，以保证同一任务在不同日历日期重复评测时仍可比较。
+
+我们还修改智能体的工具界面，使其在评测时能够访问任务生成阶段填充的应用数据库。评测支持两种模式：“技能模式”和“工具模式”。在技能模式下，智能体只获得一个用于检索完整工具规范的元工具；系统提示仅列出可用工具的名称与简短描述，智能体必须先调用元工具取得某个工具的完整使用规范，再调用该工具。相比之下，在工具模式下，所有工具的名称和完整使用规范都直接置于系统提示中，智能体无需额外检索步骤即可调用。应用日志信息单独处理：我们把应用日志以文件形式注入执行任务的 Docker 环境，在系统提示中声明其文件路径，并依赖智能体原生文件系统读取工具访问它们。官方源文件中的相应附录图展示了使用 OpenHarness 的系统提示。
+
+\subsection{模拟服务后端}
+
+为支持智能体评测，我们构建了一个模拟应用后端环境的服务，官方源文件中的相应附录图展示了该服务。服务解析智能体发出的工具调用，返回所请求的信息或执行写入/删除操作，从而忠实执行智能体与应用的交互。服务以智能体工具调用为输入，返回所请求的数据或相应交互结果；二者共同使智能体能在评测期间完整访问应用数据库。
+
+\subsection{评分}
+
+计算通过率时，我们希望失败任务也能得到有意义的连续分数，因此评分器还会为智能体的求解轨迹打分。不同于只有一条规范求解路径的任务，我们的任务包含大量噪声，包括语义无关噪声和有意设置的干扰噪声；它还包含揭示人物画像特征的多种替代线索，以及任务生成期间埋下的伏笔和多线程线索。因此，我们的任务在很大程度上是“多路径”的：多条求解轨迹都可能得到同一个正确答案。若只对照一条规范轨迹评分，那么智能体即使沿替代路径获得正确答案，也可能因缺少过程分而低于通过阈值。为避免这一问题，我们采用“决定性、结果主导”的评分方案：正确结果所得分数本身即可超过通过阈值，错误结果的分数则远低于该阈值。这样可保证任何得到正确答案的智能体，无论路径如何，都能获得通过分数。即使任务未完成，智能体仍能获得相应过程分，从而支持更细粒度的行为评估。
+
+\subsection{详细评测设置与结果}
+
+Claw-Anything 基准由 150 项 CLI 任务和 50 项 CLI+GUI 任务组成；其中 150 项 CLI 任务包含 100 项技能模式任务和 50 项工具模式任务。各模型在 150 项 CLI 任务和 50 项 CLI+GUI 任务上的详细表现见表~\ref{tab:guiper}。
+
+\begin{table}[t]
+  \centering
+  \caption{各模型在 150 项纯 CLI 任务和 50 项 CLI+GUI 任务上的表现（Pass@1）。}
+  \label{tab:guiper}
+  \begin{tabular}{lcc}
+    \toprule
+    模型 & 纯 CLI 任务 & CLI+GUI 任务 \\
+    \midrule
+    Qwen3.5-27B               & 10.0 & 9.3 \\
+    Qwen3.6-27B               & 24.0 & 18.0 \\
+    MiniMax-M2.7              & 14.2 & 11.3 \\
+    Kimi-K2.6                 & 27.3 & 9.3 \\
+    GLM-5.1                   & 36.9 & 16.0 \\
+    Claw-Anything-Qwen3.5-27B & 38.4 & 18.7 \\
+    Claude Sonnet 4.5         & 35.1 & 6.0 \\
+    Claude Opus 4.7           & 40.0 & 7.3 \\
+    GPT-5.5                   & 40.2 & 17.3 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{训练细节}
+
+学习率初始化为 $2\times10^{-5}$，并遵循余弦衰减调度。为稳定训练早期阶段，我们在总训练步数的前 5\% 使用线性预热策略，在此期间学习率从最小值 $1\times10^{-6}$ 线性增至 $2\times10^{-5}$。模型训练 10 个 epoch，批大小设为 16。我们采用 qwen3-coder 作为智能体模板，最大序列长度为 100k token。
+
+\section{局限性}
+\label{sec:limitations}
+
+Claw-Anything 是评测能够更广泛访问用户数字世界的常驻个人助理的一步，但它仍有重要局限。第一，尽管该基准包含多个后端服务及跨服务依赖，其中许多服务仍实现为可控的模拟环境，而非完全真实的现实系统。第二，当前设置仍只覆盖影响真实个人助理使用方式的一小部分设备。虽然 Claw-Anything 已纳入跨设备交互，但与用户在手机、笔记本电脑、平板电脑、可穿戴设备、智能家居设备和其他环境计算端点之间自由切换的日常场景相比，所连接的设备生态仍不完整。
+
+\section{社会影响}
+\label{sec:social_impact}
+
+Claw-Anything 有望通过支持对能力更强、上下文感知更好的个人助理智能体的研究，产生积极的社会影响。更广泛地访问用户数字世界，可能使系统能够减轻协调负担，帮助用户管理复杂的信息流，并在日常和专业场景中提供更及时的协助。特别是，对长时程、跨服务和跨设备推理开展更好的评测，可以帮助研究社区更深入地理解此类系统当前的局限，并开发更安全、更有用的助理。
+
+与此同时，本基准研究的能力也带来了实质性的社会风险。拥有广泛数字访问权限的常驻助理可能加剧隐私担忧，因为能够跨多个服务和设备进行观察与行动的系统，若缺乏充分防护，可能泄露敏感个人信息或产生过度侵入行为。与之相关，更强的自主性和更广的操作范围还可能增加高风险场景中的错误行动、越界行为或滥用风险。尽管本基准面向评测而非直接部署，我们仍希望它能推动未来研究关注权限边界、透明度、可审计性和用户控制等防护机制，以及更加注重隐私、能够使高能力个人助理更好地与用户利益和社会期望对齐的设计。
+
+\paragraph{译者说明。}原文附录随后给出了较长的人物画像、种子任务、系统提示和数据库生成样例。这些英文样例及其图示作为官方复现资产完整保留在本目录的 \texttt{arxiv.tex} 与 \texttt{Figures/} 中，中文入口不再重复排入。
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
