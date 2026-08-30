@@ -51,6 +51,7 @@
 * [PhyPrompt](papers/phyprompt.md)
 * [PivotRL](papers/pivot-rl.md)
 * [R2 Router](papers/r2-router.md)
+* [RoboHarness: A Memory-Augmented Policy Harness for Vision-Language-Action Model Robustness via In-Context Adaptation](papers/roboharness.md)
 * [RollArt](papers/roll-art.md)
 * [SageSched](papers/sage-sched.md)
 * [ScaleCUA: Scaling Open-Source Computer Use Agents with Cross-Platform Data](papers/scalecua.md)

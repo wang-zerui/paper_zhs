@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **64**
+- Papers: **65**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -68,6 +68,7 @@
 - [PhyPrompt](./papers/phyprompt.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fphyprompt%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/phyprompt/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/phyprompt/main_zh.pdf)
 - [PivotRL](./papers/pivot-rl.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fpivot-rl%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/pivot-rl/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/pivot-rl/main_zh.pdf)
 - [R2 Router](./papers/r2-router.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fr2-router%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/r2-router/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/r2-router/main_zh.pdf)
+- [RoboHarness: A Memory-Augmented Policy Harness for Vision-Language-Action Model Robustness via In-Context Adaptation](./papers/roboharness.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Froboharness%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/roboharness/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/roboharness/main_zh.pdf)
 - [RollArt](./papers/roll-art.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Froll-art%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/roll-art/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/roll-art/main_zh.pdf)
 - [SageSched](./papers/sage-sched.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fsage-sched%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/sage-sched/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/sage-sched/main_zh.pdf)
 - [ScaleCUA: Scaling Open-Source Computer Use Agents with Cross-Platform Data](./papers/scalecua.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fscalecua%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/scalecua/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/scalecua/main_zh.pdf)

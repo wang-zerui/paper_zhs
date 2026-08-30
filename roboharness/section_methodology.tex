@@ -1,0 +1,339 @@
+\section{Methodology}
+
+\begin{figure*}[t]
+  \centering
+\vspace{0.5em}  \includegraphics[width=0.85\linewidth]{figure/framework.jpg}
+\caption{\textbf{{\sys} Framework.} Given the observation and instruction, Dual-Memory RAG retrieves relevant experiences from the dual-memory bank. The {\color{black}vision-language orchestrator} selects MCP tools, estimates parameters $\theta$, and synthesizes an intervention chain executed by extensible MCP tools. After execution, asynchronous memory consolidation updates the bank, closing the loop for iterative refinement.}%
+\vspace{-1.5em}
+  \label{framework}
+  
+\end{figure*}
+
+This section presents the \textbf{{\sys}} framework, which, as shown in Fig.~\ref{framework}, comprises an \textbf{Online Execution Workflow} and an \textbf{Offline Memory Consolidation Workflow}.
+
+\paragraph{Online Execution Workflow}
+The online workflow enables robust task-level adaptation through three modules:
+\textbf{(1) Dual-Memory RAG} retrieves success guidance and failure warnings from the Dual-Memory Bank;
+\textbf{(2) {\color{black}Attribution-Driven Vision-Language Orchestrator}} diagnoses obstacles and selects attribution-guided interventions;
+and \textbf{(3) MCP Intervention} executes them through extensible tools that modulate perceptual and linguistic inputs.
+
+\paragraph{Offline Memory Consolidation Workflow}
+Complementing online execution, the offline workflow performs \textbf{Dual-Stage Memory Consolidation}.
+It distills newly observed success and failure trajectories into structured memories and updates the Dual-Memory Bank,
+enabling continual improvement without parameter updates.
+
+% Task-level components run once per task instance, from initial observation to orchestration, to establish context; 
+
+Together, these workflows form a closed-loop adaptive system.
+\vspace{-0.5em}
+\[\small
+\underbrace{
+    \overbrace{\text{Obs.} \rightarrow \text{Retr.} \rightarrow \text{Dec.} \rightarrow \text{Orch.}}^{\substack{\text{Task-level} \\ (\text{once per task})}} \rightarrow \overset{\substack{\text{Chunk-level} \\ (\text{every } N \text{ steps})}}{\text{Exec.}}
+}_{\text{Online}} 
+\rightarrow 
+\underbrace{\text{Consol.}}_{\text{Offline}}
+\]
+
+We next describe each module in detail.
+
+
+% \subsection{Dual-Memory RAG}
+% \label{eyes}
+
+% Corresponding to Part A in Fig.~\ref{framework}, this module implements a retrieval-augmented dual-memory bank that provides structured historical context for downstream decision-making, grounding the LLM's reasoning in prior successes and failures.
+% Unlike conventional RAG systems, our memory design is \textbf{Dual} along three complementary dimensions:
+% (1) it stores both successful and failed experiences to enable contrastive attribution;
+% (2) it adopts a semi-schema representation that combines fixed core fields with extensible metadata;
+% and (3) each experience undergoes two stages of attribution, a process detailed in Section~\ref{Evolution}, which formally defines the Evolution mechanism.
+
+% We first describe the construction of the dual-memory experience bank, and then present the indexing and retrieval mechanism built upon it.
+
+% \subsubsection{Dual-Memory Experience Bank Construction}
+
+% We construct a dual-partition memory bank:
+% \begin{equation}
+% \mathcal{M} = \mathcal{M}_{succ} \cup \mathcal{M}_{fail}
+% \end{equation}
+% which archives $\mathcal{M}_{succ}$ as positive guidance and $\mathcal{M}_{fail}$ (with diagnostic insights) as negative evidence.
+% This duality allows the agent to reason by contrasting optimal paths with patterns to be avoided.
+
+% \subsubsection{Semi-Schema Experience Representation}
+
+% Each experience entry $e_i \in \mathcal{M}$ is stored in a \textbf{semi-schema format}, consisting of a fixed core schema augmented with extensible auxiliary fields:
+% \begin{equation}
+% e_i = \big(
+% \overbrace{E_i, T_i, S_i, D_i, V_i, O_i, {A_i}}^{\text{fixed schema}}, 
+% \mathcal{I}_i
+% \big)
+% \end{equation}
+% \begin{itemize}
+%     \item $E_i$: multimodal embedding of the task instance;
+%     \item $T_i$: natural language task description;
+%     \item $S_i \in \{0,1\}$: success indicator;
+%     \item $D_i$: diagnostic annotation (non-empty for failures);
+%     \item $V_i$: keyframe representations of the execution video;
+%     \item $O_i$: structured scene as object-attribute pairs.
+%     \item ${A_i}$: attention map: spatial distribution of VLA focus.
+%     \item $\mathcal{I}_i$: extensible structured metadata bundle.
+% \end{itemize}
+
+% $A_i$ enable Attribution-Driven LLM Orchestrator to diagnose visual biases by quantifying heatmap displacement and entropy shifts between the current OOD scene and retrieved references.
+% This diagnostic precision facilitates targeted MCP interventions.
+
+% Complementing this, the metadata bundle $\mathcal{I}_i$ provides a flexible schema for tool execution, containing parameters such as \texttt{key\_frame\_range}, \texttt{success\_max\_step}, and \texttt{rollback}.
+% Additional fields can be dynamically appended as new tools or reasoning signals are introduced.
+% This design balances schema stability with representational flexibility, enabling long-term memory evolution without rigid schema constraints.
+
+\subsection{Dual-Memory RAG}%
+\label{dual memory}
+
+Part A of Fig.~\ref{framework} shows a retrieval-augmented Dual-Memory Bank that grounds the {\color{black}orchestrator's reasoning} in prior successes and failures.
+Its \textbf{dual} design separates success/failure experiences for contrastive attribution and refines each entry through two-stage consolidation (Section~\ref{Evolution}).
+
+We next detail the bank construction process and the retrieval mechanism built upon it.
+
+\subsubsection{Dual-Memory Storage Design}
+
+We construct a dual-partition memory bank:
+\begin{equation}
+\mathcal{M} = \mathcal{M}_{succ} \cup \mathcal{M}_{fail},
+\end{equation}
+where $\mathcal{M}_{succ}$ stores successful interventions as positive guidance, and $\mathcal{M}_{fail}$ stores failed attempts with attribution signals as negative evidence, supporting contrastive reasoning over strategies to reuse and patterns to avoid.
+
+The ablation in Section~\ref{dual memory} shows that single-partition memory yields unstable or inefficient planning, whereas using both partitions reduces reasoning turns and variance.
+
+Each experience entry $e_i \in \mathcal{M}$ is stored in a semi-schema format, consisting of a fixed core schema augmented with extensible auxiliary fields:
+\vspace{-0.5em}
+\begin{equation}
+e_i = \big(
+\overbrace{E_i, T_i, S_i, D_i, V_i, O_i}^{\text{fixed schema}}, 
+\mathcal{I}_i
+\big),
+\end{equation}
+\begin{itemize}
+    \item $E_i$: {\color{black}multimodal} embedding of the task instance;
+    \item $T_i$: natural language task description;
+    \item $S_i \in \{0,1\}$: success indicator;
+    \item $D_i$: diagnostic annotation (non-empty for failures);
+    \item $V_i$: keyframe representations of the execution video;
+    \item $O_i$: structured scene as object-attribute pairs;
+    \item $\mathcal{I}_i$: extensible structured metadata bundle.
+\end{itemize}
+
+
+The metadata bundle $\mathcal{I}_i$ stores tool-execution parameters such as \texttt{key\_frame\_range}, \texttt{success\_max\_step}, and \texttt{rollback}, while allowing new fields as tools or reasoning signals evolve.
+
+
+\subsubsection{Similarity-Based Retrieval Strategy}
+
+We employ a pre-trained CLIP encoder~\cite{CLIP} $E(\cdot, \cdot)$ to project the current task context (initial observation $o_t$ and instruction $l_t$) into a joint embedding space.
+The retrieval is formalized as:
+\begin{equation}
+\mathcal{H}_t = \text{Top-}k\Big(\text{Sim}\big(E(o_t, l_t), \{E_i \mid e_i \in \mathcal{M}\}\big)\Big),
+\end{equation}
+$\mathcal{H}_t$ includes success exemplars and failure precedents, providing \textbf{positive guidance} and \textbf{negative counterfactuals} for attribution-driven reasoning.
+
+The tripartite input $(\mathcal{H}_t, o_t, l_t)$ provides the necessary grounding for the {\color{black}orchestrator} to diagnose discrepancies and sequence the appropriate intervention tools.
+\vspace{-0.5em}
+\subsection{\texorpdfstring{{\color{black}Attribution-Driven Vision-Language Orchestrator}}{Attribution-Driven Vision-Language Orchestrator}}
+
+{\color{black}As shown in Fig.~\ref{framework}B, the Attribution-Driven Vision-Language Orchestrator serves as the deliberative core of {\sys}. It is powered by Qwen3-VL-32B, a multimodal large language model (MLLM) used here as a vision-language model for joint reasoning over observations, instructions, and retrieved visual-semantic memories to diagnose execution failures and orchestrate MCP interventions.}
+
+
+\subsubsection{Semantic Tool Discovery and Intent Alignment}
+
+The {\color{black}orchestrator} identifies interventions by measuring the capability gap between the current state $o_t$ and retrieved prototypes $\mathcal{H}_t$.
+Given semantic tool descriptions $\{\mathcal{D}_i\}_{i=1}^N$, it performs zero-shot matching to select a candidate toolset:
+\begin{equation}
+    \mathcal{T}_{1:k}= \text{Match}\big(\Delta_{g}, \{\mathcal{D}_i\}_{i=1}^N\big), \quad \Delta_{g} = \text{Gap}(o_t, \mathcal{H}_t),
+\end{equation}
+selecting tools whose functions align with the diagnosed failure cause.
+
+\subsubsection{Knowledge-Augmented Parameterization}%
+\label{Knowledge-Augmented Parameterization}
+Following tool selection, the {\color{black}orchestrator} derives execution parameters $\theta_i$ from the {\color{black}multimodal} context discrepancy $\Delta$:
+\begin{equation}
+ \theta_i = f(\Delta_i \mid T_i), \quad \Delta_i = \text{Gap}(o_t, l_t, \mathcal{H}_t\mid T_i),
+\end{equation}
+where $f$ denotes the mapping function for tool-specific values. Specifically, $\Delta$ characterizes the deviation of current observation $o_t$ and instruction $l_t$ from historical priors $\mathcal{H}_t$ across visual, semantic, and temporal dimensions. Table~\ref{tab:parameterization_formal} summarizes the mapping from these quantitative discrepancies to the specific execution parameters $\theta_i$ for each tool.
+\begin{table}[htbp]
+\vspace{-1.5em}
+\centering
+\caption{Tool-specific Parameterization Mapping.}%
+\label{tab:parameterization_formal}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\columnwidth}{@{} l X l @{}}
+\toprule
+\textbf{Tool} & \textbf{Discrepancy $\Delta$ from $\mathcal{H}_t$} & \textbf{$\theta_i$} \\
+\midrule
+Paint  & Feature distance from historical mean.         & $C,\,M,\,A_{mask}$ \\
+Eraser & Novel geometry vs.\ background model.          & $D,\,D_{masks}$ \\
+Prompt & Instruction mismatch with successful patterns  & $\mathcal{S}_{origin}$ \\
+Chain  & Sub-event-level alignment.                     & $(N_{e},N_{b})_k$ \\
+Encore & Similarity to historical failure trajectories. & $[s_s,s_e],\,N_w$ \\
+\bottomrule
+\end{tabularx}
+\vspace{3pt}
+\begin{flushleft}
+\scriptsize
+\textbf{$C$}: color/texture;\enspace
+\textbf{$M$}: material;\enspace
+\textbf{$A_{mask}$}: target-object-mask;\enspace
+\textbf{$D$}: distractor descriptions;\enspace
+\textbf{$D_{masks}$}: distractor-masks;\enspace
+\textbf{$\mathcal{S}_{origin}$}: simplified goal of origin task;\enspace
+\textbf{$N_{e,b}$}: execution/buffer steps;\enspace
+\textbf{$s_{s,e}$}: start/end steps;\enspace
+\textbf{$N_w$}: wait duration.
+\end{flushleft}
+\vspace{-0.5em}
+\end{table}
+
+
+The final output is a set of parameterized interventions:
+\begin{equation}
+\mathcal{T}^* = \{(T_1, \theta_1), (T_2, \theta_2), \dots, (T_k, \theta_k)\},
+\end{equation}
+
+
+\subsubsection{Chain-of-Intervention Synthesis}
+
+
+The {\color{black}orchestrator} then synthesizes the tools into an ordered intervention chain:
+\begin{equation}
+\begin{aligned}
+\Phi_{\text{mcp}} &= \text{Orchestrate}(\mathcal{T}^*) \\
+&= \big\langle (T_1, \theta_1) \rightarrow (T_2, \theta_2) \rightarrow \dots \rightarrow (T_k, \theta_k) \big\rangle,
+\end{aligned}
+\end{equation}
+
+The orchestration follows two principles:
+\begin{enumerate}
+    \item \textbf{Sensory-First}: Perceptual corrections (e.g., \textit{Paint-to-Action}, \textit{Eraser}) precede physical recovery (e.g., \textit{Encore}) to avoid repeated failures from misperception.
+    \item \textbf{Logical Dependency}: Causal-interference removal is applied before downstream reasoning and execution.
+\end{enumerate}
+
+\noindent\textbf{For example}, under joint visual shift and execution stagnation, the {\color{black}orchestrator} generates
+\textbf{$\text{Paint-to-Action} \rightarrow \text{Encore}$,}
+so perceptual rectification precedes rollback. 
+
+\subsection{MCP Intervention}
+
+
+% \begin{figure}[htbp]
+%      \centering
+%      \begin{subfigure}[b]{0.45\textwidth}
+%          \centering
+%          \includegraphics[width=\textwidth]{figure/remove_distract.pdf}
+%          \caption{Clutter Removal}
+%          \label{fig:remove_distract}
+%      \end{subfigure}
+%      \hspace{1pt}
+%      \begin{subfigure}[b]{0.45\textwidth}
+%          \centering
+%          \includegraphics[width=\textwidth]{figure/prompt_understanding.pdf}
+%          \caption{Noisy Prompt}
+%          \label{fig:prompt_understanding}
+%      \end{subfigure}
+%      \hfill
+%      \begin{subfigure}[b]{0.45\textwidth}
+%          \centering
+%          \includegraphics[width=\textwidth]{figure/visual_shift.pdf}
+%          \caption{Visual Focus}
+%          \label{fig:visual_shift}
+%      \end{subfigure}
+%      \caption{{\sys}-Augmented Manipulation: Case Studies}
+%      \label{fig:effect show}
+% \end{figure}
+As depicted in Fig.~\ref{framework}C, this module executes the intervention chain $\Phi_{\text{mcp}}$ through perceptual or physical actions. We instantiate five MCP tools for common VLA failures (e.g., distribution shift and causal distraction) while preserving plug-and-play extensibility for new failure types.
+
+\subsubsection{Paint-to-Action: Visual Domain Shift}
+\begin{figure}[htbp]
+    \centering
+    \vspace{-0.5em}\includegraphics[width=0.95\columnwidth]{figure/visual_shift.pdf}
+    \caption{\textbf{Visual Focus.} Addressing visual shift in complex manipulation environments.}%
+    \label{fig:visual_shift}
+    \vspace{-1em}
+\end{figure}
+Paint-to-Action performs non-parametric domain adaptation:
+\begin{equation}
+o_t' = \text{Paint-to-Action}(o_t, \theta_{\text{dist}}),
+\end{equation}
+Implementation is achieved through \texttt{visual\_overlay} and \texttt{replace\_texture}. The {\color{black}orchestrator} derives $\theta_{\text{dist}}$, SAM3~\cite{sam3} segments target regions, and shift is mitigated by high-contrast masking or textures from successful trajectories (\texttt{rag\_success}) (Fig.~\ref{fig:visual_shift}).
+
+\subsubsection{Eraser: Causal Confusion}
+\begin{figure}[htbp]
+    \centering
+    \vspace{-0.5em}\includegraphics[width=0.95\columnwidth]{figure/remove_distract.pdf}
+    \caption{\textbf{Clutter Removal.} Erasing irrelevant distractors to mitigate causal confusion.}%
+    \label{fig:remove_distract}
+    \vspace{-1em}
+\end{figure}
+Eraser removes irrelevant objects via $\theta_{\text{conf}}$:
+\begin{equation}
+o_t' = \text{Eraser}(o_t, \theta_{\text{conf}}),
+\end{equation}
+Using \texttt{remove\_distractor}, the {\color{black}orchestrator} identifies distractors from $o_t$ and $\mathcal{H}_t$, SAM3~\cite{sam3} extracts masks, and OpenCV Telea inpainting removes them before policy inference (Fig.~\ref{fig:remove_distract}).
+
+\subsubsection{\texorpdfstring{\mbox{Prompt-Refiner: {\color{black}Instruction-Pattern Mismatch}}}{Prompt-Refiner: Instruction-Pattern Mismatch}}
+\begin{figure}[htbp]
+    \centering
+    \vspace{-0.5em}
+    \includegraphics[width=0.95\columnwidth]{figure/prompt_understanding.pdf}
+    \caption{\textbf{Noisy Prompt.} {\color{black}Rewriting instructions that deviate from historical successful experience patterns into concise executable commands.}}%
+    \label{fig:prompt_understanding}
+    \vspace{-1em}
+\end{figure}
+Prompt-Refiner {\color{black}refines instructions whose wording or task structure diverges from retrieved successful experiences}:
+\begin{equation}
+l_t' = \text{Prompt-Refiner}(l_t, \theta_{\text{lang}}),
+\end{equation}
+where the {\color{black}orchestrator rewrites $l_t$ when its wording or task structure deviates from retrieved successful experience patterns in $\mathcal{H}_t$, producing a concise \texttt{refined\_task} for execution (e.g., colloquial or dialogue-like instructions are rewritten into ``Pick\ldots and place\ldots'' forms in Fig.~\ref{fig:prompt_understanding}).}
+
+\subsubsection{Chaining-Step: Temporal Compounding}
+
+Chaining-Step reduces horizon length:
+\begin{equation}
+A_{seq}' = \text{Chaining-Step}(A_{seq}, \theta_{\text{chain}}),
+\end{equation}
+The {\color{black}orchestrator} decomposes macro sequence $A_{seq}$ into aligned sub-tasks using $\mathcal{H}_t$, and assigns temporal bounds (notably $N_e, N_b$) from $\theta_{\text{chain}}$. Replacing $A_{seq}$ with $A_{seq}'$ shortens execution segments and mitigates long-horizon context degradation (e.g., long tasks are split into shorter sub-tasks with ``Reset \& Buffer'' between them in Fig.~\ref{fig:long_horizon}).
+
+\subsubsection{Encore: Execution Stagnation}
+\begin{figure}[htbp]
+    \vspace{0.5em}
+    \centering
+    \includegraphics[width=0.95\columnwidth]{figure/encore.pdf}
+    \caption{\textbf{Encore.} Recovering via key-step re-execution.}%
+    \label{fig:encore}
+    \vspace{-1.5em}
+\end{figure}
+Encore resolves deadlocks via key-state recovery:
+\begin{equation}
+s'_t = \text{Encore}(s_t, \theta_{\text{stuc}}),
+\end{equation}
+where $\theta_{\text{stuc}}$ (from failure precedents in $\mathcal{H}_t$) specifies retry bounds $[s_s, s_e]$ and wait time $N_w$. The \texttt{encore} tool resets counters and rolls back via averaged reverse trajectory; if horizon-limit validation fails, it triggers ``Reset \& Retry'' from keyframe $s_s$ (Fig.~\ref{fig:encore}).
+\subsection{Dual-Stage Memory Consolidation}%
+\label{Evolution}
+
+This module, illustrated in Fig.~\ref{framework}D, consolidates the latest execution trajectory into the Dual-Memory Bank $\mathcal{M}$ using a two-stage attribution mechanism.
+
+\subsubsection{Stage 1: Initial Diagnosis}
+
+Upon task termination, the {\color{black}orchestrator} performs Initial Diagnosis:
+\begin{equation}
+e_{new} = \text{InitDiag}(o_t, T_{raw}),
+\end{equation}
+and stores the new experience:
+\begin{equation}
+\mathcal{M} = \mathcal{M} \cup \{e_{new}\},
+\end{equation}
+
+\subsubsection{Stage 2: Memory Consolidation}
+
+Memory Consolidation retrieves the top-$N$ similar experiences $\mathcal{E}_{\text{sim}} = \{e_{\text{sim}}^1, \dots, e_{\text{sim}}^N\}$ for cross-task refinement:
+\begin{equation}
+\{e_{\text{new}}^*, e_{\text{sim}}^{1*}, \dots, e_{\text{sim}}^{N*}\} = \text{MemConsol}(e_{\text{new}}, \mathcal{E}_{\text{sim}}),
+\end{equation}
+where each $e^*$ is an updated experience tuple.
+The {\color{black}orchestrator} performs batch-level differential analysis to correct historical failure descriptions and optimize correction plans using new evidence, enabling iterative self-correction of $\mathcal{M}$ rather than monotonic expansion.

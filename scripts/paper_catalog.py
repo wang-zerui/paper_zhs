@@ -149,6 +149,7 @@ TITLE_OVERRIDES = {
     "pivot-rl": "PivotRL",
     "RollArt": "RollArt",
     "roll-art": "RollArt",
+    "roboharness": "RoboHarness: A Memory-Augmented Policy Harness for Vision-Language-Action Model Robustness via In-Context Adaptation",
     "SageSched": "SageSched",
     "sage-sched": "SageSched",
     "Speculative Actions：用于更快智能体系统的无损框架": "Speculative Actions",

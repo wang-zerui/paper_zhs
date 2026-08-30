@@ -1,0 +1,107 @@
+\section{引言}
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\footnotetext[1]{同等贡献。}
+\footnotetext[2]{通讯作者：Jinyu Gu {\tt\small <gujinyu@sjtu.edu.cn>}。}
+
+\renewcommand{\thefootnote}{\arabic{footnote}}
+\footnotetext[1]{上海交通大学计算机学院，中国上海。}
+\footnotetext[2]{上海悉龙信息科技有限公司。}
+
+VLA 模型已成为端到端机器人操作的一种主导范式，它在单一可学习策略中统一多模态感知、语言落地和连续运动控制~\cite{VLA_review1, VLA_review2}。
+本文所称的多模态，特指联合使用视觉观测或关键帧与自然语言指令，以完成落地、检索和干预规划，而非任意组合机器人传感器模态。
+在部署时，这些模型充当整体式的感知--运动控制器，直接将视觉观测和自然语言指令转换为底层运动命令。
+
+然而，随着机器人智能体从受控实验室走向开放世界环境，核心挑战已从分布内准确性转向鲁棒的上下文内自适应~\cite{Yuan2025FromST}。
+微调在专门场景中虽然有效，但通用机器人会面临训练期间无法充分预见的干扰和噪声。
+物体外观、光照和语言的变化往往引发 OOD 扰动，暴露出静态 VLA 策略的局限，也说明系统必须能够抵御环境噪声和因果干扰项~\cite{RT-2, hill2020humaninstructionfollowingdeepreinforcement, pmlr-v205-shah23b, liberopro,LIBERO-Plus}。
+
+现有方法只能部分解决 OOD 泛化问题。
+以规模扩展为中心的基础模型~\cite{pi0, openvla, openx}试图从大规模数据中获得泛化能力，但仍是无状态控制器：它们会丢弃执行历史，缺少 OOD 自适应所需的\textbf{长期记忆}。
+检索增强框架~\cite{ricl, memer}利用以往示范，却受到“成功偏置”的影响：由于只模仿成功轨迹，它们缺少从感知差异中诊断失败的\textbf{因果归因}能力。
+这两类范式还都将知识视为静态产物，导致早期错误归因在任务之间持续存在。
+近期的智能体框架~\cite{cap, voxposer, moka}加入基于 LLM/VLM 的规划，但仍是从零开始推理，且工具集成僵化，缺少干预感知--动作流所需的\textbf{动态编排}能力。
+
+这些观察表明，要实现鲁棒的 OOD 泛化，需要一个能够有效整合下列能力的统一框架：
+\emph{(i)} 用于积累并复用既往执行经验的长期记忆；
+\emph{(ii)} 因果归因和失败感知的策略调整；
+\emph{(iii)} 对外部工具进行动态编排，以主动干预感知--动作流；以及
+\emph{(iv)} 持续改进所存经验、避免知识停滞的自演化巩固机制。
+
+\begin{figure}[t]
+\vspace{0.5em}
+     \centering
+     \captionsetup[subfigure]{font=footnotesize}
+     \begin{subfigure}[b]{0.15\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figure/visual_overlay.pdf}
+         \caption{视觉叠加}
+         \label{fig:sub1}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.15\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figure/prompt_simplify.pdf}
+         \caption{提示简化}
+         \label{fig:sub2}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.15\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figure/distractor_attention.pdf}
+         \caption{干扰物移除}
+         \label{fig:sub3}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.45\textwidth}
+         \centering
+         \includegraphics[width=\textwidth]{figure/long_task.pdf}
+         \caption{长时程任务}
+         \label{fig:sub4}
+     \end{subfigure}
+
+    \caption{\textbf{不同输入下的注意力图。}红色/蓝色表示高/低注意力；绿色圆圈标示干预位置，而不是热力图数值。
+    基线（红框）的关注较为分散，而 MCP 干预（绿框）通过视觉提示、提示简化、杂物过滤和子任务分解，改善了物体定位与边界勾勒。}
+     \label{fig:attention_maps}
+     \vspace{-1.5em}
+\end{figure}
+
+为克服这些局限，我们将\textbf{\sys}定义为面向冻结 VLA 模型的记忆增强策略外壳。
+它不更新参数，而是在基础策略外包裹检索落地的诊断、工具介导的感知--语言干预和控制流恢复，从而在查询时调节观测、指令与执行上下文。
+\sys\ 通过解耦架构实现上述要求：三个在线组件负责任务干预，一个异步离线双阶段记忆巩固模块负责长期能力改进。
+
+\emph{(i)} \textbf{长期经验对齐：}
+如图~\ref{fig:attention_maps} 所示，OOD 失败往往源于感知“注意力漂移”，而非运动能力的极限：环境或语言噪声会扰乱冻结 VLA 的关注点。
+为此，\sys\ 维护一个包含成功与失败执行的\textbf{长期记忆库}，并回忆曾解决类似失败的输入级调整。
+通过 MCP 工具干预~\cite{MCP}，\sys\ 无需更新参数即可使当前感知与以往经验对齐。
+
+\emph{(ii)} \textbf{因果失败归因：}
+对于仅靠检索无法解决的失败，\sys\ 在成功和失败经历上执行\textbf{对比式双记忆检索}。
+视觉--语言编排器比较两者，以识别感知歧义或规划偏差，并指导有针对性的干预。
+
+\emph{(iii)} \textbf{动态工具编排：}
+MCP 将诊断结果转换为\textbf{动态编排}的模块化工具链。
+编排器根据因果诊断组合 MCP 序列，以修正视觉输入或改进任务上下文。
+
+\emph{(iv)} \textbf{记忆巩固：}
+每项任务结束后，一个离线工作流在不中断执行的情况下更新记忆。
+\textbf{初始诊断}对最新轨迹进行归因，并将其写入双记忆库；\textbf{记忆巩固}检索相似历史，通过跨任务差分分析改进已有归因和干预方案。
+这一自纠正闭环可防止知识停滞，并改善后续干预。
+
+在标准 \textbf{LIBERO-PRO}~\cite{liberopro} 基准和我们定制的 \textbf{LIBERO-\sys} 套件上进行的实证评估表明，本框架无需微调即可持续增强多种 VLA 模型的上下文内自适应能力。
+在基础模型经常因感知与语言噪声失败的 LIBERO-\sys\ 上，\sys\ 使性能平均提升 $\mathbf{59.3\%}$，其中长时程任务的绝对提升最高达到 $89.1\%$。
+类似地，在 LIBERO-PRO~\cite{liberopro} 上，\sys\ 有效弥合了由布局和语义偏移造成的分布差距（基线成功率约为 $0\%$），加权平均提升 $\mathbf{54.5\%}$。
+这些结果表明，\sys\ 是一种可即插即用、能够稳健应对 OOD 机器人挑战的方案。
+
+总之，本文有三项贡献：
+\begin{enumerate}
+    \item \textbf{归因驱动的记忆与可扩展干预架构：}
+    我们提出一个克服传统 RAG“成功偏置”的闭环架构。\sys\ 使用对比式双记忆检索诊断失败，并以动态编排的 MCP 工具执行针对性干预，从而形成一个无参数更新、可即插即用的 VLA 模型鲁棒化框架。
+
+    \item \textbf{异步系统设计：}
+    我们将任务级干预与长期知识改进解耦：在线流水线执行归因引导的 MCP 干预，离线巩固则更新归因和记忆，在不中断推理或更新参数的情况下提炼可靠先验。
+
+    \item \textbf{上下文内自适应与实验结果：}
+    在多种任务与骨干模型上，\sys\ 将推理从冻结策略转移到持续演化的记忆库和可扩展工具，从而改善性能与上下文内自适应，并在传统 VLA 策略通常失败的 OOD 条件下保持鲁棒性。
+\end{enumerate}
+
+\endinput

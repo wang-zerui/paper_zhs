@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：72
-- 含 `00README.json`：57
-- 有本地候选 PDF：70
-- 含中文 PDF：62
-- 带源码包：48
-- 含 tracked files 的目录：69
+- 论文目录：73
+- 含 `00README.json`：58
+- 有本地候选 PDF：71
+- 含中文 PDF：63
+- 带源码包：49
+- 含 tracked files 的目录：70
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -77,6 +77,7 @@
 | phyprompt | PhyPrompt | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 33 |
 | pivot-rl | PivotRL | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 76 |
 | r2-router | R2 Router | ✅ | main.tex | main_zh.pdf | — | ✅ | source.tar.gz | 0 |
+| roboharness | RoboHarness: A Memory-Augmented Policy Harness for Vision-Language-Action Model Robustness via In-Context Adaptation | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 35 |
 | roll-art | RollArt | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 50 |
 | router_survey | Router Survey | — | — | main.pdf | — | — | — | 0 |
 | sage-sched | SageSched | ✅ | 0-main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
