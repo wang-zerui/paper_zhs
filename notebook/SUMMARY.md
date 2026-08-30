@@ -33,6 +33,7 @@
 * [HyperParallel](papers/hyper-parallel.md)
 * [HeteroPod: XPU-Accelerated Infrastructure Offloading for Commodity Cloud-Native Applications](papers/heteropod.md)
 * [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](papers/iclr-camera-ready-v0.md)
+* [KVCache Cache in the Wild: Characterizing and Optimizing KVCache Cache at a Large Cloud Provider](papers/kvcache-cache-in-the-wild.md)
 * [KVPR](papers/kvpr.md)
 * [LEGOMem: Modular Procedural Memory for Multi-agent LLM Systems for Workflow Automation](papers/legomem.md)
 * [LLM Viewer](papers/llm-viewer.md)

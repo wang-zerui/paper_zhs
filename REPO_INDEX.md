@@ -1,15 +1,15 @@
 # Repo Index
 
-> 自动生成于 2026-08-22 17:28:56 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
+> 自动生成于 2026-08-30 16:28:00 +0800。这个索引面向本地工作区，会扫描所有论文目录；`notebook/` 默认使用每个目录里的候选主 PDF。
 
 ## Summary
 
-- 论文目录：74
-- 含 `00README.json`：59
-- 有本地候选 PDF：72
-- 含中文 PDF：64
-- 带源码包：50
-- 含 tracked files 的目录：71
+- 论文目录：75
+- 含 `00README.json`：60
+- 有本地候选 PDF：73
+- 含中文 PDF：65
+- 带源码包：51
+- 含 tracked files 的目录：72
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -58,6 +58,7 @@
 | gui-actor | GUI-Actor | ✅ | neurips_2025.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 38 |
 | hyper-parallel | HyperParallel | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 15 |
 | ICLR_camera_ready_v0 | FlexRL: Scaling VLM RL Training via Efficient Load Balancing | — | — | main.pdf | main.pdf | — | — | 63 |
+| kvcache-cache-in-the-wild | KVCache Cache in the Wild: Characterizing and Optimizing KVCache Cache at a Large Cloud Provider | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 95 |
 | kvpr | KVPR | ✅ | acl_latex.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 18 |
 | LLM-viewer | LLM Viewer | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 62 |
 | lmetric | LMetric | ✅ | lmetric.tex | lmetric_zh.pdf | lmetric_zh.pdf | ✅ | — | 60 |

@@ -1,0 +1,173 @@
+\section{Introduction}
+\label{sec:intro}
+
+\noindent
+Large language models (LLMs) have become an important cloud service
+thanks to their emerging capabilities in various tasks.
+Both customer-facing services (to-C) like conversation-based chatbots~\cite{chatgpt}
+and business services (to-B) through LLM API calls have been widely deployed on the cloud~\cite{openaiapi,genimiapi,claudeapi}.
+As online services, serving LLMs with low latency and high throughput is critical,
+but achieving this in a cost-efficient way is challenging
+due to the huge computational requirements to serve each LLM request.
+
+Caching intermediate results of served requests ({\kvcache}) has become a common methodology
+to improve serving performance~\cite{openai-cache,claude-cache}:
+when two requests share the same input prefix,
+their {\kvcache} are identical;
+so if we cache the {\kvcache} of the first ({\kvcache} cache),
+we don't need to compute the {\kvcache} for the next.
+Hence, the serving latency is reduced with the throughput improved
+thanks to the reduced computation under hits.
+
+Like traditional data caching systems~\cite{yang2020twemcache,atikoglu2012workload,180324},
+the effectiveness of {\kvcache} cache system components 
+like cache eviction policy should be tailored to the {\kvcache} reuse features of workloads.
+However,
+LLM serving workloads are complex due to their diverse request types
+as well as the unique features of each request type.
+For example, a production LLM service handles both to-C workloads (like chatting)
+and to-B workloads (like task automation with API calling).
+These requests can further be processed either as single-turn or multi-turn interactions (\textsection{\ref{sec:bg}}).
+Since the {\kvcache} can be reused across different single-turn requests and multi-turn requests,
+both the single-turn request types and the multi-turn patterns
+can possibly affect the design choices of {\kvcache} cache.
+
+There remains a significant gap in the understanding of common LLM serving
+workloads for {\kvcache} cache due to the lack of in-depth analysis of real-world traces.
+First, it is unclear whether production workloads have many reuses and which request
+type contributes most to the reuses.
+Second, the distributions of the reuse time or reuse probability of {\kvcache} remain unknown,
+which is critical to cache policy designs.
+Finally, there is a lack of characterization of the lifespan of {\kvcache},
+which is essential in helping us estimate the required cache capacity for serving LLMs in the wild.
+\iffalse
+are critical to the effectiveness of cache policies.
+\emph{Third}, how long does the {\kvcache} cache last?
+The cached {\kvcache} can become obsolete quickly rather than being reusable long-term, which differs from traditional caching.
+The lifespan of the {\kvcache} cache helps estimate the {\kvcache} capacity for the serving workloads and guides the design of a {\kvcache} system such as which storage media to use.
+\fi
+
+\iffalse
+First, there is a lack of comprehensive studies examining whether {\kvcache} caching
+is effective in production LLM serving workloads and which request types contribute most to cache hits.
+Second, whether a {\kvcache} block will be hit in the future depends on the workload patterns,
+such as the probability of the reuse and the interval between the next reuse.
+Such patterns are critical to the effectiveness of cache policies,
+but to the best of our knowledge---are not revealed on large-scale
+production traces.
+Finally, {\kvcache} differs from traditional caching in its lifespan---cached data
+can become obsolete quickly rather than being reusable long-term.
+Understanding this temporal property helps estimate the {\kvcache} capacity for the serving workloads,
+which further guides the design of a {\kvcache} system like which storage media to use.
+Such information is still missing in existing studies.
+\fi
+
+\input{trace-compare-tab.tex}
+
+\stitle{Characterizing production traces. \,}
+To bridge this gap,
+we collected and characterized two representative production serving workloads
+from one of the world's largest cloud providers (\company):
+a to-C workload where users submit requests to the cloud-hosted LLM service via browser-based
+chatbots or mobile applications, and a to-B workload where developers
+send OpenAI-compatible requests to the LLM service through API calls in their programs.
+We collected as much detailed information as possible within the company's strict privacy policy,
+including request submission times, request types (single-turn, multi-turn, API requests, or others),
+and anonymized content to analyze caching effectiveness.
+To our knowledge, no other available LLM serving traces
+match the information depth and scale of our traces (summarized in Table~\ref{tab:compare-traces}).
+For example, ShareGPT~\cite{sharegpt} only provides the input and output of each request,
+not the submission time of each request,
+which is critical for analyzing the real {\kvcache} hit ratio and usage over time.
+We believe our collected workloads represent typical LLM serving workloads
+and can provide a foundation for future {\kvcache} cache system design.
+
+From the perspective of designing an efficient {\kvcache} cache system---both in performance
+and resource usage,
+our \emph{key takeaways} are as follows: \\[-15pt]
+\begin{enumerate}[leftmargin=*,leftmargin=10pt,itemindent=0pt]
+    \item {\kvcache} reuses are common,
+    but the reuse ratio is smaller than previously reported numbers
+    on synthetic datasets~\cite{cachedattention,DBLP:journals/corr/abs-2403-14401}.
+    The reuses follow a skewed distribution:
+    10\,\% of {\kvcache} blocks contribute to 77\,\% of the reuses.
+    The contribution of {\kvcache} reuses also varies across traces:
+    contrary to a straightforward observation that multi-turn requests may dominate most reuses,
+    single-turn requests dominate 97\,\%
+    {\kvcache} reuses in to-B workloads (\textsection{\ref{sec:workload-patterns}}).  \\[-15pt]
+
+    \item Key workload features related to {\kvcache} designs,
+    like reuse time and reuse probability distributions---vary across different LLM request types (API vs. chat)
+    and the number of turns in multi-turn requests.
+    Despite this diversity, for each specific request category (type plus turn number),
+    the reuse time is predictable based on the historical information (\textsection{\ref{sec:motiv-temporal-spatial}}).
+    Since the request categories are known by the serving system,
+    we can systematically use the estimated probability for improving cache policies. \\[-15pt]
+
+    \item The lifespan of {\kvcache} is ephemeral: the P99 lifespan
+    of {\kvcache} in to-B workloads is 97 seconds,
+    so a small cache is typically sufficient for the {\kvcache} cache.
+    For example, in the to-B workload,
+    a {\kvcache} with capacity 2\,$\times$ of the GPU HBM per-GPU
+    is sufficient to approach an ideal hit rate under infinite capacity on
+    common GQA models~\cite{DBLP:conf/emnlp/AinslieLJZLS23}
+    using standard cache eviction policies like LRU (\textsection{\ref{sec:analyze-capacity}}).
+\end{enumerate}
+
+Our characterizations above reveal several important design decisions
+that current {\kvcache} cache systems may have overlooked.
+First, optimizing caching for single-turn requests is equally important as optimizing
+for multi-turn requests.
+Second, we could improve cache hits
+by adopting a workload-aware caching policy
+instead of only adopting a workload-agnostic policy like LRU.
+Finally, the ephemeral lifespan of {\kvcache} suggests that
+a least-frequently-used (LFU) policy is not suitable because a short-lived {\kvcache} 
+may have high frequency in the past. 
+Meanwhile, 
+a small (on-GPU) cache is sufficient for API-dominated to-B workloads,
+eliminating the cost and complexity of
+deploying and managing a CPU-RDMA-SSD storage hierarchy for {\kvcache} cache.
+Besides the main takeaways described above, 
+we also discovered several interesting findings, 
+such as the {\kvcache} hits across users being extremely low (\textsection{\ref{sec:workload-patterns}}),
+despite the possibility of shared prompts via prompt libraries~\cite{prompt-library}. 
+%and unlike reuse time, the distribution of lifespan for each {\kvcache} being hard to predict (\textsection{\ref{sec:analyze-capacity}}). 
+
+\stitle{Improved {\kvcache} cache eviction policy. \,}
+Based on our findings,
+we propose a workload-aware {\kvcache} eviction policy (\textsection{\ref{sec:design-policy}}) that leverages
+the profiled reuse probability distributions of each workload to enhance cache hit ratios
+on real-world workloads.
+%Specifically, we built upon the Greedy-Dual caching framework~\cite{cherkasova1998improving}---which
+%already considers various workload features---by further extending
+Specifically, we leverage the empirically sampled probability distributions of the reuse probability 
+of each workload to decide the priority of each {\kvcache} block, 
+with considerations of both the characterized spatial locality and the lifespan of {\kvcache}.
+To demonstrate the effectiveness of our improved design,
+we have integrated our policy into vLLM~\cite{vllm}---a popular LLM serving system on the cloud,
+and our extensive evaluations on production traces show that
+the improved design can improve 3.9\,\% cache hits
+as well as up to 41.4\,\% mean response time improvements
+compared to workload-agnostic policies like LRU and LFU.
+%It also has 3.8\,\% cache hit rate improvement and 34.1\,\% mean response time reduction
+%over the original Greedy-Dual policy.
+
+\stitle{Discussion. \,}
+Before moving on, we note two limitations of our work.
+First, our results are based on one week production traces of large-scale LLM serving workloads.
+While we believe such workloads (chatbot and API) are representative nowadays,
+LLM serving workloads are evolving, with new workloads like reasoning~\cite{openai-o1} emerging.
+We leave the characterization of these newer workloads to future work.
+Second, our primary focus is on the {\kvcache} cache policy design,
+yet we believe the design of other system components for LLM serving 
+like the policy of global scheduling 
+could also benefit from our findings,
+and we leave other explorations as future work.
+Nevertheless, we believe our methodology---first characterizing real-world serving features
+and then optimizing a specific serving component---generalizes to other LLM serving workloads and systems.
+
+%We may open-source our traces if approved by the company.
+A sample of our analyzed trace is available at \burl{https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon},
+and the reference implementation of the eviction policy is available at
+\burl{https://github.com/vllm-project/vllm/pull/22236}. 
