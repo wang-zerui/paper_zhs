@@ -1,0 +1,89 @@
+\section{Introduction}
+\label{s:intro}
+
+Cloud-native computing has emerged as a prominent paradigm in cloud and datacenter environments,
+utilizing \emph{containerization} to distribute and deploy applications~\cite{cncf, AWSLambda, IBMcloudFn, MSFunc, GoogleFunc}.
+The fundamental unit of the execution environment, such as a \emph{Pod} in Kubernetes\footnote{In this paper, we consider the Pod as a generalized representation of the fundamental computational unit in cloud-native platforms.},
+typically comprises one or multiple containers,
+each containing a standalone image but sharing a network environment.
+This approach encapsulates an application in a portable and self-contained way that can be deployed and distributed across diverse nodes.
+
+One significant advantage of cloud-native apps compared to non-cloud-native apps is that they are developed with the support of extensive cloud infrastructure services,
+including storage, network, security, and more.
+These infrastructures are also deployed as containers.
+There are two categories of infrastructure containers: global infrastructure containers and per-Pod infrastructure containers, as shown in Figure~\ref{fig:motiv-cloud-native-platform}-a.
+For instance, the platform scheduler serves as one of the global infrastructure containers responsible for orchestrating requests to different Pods, while a sidecar proxy (e.g., Envoy~\cite{envoy}) represents a per-Pod infrastructure container present in each Pod to facilitate the networking functionalities of the application.
+
+
+
+\begin{figure}[t]
+  \centering
+ \setlength{\belowcaptionskip}{-10pt}
+ \setlength{\abovecaptionskip}{0pt}
+  \includegraphics[width=0.42\textwidth]{figs/motiv-cloud-native-platform.eps}
+  \caption{\textbf{Cloud-native platform with infrastructure containers and user apps.}}
+  %\caption{Cloud-native architectures for CPU-DPU computers.}
+  \label{fig:motiv-cloud-native-platform}
+\end{figure}
+
+While infrastructure containers play a crucial role in delivering advantages in cloud-native computing,
+they also introduce a non-trivial burden on resources, referred to as \emph{infra-burden} in the paper.
+For example, service mesh~\cite{service-mesh} has emerged as a prominent pattern in cloud-native platforms for managing microservices,
+employing a dedicated proxy (known as a \emph{sidecar-proxy}) to handle network traffic on behalf of the applications.
+Since each microservice Pod contains a sidecar-proxy as an infrastructure container, these proxy containers can consume up to 25\% of the CPU and 33\% of memory resources on a node~\cite{10.1145/3620678.3624785}.
+The infra-burden challenge has persisted for a considerable time~\cite{10.1145/3477132.3483565} and presents substantial difficulty in mitigation~\cite{10.1145/3694715.3695967, 10.1145/3694715.3695947, 10.1145/3694715.3695966}.
+
+A recent noteworthy trend that could potentially offer relief is that \emph{cloud vendors are increasingly deploying more heterogeneous devices} to enhance scalability, performance, and cost-efficiency~\cite{amazon-f1, silberstein2013gpufs, kim2014gpunet, firestone2018azure, china-mobile-smartnic, huawei-smartnic, xilinx-fpga-huawei, ali-fpga, baidu-fpga}.
+The Data Processing Unit (DPU) represents a novel category of heterogeneous devices that deliver scalable and energy-efficient computation capabilities~\cite{234944}, leveraging embedded processing units and an efficient NIC.
+DPUs have the potential to significantly enhance instance density in a node (e.g., 50\% improvement in serverless computing~\cite{10.1145/3503222.3507732}).
+These devices also offer enhanced security features through isolated memory and cores, along with boosted packet processing facilitated by numerous on-path hardware threads, such as the 256 hardware threads supported in Bluefield-3~\cite{bf-3}.
+The expectation is that heterogeneous processing units like DPUs will be interconnected with rapid interconnect technologies like PCIe 6.0 and CXL~\cite{intel-cxl}, providing further performance enhancements.
+Leveraging DPUs could potentially alleviate the infra-burden challenge.
+
+\myparagraph{Goal: Offloading cloud-native infrastructure services to DPUs.}
+In contrast to the conventional approach of colocating infrastructure containers and user apps on both the CPU and DPU~\cite{redhat-openshift},
+we propose a promising (albeit challenging) architecture that involves decoupling these two types of cloud-native containers onto separate Processing Units (PUs), as illustrated in Fig.\ref{fig:motiv-cloud-native-platform}-b.
+This strategy can effectively alleviate the infra-burden by preventing interference between infrastructure containers and app containers.
+Nevertheless, separating infrastructure containers from app containers poses significant challenges.
+
+\myparagraph{Challenge-1: Infrastructure and app containers in the same Pod are coupled with the same network namespace, dependent on the single-PU OS.}
+Containers within a shared Pod utilize a will network namespace provided by the underlying OS kernel.
+Consequently, processes in different containers share common network devices and can communicate across containers using ``localhost''.
+However, offloading infrastructure containers to DPUs disrupts this shared network namespace functionality.
+Sustaining local network abstraction while separating infrastructure and app containers onto different PUs poses a notable challenge.
+
+
+\myparagraph{Challenge-2: Separating containers onto different PUs has a trade-off between communication performance and resource utilization.}
+Infrastructure and app containers will communicate through network.
+The separation may significantly increase communication latency (by 10x to 100x) compared to a single-PU design with Linux network stack as network packets should go through two NICs.
+Advanced network solutions such as kernel-bypassed mechanisms~\cite{10.5555/2616448.2616493, rsocket, f-stack, 10.1145/3341302.3342071, libvma} like rsocket~\cite{rsocket} can provide socket-level APIs for compatibility and optimal performance to directly leverage hardware features like RDMA.
+However, these solutions often encounter challenges related to suboptimal resource utilization~\cite{10.1145/3477132.3483569}, including memory wastage from pinned memory allocation for user-space links and CPU cycle wastage from user-mode polling.
+Kernel-assisted approaches like SMC-R~\cite{rfc7609} have performance drawbacks due to context switching and data copying overheads.
+Consequently, a cross-PU and network-based communication method that can deliver superior performance and maximize resource utilization is essential but currently unavailable.
+
+
+\myparagraph{Challenge-3: Not all infrastructure containers are suitable for offloading to DPUs.}
+The complexity of this challenge arises from the inherent nature of DPUs, which typically comprise a wimpy SoC (only) optimized for specific domain-centric tasks, such as network packet processing.
+A simple design for offloading containers to DPUs may carry significant performance overhead, as suggested by prior works~\cite{wei2022comprehensive, 10.1145/3477132.3483565, 10.1145/3503222.3507732}.
+As a result, system designers still lack effective practices to offload cloud-native infrastructure.
+
+This paper introduces \xpod, a cross-PU Pod design that addresses the first two challenges through \os, which achieves transparent, high-performant, and resource-efficient XPU networking.
+\os introduces two key techniques, namely \emph{split network namespace} (\giptable) and \emph{elastic and efficient XPU networking} (\gsocket).
+\giptable provides a unified network abstraction for cross-PU containers.
+The novelty of \giptable lies in its approach to \emph{re-do} network rules to establish a split network namespace, enabling direct or indirect communication as usual.
+Second, \gsocket is a network stack design that attains kernel-bypassed performance, high resource efficiency, and socket compatibility.
+\gsocket incorporates \emph{speculative allocation} to mitigate memory wastage, adopting a two-stage on-demand buffer allocation design that enables processes to speculatively allocate new buffers from a shared pool in a kernel-bypassed manner, with the kernel subsequently committing the allocation.
+Additionally, \gsocket supports user-mode NAPI and facilitates cross-PU OS cooperation, leveraging page tables and exceptions to enable interrupts for U-mode libraries and diminish polling costs.
+
+%We present guidelines to offload infrastructure containers to overcome the third challenge, and 
+We utilize \xpod to implement \sys, a cloud-native system based on Kubernetes that supports serverless computing (\faas) and microservices with service mesh (\mesh~\cite{istio}).
+\sys can effectively offload per-Pod infrastructure containers like sidecar proxies and global infrastructure containers like schedulers, while remaining general enough to offload suitable user apps in serverless to improve system density.
+\sys acts as the guidelines to offload infrastructure containers for the third challenge.
+
+We evaluate all the prototypes on real platforms with Nvidia Bluefield-2 DPUs and CXL-DPU simulators (based on our real CXL memory devices).
+Evaluation results demonstrate that \gsocket can achieve up to 31.9x better latency and 64x less resource consumption.
+Besides, \mesh can achieve 55\% higher scalability and 60\% better end-to-end latency compared to commercial Istio,
+while \faas can achieve 20x lower communication latency compared to the baseline system and 4.45x less latency.
+\sys can also offload control plane schedulers to DPU to cache global image states and implement an image-aware scheduling that can reduce avg latency by 14.4x.
+
+

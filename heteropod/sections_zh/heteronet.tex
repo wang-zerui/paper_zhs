@@ -1,0 +1,116 @@
+\section{\os 的设计与实现}
+\label{s:design-hetero-net}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/design-hetero-iptable-eps-converted-to.pdf}
+  \caption{两类网络调用以及拆分网络命名空间的挑战。}
+  \label{fig:hetero-splitns}
+\end{figure}
+
+\subsection{拆分网络命名空间（\giptable）}
+\label{subs:hetero-iptable}
+
+\myparagraph{记号。}
+Linux 的网络命名空间\cite{net-ns}会隔离网络设备、协议栈、IP 路由表和端口号等网络相关系统资源。我们把这一概念扩展为\emph{拆分网络命名空间}，在 CPU--DPU 计算机内提供统一且相互隔离的网络抽象。一个拆分网络命名空间可以由一个容器（多个进程）独占，也可以由多个容器共享，例如 Kubernetes Pod。
+
+\myparagraph{网络调用。}
+网络需求可分为两类（图~\ref{fig:hetero-splitns}(a)(b)(c)）：\emph{直接调用}和\emph{间接调用}。直接调用指网络命名空间内的两个进程使用 \codeword{localhost} 和端口号进行通信。间接调用则指消息并非直接发给本地接收方，而是最初准备发送给远程接收方，随后因 iptables 或路由等分组过滤规则被转发到本地接收方。
+
+\myparagraph{挑战。}
+当多个内核管理“同一个”网络命名空间中的进程时，首先会出现新的困难。对于直接调用，发送方操作系统内核难以\emph{确定哪个内核}负责接收方进程。一种朴素方案是让发送方内核把分组转发到接收方内核，但如图~\ref{fig:hetero-splitns}(d) 所示，发送方并不知道各进程部署在哪个 PU。
+
+其次，间接调用又引入\emph{状态同步}问题：不同 PU 上的操作系统内核可能必须显式同步某些状态，才能正确处理分组。以图~\ref{fig:hetero-splitns}(e) 为例，系统部署边车代理容器来截获应用容器的入站与出站分组。通常，系统会向 Pod 的网络命名空间加入 iptables 规则，把应用发送的分组重定向到代理监听的端口。这些规则把目标 IP 和端口改成代理的地址，并由操作系统内核保存原始目标 IP/端口，供以后使用（图~\ref{fig:hetero-splitns}(e) 的步骤 2/3）。代理容器收到分组后进行过滤，并调用 \codeword{getsockopt()} 系统调用读取原始目标 IP/端口（步骤 4/5）。一种朴素方案是在发送方（即应用容器）加入类似规则，把目标 IP 和端口改成预期接收方所在 PU 的地址。然而，位于另一 PU 的代理容器无法取得原始 IP 和端口，因为关键数据保存在发送方 CPU 的内核中，而非接收方 DPU 的内核中。理论上可以在两个 PU 之间同步这些数据，但规则与状态十分复杂，实践中很难完成。
+
+\subsubsection{基于端口的反向映射}
+
+我们观察到，在拆分网络命名空间中，分布在不同 PU 上的进程仍然\emph{共享同一个逻辑端口空间}，每个端口号只能由一个进程独占。基于这一观察，我们提出\emph{基于端口的反向映射}。该方法维护一张记录端口号及其对应 PU 的反向映射表，且这张表由每个 PU 上的全部 \os 守护进程全局共享。当容器需要使用某个端口号时，\os 守护进程检查表项以确保端口可用；如果端口已被占用，操作就会失败。
+
+为避免在数据面同步和检查端口的开销，\os 解耦控制面与数据面。端口信息发生变化时，\os 守护进程生成并应用一组单 PU 分组过滤规则；原型主要使用 iptables 和路由。这些规则自动检测\emph{远程端口号}，并利用 DNAT（目标网络地址转换）和 SNAT（源网络地址转换）把分组正确转发到相应 PU。因此，发送和接收进程都感知不到底层变化，仍可像未发生拆分一样使用 \codeword{localhost} 通信，并且成本几乎为零。
+
+\subsubsection{部分幂等的分组规则}
+
+为解决第二项挑战，我们提出\emph{部分幂等的分组规则}。系统不再只在源 PU 执行分组规则、随后再同步状态（这很困难），而是把原始规则转换为两组分别应用于源 PU 和目标 PU 的新规则。这些规则可能对分组执行\emph{冗余}操作，但不会引入新的副作用，因而在此意义上是\emph{幂等}的。通过在两个 PU 上重新执行操作，状态可自动实现同步。
+
+以图~\ref{fig:hetero-splitns}(e) 为例，系统不再只修改目标地址为接收方 IP/端口并在发送方 PU 保存原始目标地址，而是将过程简化为三条规则：（1）在发送方 PU 上，把分组路由到接收方 PU，但不修改分组；（2）在接收方 PU 上，把分组路由到接收容器；（3）在接收方 PU 上修改目标地址并保存原始目标地址。规则（1/2）和规则（3）都会把分组移向接收方 PU，因而存在冗余操作，但它们不会改变行为，并且实现了状态同步。间接调用通过网络规则实现，因此 \giptable 能检测这些规则，并用新规则替换入站和出站流量的截获规则。
+
+\subsection{弹性高效的 XPU 网络}
+\label{subs:hetero-socket}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{figs/design-heterosocket-eps-converted-to.pdf}
+  \caption{包含基础设施容器时的通信路径。}
+  \label{fig:design-heterosocket-netstack}
+\end{figure}
+
+\subsubsection{概览}
+
+传统网络栈给 XPU 通信引入不必要的重复路径，导致延迟增加，并限制高速互连的优化空间。例如，在包含边车的微服务中，一条消息必须三次经过网络栈才能到达目的地，如图~\ref{fig:design-heterosocket-netstack} 所示。虽然已有兼容套接字的内核旁路系统\cite{f-stack,dpdk,libvma}，但固定内存缓冲区和静态分配使其资源利用率很低（第~\ref{subsubs:hetero-socket-challenges} 节）。\gsocket 的目标是在 XPU 场景中克服这些资源问题，同时达到既有内核旁路设计的性能。
+
+\myparagraph{把跨 PU 互连抽象为全局共享内存。}
+我们将 XPU 通信所需的一项关键原语概括为\emph{全局共享内存}（GShm），即使用一块共享内存作为跨 PU 通信通道。现有 DPU 已满足该假设\cite{mellanoxbf,marvel-liquidio}；例如，BlueField-2 支持 RDMA，使 CPU 和 DPU 可以共享显式分配的内存区域。为适配不同互连，\gsocket 引入互连抽象层（IAL），它隐藏互连细节，只向 \gsocket 核心暴露 GShm 抽象。
+
+\myparagraph{控制路径与数据路径解耦。}
+\gsocket 依靠 Linux 网络栈和 \giptable 建立连接；如果 GShm 可用，系统随后创建基于 GShm 的通道以取得最佳性能。运行时，\emph{read()} 和 \emph{write()} 等数据路径 API 会在可行时被拦截并改用 GShm，但应用仍可调用 \emph{getsockopt()} 等控制路径操作来取得连接元数据。当容器部署在不同 PU 上时，\gsocket 先利用套接字与 \giptable 正确建立连接，再使用 GShm 加速通信。
+
+\subsubsection{挑战}
+\label{subsubs:hetero-socket-challenges}
+
+内核旁路和基于共享内存的设计较为常见，也能充分利用硬件能力而获得最佳性能；\gsocket 进一步处理两项尚未解决的技术挑战。第一项是\textbf{固定资源成本}。分配共享内存区域通常是特权操作，需要两个 PU 的操作系统用互连原语进行协商。该过程通常很慢，例如 RDMA\cite{280746}，因此难以动态扩展区域。现有系统往往为每条连接在操作系统中\emph{预留}固定大小的区域，在资源浪费与性能下降之间权衡。真实机器中可能存在数千条连接，因此问题尤其严重。第二项是\textbf{轮询成本}。由于操作系统内核被绕过，用户态网络栈必须显式轮询数据，再次落入 PU 开销与长延迟之间的传统权衡。
+
+\subsubsection{采用推测式分配的用户态资源管理}
+\label{ss:spec-alloc}
+
+\gsocket 通过操作系统与库协同设计来高效管理内存（图~\ref{fig:design-heterosocket-umem}）。其核心抽象是\emph{记录（record）}：一种页对齐、带有 \emph{nextRecord} 等元数据的缓冲区，由发送或接收进程单向访问。每条连接维护两个本地记录（每个方向一个），同时使用逐核\emph{共享区域（arena）}；共享区域包含可以动态分配的记录，并由 \emph{headRecord} 与 \emph{tailRecord} 组成的列表管理。这种混合方法以本地记录保证性能、以共享区域保证可扩展性，并解决以下三项关键问题。
+
+\myparagraph{隔离与同步。}
+共享区域需要严格访问控制：进程只能访问属于自己连接的记录，或其所在核心的空闲记录。\gsocket 通过内存映射实施这一约束。调度进程时，操作系统映射（1）本地记录；（2）活动连接占用的共享记录；（3）当前核心的空闲记录。由于进程时间片内只有它能访问所在核心的空闲记录，逐核共享区域消除了同步开销。
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/design-umem-eps-converted-to.pdf}
+  \caption{推测式分配流程：（a）记录与共享区域；（b）推测式分配；（c）内核提交；（d）访问控制；（e）释放。}
+  \label{fig:design-heterosocket-umem}
+\end{figure}
+
+\myparagraph{动态记录串接。}
+记录通过 \emph{nextRecord} 元数据构成链表。发送方用尽缓冲区空间时，无需内核参与，即可推测式地把当前核心共享区域中的空闲记录追加到链表（图~\ref{fig:design-heterosocket-umem}(b)）。内核随后在上下文切换或异常（如缺页）期间提交这些分配，通过重新映射把记录标记为已占用（图~\ref{fig:design-heterosocket-umem}(c)(d)）。这种“用户空间推测、内核随后认可”的两阶段方法达到内核旁路性能，同时把固定内存减少 $64\times$（第~\ref{subs:eval-socket-microbench} 节）。连接的接收进程访问发送方刚分配的记录时，因为没有访问空闲记录的权限，会触发缺页异常。此时，操作系统内核通过把所有新分配记录映射给接收方来处理缺页，同时完成\textbf{提交}。实践中这种陷入很少发生。
+
+\myparagraph{资源治理。}
+限速策略对每个进程可使用的记录数设置上界，以防止资源囤积。内核在提交阶段实施这些策略，同时保留逐核分配的优势。
+
+\myparagraph{设计总结。}
+因此，除把全局资源池改成逐核池（共享区域）外，\gsocket 能达到以内核为中心的设计所具有的资源管理效果。该改变可避免跨核心干扰和同步，因而是合理的。与预留内存的内核旁路网络设计相比，接收方陷入极少发生，所以 \gsocket 可取得相近性能。我们甚至观察到性能有所提升，因为 \gsocket 的动态资源能更好地在连接之间调度，并适应变化的负载。
+
+\subsubsection{用户态 NAPI}
+\label{ss:unapi}
+
+\gsocket 引入 U-NAPI，即 Linux NAPI\cite{linux-napi} 的用户空间版本；它通过中断驱动的事件处理消除轮询开销。传统内核旁路设计不断轮询事件，浪费 CPU 周期；U-NAPI 则仿照操作系统内核中 NAPI 的自适应行为，根据流量模式在中断与轮询模式之间动态切换。
+
+\myparagraph{事件管理。}
+\gsocket 保持标准 \codeword{epoll} 语义，并增加两个关键系统调用：\codeword{enable\_notify\_gshm} 和 \codeword{disable\_notify\_gshm}。应用通过它们向内核注册所关心的事件，例如缓冲区可用。\codeword{enable\_notify\_gshm} 通过不同标志支持 \codeword{sync} 和 \codeword{async} 两种模式。\codeword{sync} 会阻塞线程直到事件发生，适合阻塞 I/O；\codeword{async} 会触发信号处理程序，由后者关闭中断并在延迟敏感阶段启用轮询。这里的关键创新是，U-NAPI 利用操作系统内核模拟硬件，为用户态事件管理提供中断能力。
+
+\myparagraph{与网络操作集成。}
+实践中，U-NAPI 优化三类常见情形。第一，网络 \codeword{write}（或 \codeword{send}）操作可能因为连接缓冲区已满而阻塞并转为轮询。此时，\gsocket 调用 \codeword{enable\_notify\_gshm(token, sync | W\_flag)}，在内核中阻塞，直到连接可以写入。第二，空连接上的阻塞式 \codeword{read}（或 \codeword{recv}）情形类似，\gsocket 可使用带 \codeword{R\_flag} 的 \codeword{sync} 模式。第三，当需要向 epoll 实例加入新事件时，\gsocket 可用 \codeword{async} 模式监控事件，即调用 \codeword{enable\_notify\_gshm(token, async | events)}；随后，信号处理程序可处理事件更新、关闭通知，并为性能转回轮询。
+
+\myparagraph{跨 PU 事件传播。}
+U-NAPI 使用两种跨 PU 事件传递技术。第一种是\emph{主动通知}：连接远端一侧主动告知远端（或同一 PU 的）内核出现新事件。例如，在阻塞写入情形中，远端接收方读取数据、检查状态并发现发送方被阻塞后，会用系统调用通知内核连接状态已变化，最终提醒发送方可能已有可用空间。第二种是\emph{读写时通知（Notify-on-RW，NoRW）}：内核通知远端（或同一 PU 的）内核撤销连接记录权限，例如在写入情形中撤销读权限。这样，接收方读取时会触发缺页异常，异常再被送到发送方内核，以通知连接状态变化。跨 PU 延迟虽然高于本地情形，但应用仍可在关键路径上灵活退回轮询。
+
+\subsection{实现}
+\label{subs:imp}
+
+\myparagraph{\giptable。}
+\giptable 以守护进程形式运行在每个采用 Linux 的 PU 上，监控本地网络规则，并与同一计算机中的其他 PU 协作。它维护端口信息，并截获网络命名空间中的网络规则。\giptable 复用现有网络技术，例如 \codeword{nsenter}、NAT、策略路由和 iptables。在 \sys 中，我们用 \giptable 扩展 Kubernetes CNI。
+
+\myparagraph{\gsocket。}
+\gsocket 使用 C/C++ 编写。我们借助 \codeword{LD\_PRELOAD}\cite{ld-preload}在运行时替换应用中由 libc 实现的套接字相关函数。此外，我们在 CXL-DPU 上以 CXL、在 BlueField-2 上以 RDMA 实现全局共享内存（GShm）。\gsocket 实现了一整套 Linux 套接字接口；我们还扩展 Linux 内核，使其支持推测式分配和 U-NAPI 接口。
+
+\myparagraph{多指令集体系结构支持。}
+我们使用多平台容器镜像功能\cite{multi-platform}支持同一计算机中的多 ISA PU；这是 Docker/Kubernetes 的标准功能。
+
+\myparagraph{安全性。}
+当前 \os 以逐进程库实现，在用户空间维护两个实体之间的全局共享内存。每个进程只能访问属于自身连接的共享内存，因此 \os 不会引入攻击其他进程的新安全漏洞。恶意进程可能破坏自己的连接，但由于指针操作经过谨慎处理，无法造成溢出等其他问题。此外，管理员可通过配置文件指定哪些连接允许使用 \gsocket，其作用类似固件中的显式允许列表。
+
+\myparagraph{实验设置。}
+评估使用两种设置。第一种是\textbf{BlueField-DPU}：我们使用两台服务器，每台配有两颗 E5-2650 v5 CPU（每颗 12 核、2.2GHz）、96GB DDR4-1600 内存和一块 NVIDIA BlueField-2 DPU。每块 BlueField-2 DPU 包含 8 个 ARM Cortex-A72 核心（2.75GHz）、16GB DDR-1600 DRAM 和带两个 100Gbps RDMA 端口的 ConnectX-6 NIC；我们也在 BlueField-3 上验证结果。第二种是\textbf{CXL-DPU}：一台双路服务器配有 Intel Xeon Platinum 8468V（2.9GHz、48 核），并通过 CXL 2.x 内存扩展卡连接一条 32GB、4800MT/s 的 DDR5 RDIMM。我们用两个虚拟机分别表示 CPU 和 DPU，并把真实 CXL 设备配置为 \codeword{dax} 设备，作为 GShm，从而实现基于 CXL 的 DPU。
