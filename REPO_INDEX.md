@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：76
-- 含 `00README.json`：61
-- 有本地候选 PDF：74
-- 含中文 PDF：66
-- 带源码包：52
-- 含 tracked files 的目录：73
+- 论文目录：77
+- 含 `00README.json`：62
+- 有本地候选 PDF：75
+- 含中文 PDF：67
+- 带源码包：53
+- 含 tracked files 的目录：74
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -85,6 +85,7 @@
 | saas-bench | Saas Bench | ✅ | colm2024_conference.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 42 |
 | skvm | SkVM: Revisiting Language VM for Skills across Heterogenous LLMs and Harnesses | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 42 |
 | speculative-actions | Speculative Actions | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | 2510.04371-source.tar | 36 |
+| startupbench | StartupBench: Benchmarking General-Purpose Agents on Market-Validated End-to-End Workflows | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
 | step-3-5 | Step3.5 Turbo 2026 | ✅ | step3p5_turbo_2026.tex | step3p5_turbo_2026.pdf | step3p5_turbo_2026.pdf | — | source.tar.gz | 21 |
 | step-gui | Step-GUI | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 57 |
 | tclone | Tclone | ✅ | main.tex | main_zh.pdf | — | ✅ | — | 0 |

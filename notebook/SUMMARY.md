@@ -59,6 +59,7 @@
 * [ScaleCUA: Scaling Open-Source Computer Use Agents with Cross-Platform Data](papers/scalecua.md)
 * [SkVM: Revisiting Language VM for Skills across Heterogenous LLMs and Harnesses](papers/skvm.md)
 * [Speculative Actions](papers/speculative-actions.md)
+* [StartupBench: Benchmarking General-Purpose Agents on Market-Validated End-to-End Workflows](papers/startupbench.md)
 * [Step3.5 Turbo 2026](papers/step-3-5.md)
 * [Step-GUI](papers/step-gui.md)
 * [Task-CoEvolve: Efficient Harness Optimization via Adaptive Validation Task Selection](papers/task-coevolve.md)
