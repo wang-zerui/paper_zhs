@@ -55,6 +55,7 @@
 * [RoboHarness: A Memory-Augmented Policy Harness for Vision-Language-Action Model Robustness via In-Context Adaptation](papers/roboharness.md)
 * [RollArt](papers/roll-art.md)
 * [SageSched](papers/sage-sched.md)
+* [SaaS-Bench: Can Computer-Use Agents Leverage Real-World SaaS to Solve Professional Workflows?](papers/saas-bench.md)
 * [ScaleCUA: Scaling Open-Source Computer Use Agents with Cross-Platform Data](papers/scalecua.md)
 * [SkVM: Revisiting Language VM for Skills across Heterogenous LLMs and Harnesses](papers/skvm.md)
 * [Speculative Actions](papers/speculative-actions.md)

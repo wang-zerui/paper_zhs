@@ -1,0 +1,205 @@
+\section{Discussion}
+\label{disc}
+
+The preceding experiments establish that \datasetname is highly challenging for all evaluated agents. In this section, we move beyond aggregate statistics to examine \emph{why} agents fail, drawing on individual verification outcomes and execution trajectories. Through detailed case studies, we identify four fundamental failure modes that underlie the low resolved scores in Table~\ref{tab:main_results} and reveal structural properties of real-world SaaS workflows that current CUA designs are ill-equipped to handle.
+
+\subsection{The Fragility of Long-Horizon Completion}
+\label{disc-nearmiss}
+
+A striking pattern in \datasetname is the large gap between checkpoint scores (23--44\%) and resolved scores ($<$4\%). One might expect that agents completing a majority of checkpoints would also complete entire tasks at a non-trivial rate. The following case illustrates why this expectation fails.
+
+\paragraph{Case: Near-Miss with Undetected Date Error ({\ttfamily bof\_023}).}
+This Business Operations task requires processing an expense reimbursement across three applications: approving a claim in HRMS, creating a vendor, bill, and payment in BigCapital, and logging a completion task in Twenty CRM. Opus~4.6 scored 0.80 (16/20), failing two verification checks; one reflects a genuine agent error that persisted to task termination:
+
+\begin{verifybox}{Verification Result --- {\ttfamily bof\_023} (Claude Opus 4.6) --- Score: 0.80 (16/20)}
+\small
+\cmark\ Check 1: HRMS claim approved (wt.\ 2) --- status=Approved, total=10350.0 \\
+\cmark\ Check 2: HRMS claim line items (wt.\ 2) --- Travel: 8500, Food: 1500, Calls: 350 \\
+\cmark\ Check 3: BC vendor exists (wt.\ 1) --- email=mohammed.farooq@gmail.com \\
+\cmark\ Check 4: BC items exist (wt.\ 1) --- found=\{Travel, Food, Calls\} \\
+\xmark\ Check 5: BC bill exists (wt.\ 2) --- \textbf{date=2026-03-19} (expected 03-20), \textbf{status=NULL} \\
+\cmark\ Check 6: BC bill line items (wt.\ 2) --- correct amounts \\
+\cmark\ Checks 7--8: BC payment and balance (wt.\ 5) --- bill fully settled (due=0.00) \\
+\cmark\ Checks 9--11: Twenty CRM task created, completed, body correct
+\end{verifybox}
+
+Check~5 reveals the genuine agent error: the bill was created with date 2026-03-19 rather than the required 2026-03-20. As we show in \S\ref{disc-selfeval}, the agent recognized this error during execution but failed to verify whether its attempted correction had taken effect---advancing to the next subtask without closing the verification loop. This single uncorrected date entry is sufficient to prevent task resolution despite an 80\% checkpoint score.
+
+\paragraph{The Fragility Principle.}
+This case illustrates a fundamental property of long-horizon task completion. If each checkpoint in a task has an independent pass probability $p$, the probability of all $N$ checkpoints passing simultaneously is $p^N$. Even with $p = 0.95$ across $N = 12$ checkpoints, the resolved probability is only $0.95^{12} \approx 0.54$. For the typical \datasetname task with 10--20 checkpoints and empirical per-checkpoint pass rates well below 0.95, near-zero resolved scores are a mathematical inevitability. This \emph{fragility of composition} means that incremental improvements in per-checkpoint reliability yield superlinear gains in end-to-end task completion---a property that current agent training paradigms, which typically optimize for step-level rewards, are not designed to exploit.
+
+
+\subsection{Error Cascading in Multi-Application Workflows}
+\label{disc-cascade}
+
+\datasetname workflows exhibit directed acyclic graph (DAG) dependencies where intermediate outputs serve as inputs to downstream operations. A single semantic error in an early step can propagate silently through the dependency chain, causing multiple downstream checkpoints to fail---even when the agent believes the task is complete.
+
+\paragraph{Case: Entity-Type Mismatch in Customer-Centric Workflow ({\ttfamily bof\_032}).}
+This Business Operations task spans three applications (Twenty CRM, BigCapital, Pretix) with 18 verification checkpoints (total weight~33). The workflow requires creating a company record and deal opportunity in Twenty CRM, recording a set of financial operations in BigCapital for a software-consulting client---a company customer, two milestone invoices, a payment, and a journal entry---and setting up a Pretix ticketing event for the client's milestone celebration. All BigCapital financial records are anchored to a single customer entity: \emph{Arcturus Digital}.
+
+Opus~4.6 encountered BigCapital's \emph{New Customer} form at step~246. The form accommodates both individual and company customers through a ``display name'' selector: a user creating a company customer should enter only a company name and select it as the display name; entering personal name fields (\emph{First}, \emph{Last}) together with a company name instead creates an individual customer. The agent filled in First: \emph{Elena}, Last: \emph{Vasquez}, and Company: \emph{Arcturus Digital}, then spent twelve steps struggling with the required display-name selector. At step~258, the dropdown surfaced only individual-name options:
+
+\begin{trajbox}{Agent Trajectory --- {\ttfamily bof\_032} Steps 258--259 / 398 (BigCapital Customer Form)}
+\small
+\textbf{Step 258 Evaluation:} ``The display name dropdown is now open with options `Elena Vasquez' and `Elena, Vasquez'. \ldots Company Name field appears empty. \textbf{Verdict: Partial success---dropdown is open.}'' \\[2pt]
+\textbf{Step 258 Next Goal:} ``Click `Elena Vasquez' display name option, then fill Company Name with `Arcturus Digital', then save the customer.'' \\[4pt]
+\textbf{Step 259 Evaluation:} ``Successfully created customer `Arcturus Digital' with email elena.vasquez@arcturusdigital.com. \textbf{Verdict: Success}'' \\[2pt]
+\textbf{Step 259 Memory:} ``BigCapital: Customer `Arcturus Digital' created successfully. Now need to create two items \ldots''
+\end{trajbox}
+
+BigCapital had in fact created an \emph{individual} customer named \emph{Elena Vasquez}---with Arcturus Digital stored only as an associated company field---not a company customer named \emph{Arcturus Digital}. The agent proceeded to create two service items, a deferred-revenue account, two invoices, a payment, and a journal entry, all attached to the Elena Vasquez entity. Fifty-two steps later, consulting the Customer Balance Summary, the agent declared BigCapital complete:
+
+\begin{trajbox}{Agent Trajectory --- {\ttfamily bof\_032} Step 311 / 398 (Balance Verification)}
+\small
+\textbf{Evaluation:} ``Successfully navigated to Customer Balance Summary report. Elena Vasquez (Arcturus Digital) shows \$55,000.00 balance, confirming Milestone~2 invoice is unpaid and Milestone~1 is fully settled. \textbf{Verdict: Success}'' \\[3pt]
+\textbf{Memory:} ``BigCapital ALL DONE: Customer balance verified at \$55,000 for Elena Vasquez (Arcturus Digital). Now need Pretix tasks \ldots''
+\end{trajbox}
+
+The display label ``Elena Vasquez (Arcturus Digital)'' led the agent to infer that its intended company customer existed and held the expected balance. Post-hoc verification exposed a cascade from the single entity-type misclassification:
+
+\begin{verifybox}{Verification Cascade --- {\ttfamily bof\_032} (Claude Opus 4.6) --- Score: 0.242 (8/33)}
+\small
+\cmark\ Checks 1--2: Twenty company Arcturus Digital, person Elena Vasquez (wt.\ 4) \\
+\xmark\ Check 3: Twenty opportunity stage (wt.\ 2) --- stage=NEW (expected Won) \\
+\cmark\ Check 4: Twenty company is favorite (wt.\ 1) \\
+\xmark\ Checks 5--6: Twenty follow-up tasks (wt.\ 4) --- not found \\[4pt]
+\hrule\vspace{4pt}
+\xmark\ \textbf{Check 7: BigCapital customer Arcturus Digital (wt.\ 1)} --- \textbf{not found} \quad $\leftarrow$ \emph{chokepoint} \\
+\cmark\ Checks 8--9: BigCapital service items and deferred revenue account (wt.\ 3) \\
+\xmark\ Checks 10--12: BigCapital invoices and payment (wt.\ 6) --- not found \quad \emph{depends on Check 7} \\
+\xmark\ Check 14: BigCapital customer balance (wt.\ 3) --- \textbf{balance=0.0} (expected 55\,000) \quad \emph{depends on Check 7} \\[4pt]
+\hrule\vspace{4pt}
+\xmark\ Checks 15--18: All Pretix checks (wt.\ 6) --- event not created
+\end{verifybox}
+
+Check~7 (customer lookup, weight~1) functions as a \emph{chokepoint}: because BigCapital's database contains a customer named \emph{Elena Vasquez}, not \emph{Arcturus Digital}, the verification queries for the company customer return empty. Four downstream checks (Checks~10--12 and~14, combined weight~9) fail for the same underlying reason---no invoice or payment is associated with a company customer named Arcturus Digital. The true cost of the single entity-type misclassification is 10 out of 33 points (30\% of the task), even though the chokepoint check itself accounts for only 3\%. This pattern is consistent across all evaluated models:
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lccl}
+\toprule
+\textbf{Model} & \textbf{Score} & \textbf{Earned/33} & \textbf{Furthest Stage Reached} \\
+\midrule
+MiniMax M2.7 & 0.000 & 0 & No checks passed \\
+Doubao Seed 2.0 Pro & 0.061 & 2 & Twenty CRM (person only) \\
+Kimi K2.5 & 0.091 & 3 & BigCapital items (no customer) \\
+Claude Sonnet 4.6 & 0.152 & 5 & Twenty CRM partial; BC customer wrong entity \\
+DeepSeek V4 Pro & 0.152 & 5 & Twenty CRM partial; BC customer wrong entity \\
+Gemini 3.1 Pro & 0.182 & 6 & BC company customer correct; Milestone 2 invoice correct \\
+GPT-5.4 High & 0.212 & 7 & BC company customer correct; invoices wrong details \\
+Claude Opus 4.6 & 0.242 & 8 & Twenty CRM partial; BC personal entity (wrong type) \\
+Qwen 3.6 Plus & 0.303 & 10 & BC company customer; Milestone 2 invoice + payment correct \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Six of nine models failed to create Arcturus Digital as a company customer in BigCapital (Check~7 not found). The three models that succeeded (Gemini, GPT-5.4, Qwen) still failed to satisfy all downstream financial checks: invoice amounts, payment dates, or the required customer balance remained incorrect. No model achieved a resolved score on this task.
+
+\paragraph{Structural Implications.}
+This case exposes a failure mode distinct from resource-exhaustion cascades: \emph{silent entity-type misclassification}. BigCapital distinguishes between individual and company customers through a display-name selector whose semantics are not surfaced as explicit error messages or visible constraints. An agent that fills in both personal name fields and a company name---reasonable behavior given a task description that mentions a named contact (Elena Vasquez) and a company (Arcturus Digital)---inadvertently creates the wrong entity type. Because all downstream BigCapital operations use the customer record as the primary join key, the misclassification silently invalidates the entire financial record set. Critically, the error is invisible during execution: the balance report displays ``Elena Vasquez (Arcturus Digital)'' with the expected \$55,000 figure, and the agent reads this as confirmation of correct completion. Verification, which queries by the customer name \emph{Arcturus Digital}, finds nothing. Handling such cases robustly requires agents to maintain an explicit model of how SaaS application data schemas map task-level concepts (``client'', ``customer'') to application-specific entity types---a capability that current agents, which operate primarily through surface-level UI interaction, do not possess.
+
+
+\subsection{Do Agents Know When They Have Failed?}
+\label{disc-selfeval}
+
+Current CUA frameworks equip agents with an internal reasoning trace---structured as evaluation, memory, and next-goal fields---that enables the agent to assess its own progress. A critical question is whether these self-assessments are reliable. By comparing the agent's trajectory-level evaluations against post-hoc verification outcomes, we find systematic and consequential discrepancies.
+
+\paragraph{Case: Claimed Success Despite Verification Failure ({\ttfamily bof\_023}).}
+Returning to the expense reimbursement task described in \S\ref{disc-nearmiss}, we examine Opus~4.6's internal reasoning at three critical junctures in its 210-step trajectory. At step~124, the agent reviewed the newly created bill and correctly identified a date error:
+
+\begin{trajbox}{Agent Trajectory --- {\ttfamily bof\_023} Step 124 / 210 (BigCapital Bill Review)}
+\small
+\textbf{Evaluation:} ``Bill details panel opened. Shows correct line items but date is 19 Mar 2026 instead of 20 Mar 2026. \textbf{Verdict: Partial success}'' \\[3pt]
+\textbf{Memory:} ``Bill created with correct items (Travel 8500, Food 1500, Calls 350, total \$10,350) but date shows 19 Mar 2026 instead of 20 Mar 2026. Need to edit date to 2026-03-20. Bill status appears to be Draft/Due.'' \\[3pt]
+\textbf{Next Goal:} ``Edit the bill to fix date to 2026-03-20 and approve it.'' \\[3pt]
+\textbf{Action:} {\ttfamily click} $\to$ ``Edit Bill'' button
+\end{trajbox}
+
+The agent recognized the error and planned a correction. Forty-one steps later, after navigating through payment operations, the agent's assessment shifted dramatically:
+
+\begin{trajbox}{Agent Trajectory --- {\ttfamily bof\_023} Step 165 / 210 (Payment Completion)}
+\small
+\textbf{Evaluation:} ``Payment created successfully. Bill now shows `Paid' status with Due Amount \$0.00. \textbf{Verdict: Success}'' \\[3pt]
+\textbf{Memory:} ``BigCapital: vendor, items, bill created and paid. Bill shows Paid, due \$0.00.'' \\[3pt]
+\textbf{Actions:} {\ttfamily click} $\to$ close dialog; \quad {\ttfamily replace\_file} $\to$ todo.md: marks both ``Create bill'' and ``Payment'' as \cmark\ complete
+\end{trajbox}
+
+At termination, the agent produced a confident summary claiming perfect completion:
+
+\begin{trajbox}{Agent Trajectory --- {\ttfamily bof\_023} Step 210 / 210 (Task Termination)}
+\small
+\textbf{Evaluation:} ``Task row 0 is fully configured with all required fields. \textbf{Verdict: Success}'' \\[3pt]
+\textbf{Agent declares} (via {\ttfamily done} action): \\[2pt]
+\cmark\ ``HRMS --- Approved expense claim'' \\
+\cmark\ ``BigCapital --- Bill created \textbf{dated 2026-03-20} with 3 line items totaling \$10,350.00, approved'' \\
+\cmark\ ``BigCapital --- \textbf{Payment recorded} \$10,350.00 from Bank Account dated 2026-04-05'' \\
+\cmark\ ``BigCapital --- A/P Aging Summary confirms zero balance'' \\
+\cmark\ ``Twenty CRM --- Task created: `Expense reimbursement processed'\,''
+\end{trajbox}
+
+The verification result (shown in \S\ref{disc-nearmiss}) directly contradicts this summary: the bill date remained 2026-03-19 (not 03-20 as claimed), despite the agent declaring it ``dated 2026-03-20''. This case reveals two layers of self-evaluation failure:
+
+\begin{enumerate}[leftmargin=1.5em]
+\item \textbf{Absent re-verification.} The agent recognized an error at step~124 (wrong date), attempted a fix, and then \emph{assumed the fix succeeded} without re-checking. Human users naturally re-verify after corrective actions---refreshing a page, re-reading a field---but the agent advanced to the next subtask without closing the verification loop.
+
+\item \textbf{Overconfident summarization.} The agent's final output at step~210 claimed the bill was ``dated 2026-03-20''---the \emph{intended} date, not the \emph{actual} date it had flagged as wrong 86 steps earlier. The termination summary appears to draw more from planned intentions than from observed execution results.
+\end{enumerate}
+
+\paragraph{Implications for Agent Architecture.}
+These findings point to a structural limitation in current CUA designs: the absence of closed-loop outcome verification within the agent's execution cycle. A more robust architecture would incorporate explicit \emph{outcome verification steps}---re-reading a form field after submission, querying a record after creation, or comparing current page state against expected values---before marking a subtask as complete. Such verification loops would add steps to the trajectory but could substantially reduce the rate of silently propagated errors, particularly in SaaS environments where the gap between action execution and action effect is non-trivial due to asynchronous backend processing, client-side caching, and UI state desynchronization.
+
+
+\subsection{Is a Single Run Enough to Evaluate an Agent?}
+\label{disc-var}
+
+A common practice in agent evaluation is to report single-run (pass@1) performance. Our results reveal that this practice can be highly misleading, as the same model exhibits dramatic score variance across independent runs on the same task.
+
+\paragraph{Case: Intra-Model Variance ({\ttfamily bof\_155}).}
+Claude Sonnet~4.6 was evaluated three times on the HR grievance workflow ({\ttfamily bof\_155}). The three runs produced strikingly different outcomes:
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{cccp{7cm}}
+\toprule
+\textbf{Run} & \textbf{Score} & \textbf{Earned/28} & \textbf{Checks Passed} \\
+\midrule
+r2 & 0.000 & 0 & None \\
+r0 & 0.214 & 6 & Grievance types, grievance record, employee transfer, training program \\
+r1 & 0.679 & 19 & All ERPNext checks + both expenses + all three Twenty CRM tasks \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Run~2 achieved zero points---a complete failure to engage with the task. Run~0 progressed through the ERPNext stage but stalled. Run~1, remarkably, completed ERPNext, recorded both expenses correctly, and created all three Twenty CRM follow-up tasks (earning 19/28 points), while only failing the Pretix stage---and, unlike most agents, it did not let this failure block progress on independent downstream operations. The range of 0.000--0.679 represents a qualitative, not merely quantitative, difference: the distance between ``total failure'' and ``substantial completion.'' This variance cannot be attributed to environmental stochasticity, since the SaaS environment is reset to an identical initial state before each run.
+
+\paragraph{Case: Cross-Model and Cross-Run Divergence ({\ttfamily bof\_023}).}
+The expense reimbursement task further illustrates how variance manifests across both models and runs:
+
+\begin{table}[h]
+\centering
+\small
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Run 0} & \textbf{Run 1} & \textbf{Run 2} \\
+\midrule
+Claude Opus 4.6 & 0.80 & --- & --- \\
+Qwen 3.6 Plus & 0.80 & 0.70 & 0.10 \\
+Gemini 3.1 Pro & 0.10 & 0.10 & 0.70 \\
+Doubao Seed 2.0 Pro & 0.10 & 0.10 & 0.10 \\
+Kimi K2.5 & 0.70 & --- & --- \\
+GPT-5.4 High & 0.30 & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several patterns emerge. First, the same model can swing between near-success and near-failure: Qwen scores 0.80 on run~0 but drops to 0.10 on run~2, while Gemini shows the inverse pattern (0.10 on runs~0--1, then 0.70 on run~2). Second, some models exhibit consistently low scores (Doubao at 0.10 across all three runs), suggesting a deterministic failure mode rather than stochastic variance. Third, matching best single-run scores (Opus and Qwen both at 0.80) can mask fundamentally different reliability profiles: Qwen's variance reveals that its peak performance is not reproducible.
+
+\paragraph{Bifurcation Points and Path Dependence.}
+The root cause of this variance lies in the path-dependent nature of long-horizon SaaS workflows. At critical decision points---choosing which application to navigate first, interpreting an ambiguous form field, deciding whether to retry a failed operation or move on---small differences in the agent's stochastic sampling lead to fundamentally different execution trajectories. Once an agent commits to a suboptimal path (e.g., spending 50 steps on an unproductive approach to an unfamiliar UI element, as seen in the {\ttfamily bof\_155} Training Event case), the remaining step budget may be insufficient to recover. This \emph{bifurcation} dynamic explains why variance is highest on complex multi-application tasks and lowest on simpler single-application operations: more decision points mean more opportunities for early divergence to compound into dramatically different outcomes.
+
+These findings reinforce the pass@$k$ analysis in \S\ref{exp-res} and carry practical implications for both evaluation and deployment. For evaluation, reporting only pass@1 can misrepresent agent capability: a model with high variance may appear either strong or weak depending on which run is selected. Multi-run metrics such as pass@$k$ and score variance provide a substantially more informative assessment. For deployment, the high variance observed on realistic SaaS tasks suggests that production CUA systems would benefit from retry mechanisms, ensemble strategies, or checkpoint-based recovery that mitigate the impact of unfavorable early-trajectory decisions.

@@ -1,0 +1,189 @@
+\section{讨论}
+\label{disc}
+
+前述实验已经表明，\datasetname 对所有受评智能体都极具挑战。本节不再停留于汇总统计，而是结合具体的验证结果与执行轨迹，分析智能体\emph{为何}失败。通过详细案例研究，我们识别出导致表~\ref{tab:main_results} 中完全解决分数低下的四种根本失效模式；这些模式也揭示了真实 SaaS 工作流的结构性特征，而当前 CUA 设计并不善于处理它们。
+
+\subsection{长程完成的脆弱性}
+\label{disc-nearmiss}
+
+\datasetname 中一个显著现象，是检查点分数（23--44\%）与完全解决分数（$<4\%$）之间存在巨大差距。人们可能会预期：如果智能体能够完成大部分检查点，那么其完整完成任务的概率也不应太低。下面的案例说明这种预期为何不成立。
+
+\paragraph{案例：未检测到日期错误的功亏一篑（{\ttfamily bof\_023}）。} 这项业务运营任务要求在三个应用中处理一笔费用报销：在 HRMS 中批准报销申请；在 BigCapital 中创建供应商、账单与付款；在 Twenty CRM 中记录一项已完成任务。Opus 4.6 得分为 0.80（16/20），有两项验证检查未通过；其中一项反映了持续到任务终止的真实智能体错误：
+
+\begin{verifybox}{验证结果 --- {\ttfamily bof\_023}（Claude Opus 4.6）--- 分数：0.80（16/20）}
+\small
+\cmark\ 检查 1：HRMS 报销申请已批准（权重 2）--- 状态=Approved，总额=10350.0 \\
+\cmark\ 检查 2：HRMS 报销明细（权重 2）--- 差旅：8500，餐饮：1500，通话：350 \\
+\cmark\ 检查 3：BC 供应商存在（权重 1）--- email=mohammed.farooq@gmail.com \\
+\cmark\ 检查 4：BC 项目存在（权重 1）--- 找到=\{Travel, Food, Calls\} \\
+\xmark\ 检查 5：BC 账单存在（权重 2）--- \textbf{日期=2026-03-19}（预期 03-20），\textbf{状态=NULL} \\
+\cmark\ 检查 6：BC 账单明细（权重 2）--- 金额正确 \\
+\cmark\ 检查 7--8：BC 付款与余额（权重合计 5）--- 账单已全额结清（应付=0.00） \\
+\cmark\ 检查 9--11：Twenty CRM 任务已创建、已完成且正文正确
+\end{verifybox}
+
+检查 5 揭示了真实的智能体错误：账单日期被设为 2026-03-19，而非要求的 2026-03-20。如第~\ref{disc-selfeval} 节所示，智能体在执行期间识别出了这个错误，却没有验证其纠正尝试是否真正生效，就进入下一子任务，未能闭合验证回路。尽管检查点分数达到 80\%，仅这一处未纠正的日期输入便足以令整个任务无法完全解决。
+
+\paragraph{脆弱性原理。} 该案例体现了长程任务完成的一项基本性质。假设任务中每个检查点独立通过的概率为 $p$，那么 $N$ 个检查点全部同时通过的概率是 $p^N$。即使 $N=12$ 个检查点的单点通过率都达到 $p=0.95$，完全解决概率也只有 $0.95^{12}\approx0.54$。典型 \datasetname 任务包含 10--20 个检查点，而经验单点通过率远低于 0.95，因此完全解决分数接近零在数学上几乎不可避免。这种\emph{组合脆弱性}意味着，单检查点可靠性的渐进提升会为端到端任务完成带来超线性收益；而通常只优化步级奖励的现有智能体训练范式，并非为利用这一性质而设计。
+
+\subsection{多应用工作流中的错误级联}
+\label{disc-cascade}
+
+\datasetname 工作流具有有向无环图（DAG）式依赖，中间输出会成为下游操作的输入。早期步骤中的一个语义错误可能沿依赖链无声传播，使多个下游检查点失败——即使智能体相信任务已经完成。
+
+\paragraph{案例：以客户为中心的工作流中实体类型不匹配（{\ttfamily bof\_032}）。} 这项业务运营任务横跨三个应用（Twenty CRM、BigCapital、Pretix），包含 18 个验证检查点，总权重为 33。工作流要求：在 Twenty CRM 中创建公司记录与成交机会；在 BigCapital 中为一家软件咨询客户记录一组财务操作，包括公司客户、两张里程碑发票、一笔付款和一条日记账分录；再为该客户的里程碑庆祝活动建立 Pretix 票务事件。所有 BigCapital 财务记录都锚定到同一客户实体：\emph{Arcturus Digital}。
+
+Opus 4.6 在第 246 步进入 BigCapital 的\emph{新建客户}表单。该表单通过“显示名称”选择器同时支持个人客户与公司客户：创建公司客户时，用户应只输入公司名称并将其选作显示名称；若同时填写个人姓名字段（\emph{First}、\emph{Last}）和公司名称，系统会创建个人客户。智能体输入了 First：\emph{Elena}、Last：\emph{Vasquez}、Company：\emph{Arcturus Digital}，随后花费十二步处理必填的显示名称选择器。第 258 步时，下拉框中只出现了个人姓名选项：
+
+\begin{trajbox}{智能体轨迹 --- {\ttfamily bof\_032} 第 258--259 / 398 步（BigCapital 客户表单）}
+\small
+\textbf{第 258 步评估：}“显示名称下拉框现已打开，选项为 `Elena Vasquez' 与 `Elena, Vasquez'。……公司名称字段似乎为空。\textbf{结论：部分成功——下拉框已打开。}”\\[2pt]
+\textbf{第 258 步下一目标：}“点击 `Elena Vasquez' 显示名称选项，然后将公司名称填为 `Arcturus Digital'，再保存客户。”\\[4pt]
+\textbf{第 259 步评估：}“已成功创建客户 `Arcturus Digital'，邮箱为 elena.vasquez@arcturusdigital.com。\textbf{结论：成功。}”\\[2pt]
+\textbf{第 259 步记忆：}“BigCapital：客户 `Arcturus Digital' 已成功创建。现在需要创建两个项目……”
+\end{trajbox}
+
+事实上，BigCapital 创建的是名为 \emph{Elena Vasquez} 的\emph{个人}客户；Arcturus Digital 只是其关联公司字段，而非名为 \emph{Arcturus Digital} 的公司客户。智能体继续创建了两个服务项目、一个递延收入账户、两张发票、一笔付款及一条日记账分录，并将其全部关联到 Elena Vasquez 实体。又经过 52 步后，智能体查看客户余额摘要并宣布 BigCapital 部分已经完成：
+
+\begin{trajbox}{智能体轨迹 --- {\ttfamily bof\_032} 第 311 / 398 步（余额验证）}
+\small
+\textbf{评估：}“已成功进入客户余额摘要报告。Elena Vasquez（Arcturus Digital）显示余额为 \$55,000.00，证实里程碑 2 发票尚未付款，而里程碑 1 已全额结清。\textbf{结论：成功。}”\\[3pt]
+\textbf{记忆：}“BigCapital 全部完成：已验证 Elena Vasquez（Arcturus Digital）的客户余额为 \$55,000。现在需要处理 Pretix 任务……”
+\end{trajbox}
+
+“Elena Vasquez（Arcturus Digital）”这一显示标签让智能体误以为目标公司客户已经存在且持有预期余额。事后验证揭示了由单次实体类型误分类引发的级联：
+
+\begin{verifybox}{验证级联 --- {\ttfamily bof\_032}（Claude Opus 4.6）--- 分数：0.242（8/33）}
+\small
+\cmark\ 检查 1--2：Twenty 中的公司 Arcturus Digital 与联系人 Elena Vasquez（权重 4）\\
+\xmark\ 检查 3：Twenty 商机阶段（权重 2）--- 阶段=NEW（预期 Won）\\
+\cmark\ 检查 4：Twenty 公司已收藏（权重 1）\\
+\xmark\ 检查 5--6：Twenty 后续任务（权重 4）--- 未找到\\[4pt]
+\hrule\vspace{4pt}
+\xmark\ \textbf{检查 7：BigCapital 客户 Arcturus Digital（权重 1）}--- \textbf{未找到}\quad$\leftarrow$\emph{阻塞点}\\
+\cmark\ 检查 8--9：BigCapital 服务项目与递延收入账户（权重 3）\\
+\xmark\ 检查 10--12：BigCapital 发票与付款（权重 6）--- 未找到\quad\emph{依赖检查 7}\\
+\xmark\ 检查 14：BigCapital 客户余额（权重 3）--- \textbf{余额=0.0}（预期 55\,000）\quad\emph{依赖检查 7}\\[4pt]
+\hrule\vspace{4pt}
+\xmark\ 检查 15--18：全部 Pretix 检查（权重 6）--- 事件未创建
+\end{verifybox}
+
+检查 7（客户查找，权重 1）构成一个\emph{阻塞点}：BigCapital 数据库中保存的是名为 \emph{Elena Vasquez} 的客户，而非 \emph{Arcturus Digital}，因此以公司客户名执行的验证查询返回空结果。四个下游检查（检查 10--12 与 14，总权重 9）因同一根因失败——没有发票或付款与名为 Arcturus Digital 的公司客户相关联。这一次实体类型误分类的真实代价是 33 分中的 10 分（任务总分的 30\%），尽管阻塞点检查本身只占 3\%。所有受评模型都呈现相似模式：
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{lccl}
+\toprule
+\textbf{模型} & \textbf{分数} & \textbf{所得/33} & \textbf{到达的最远阶段} \\
+\midrule
+MiniMax M2.7 & 0.000 & 0 & 无检查通过 \\
+Doubao Seed 2.0 Pro & 0.061 & 2 & Twenty CRM（仅联系人）\\
+Kimi K2.5 & 0.091 & 3 & BigCapital 项目（无客户）\\
+Claude Sonnet 4.6 & 0.152 & 5 & Twenty CRM 部分完成；BC 客户实体错误 \\
+DeepSeek V4 Pro & 0.152 & 5 & Twenty CRM 部分完成；BC 客户实体错误 \\
+Gemini 3.1 Pro & 0.182 & 6 & BC 公司客户正确；里程碑 2 发票正确 \\
+GPT-5.4 High & 0.212 & 7 & BC 公司客户正确；发票细节错误 \\
+Claude Opus 4.6 & 0.242 & 8 & Twenty CRM 部分完成；BC 个人实体（类型错误）\\
+Qwen 3.6 Plus & 0.303 & 10 & BC 公司客户；里程碑 2 发票与付款正确 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+九个模型中有六个未能在 BigCapital 中把 Arcturus Digital 创建为公司客户（检查 7 未找到）。成功创建公司客户的三个模型（Gemini、GPT-5.4、Qwen）仍未满足全部下游财务检查：发票金额、付款日期或要求的客户余额依然错误。没有任何模型完全解决该任务。
+
+\paragraph{结构性含义。} 该案例揭示了一种不同于资源耗尽级联的失效模式：\emph{无声的实体类型误分类}。BigCapital 借助显示名称选择器区分个人客户与公司客户，但其语义没有通过显式错误消息或可见约束呈现。若任务描述同时提到具体联系人（Elena Vasquez）和公司（Arcturus Digital），智能体同时填写个人姓名字段与公司名本来是看似合理的行为，却会意外创建错误类型的实体。由于所有下游 BigCapital 操作都以客户记录为主连接键，该误分类无声地使整套财务记录失效。关键在于，执行期间无法直接看出这一错误：余额报告显示“Elena Vasquez（Arcturus Digital）”及预期的 \$55,000，智能体因而把它视作正确完成的证据；而按客户名 \emph{Arcturus Digital} 查询的验证器却一无所获。要稳健处理此类情况，智能体必须显式建模 SaaS 应用数据模式如何把任务层概念（“客户”“顾客”）映射到应用特有的实体类型；主要停留在表层 UI 交互的当前智能体并不具备这种能力。
+
+\subsection{智能体知道自己已经失败吗？}
+\label{disc-selfeval}
+
+当前 CUA 框架为智能体配备了由评估、记忆和下一目标字段构成的内部推理轨迹，使其能够评估自身进展。一个关键问题是，这些自我评估是否可靠。通过比较轨迹层评估与事后验证结果，我们发现了系统性且后果严重的不一致。
+
+\paragraph{案例：验证失败却宣称成功（{\ttfamily bof\_023}）。} 我们回到第~\ref{disc-nearmiss} 节的费用报销任务，考察 Opus 4.6 在 210 步轨迹中三个关键节点的内部推理。第 124 步，智能体检查新建账单并正确识别出日期错误：
+
+\begin{trajbox}{智能体轨迹 --- {\ttfamily bof\_023} 第 124 / 210 步（BigCapital 账单检查）}
+\small
+\textbf{评估：}“账单详情面板已打开。明细正确，但日期是 2026 年 3 月 19 日，而非 2026 年 3 月 20 日。\textbf{结论：部分成功。}”\\[3pt]
+\textbf{记忆：}“账单已创建，项目正确（Travel 8500、Food 1500、Calls 350，总计 \$10,350），但日期显示为 2026 年 3 月 19 日而非 20 日。需要把日期改为 2026-03-20。账单状态似乎是 Draft/Due。”\\[3pt]
+\textbf{下一目标：}“编辑账单，把日期修正为 2026-03-20 并批准。”\\[3pt]
+\textbf{动作：}{\ttfamily click}$\to$“Edit Bill”按钮
+\end{trajbox}
+
+智能体识别了错误并计划纠正。又经过 41 步、完成付款操作导航后，其判断发生了明显变化：
+
+\begin{trajbox}{智能体轨迹 --- {\ttfamily bof\_023} 第 165 / 210 步（付款完成）}
+\small
+\textbf{评估：}“付款创建成功。账单现在显示 `Paid' 状态，应付金额为 \$0.00。\textbf{结论：成功。}”\\[3pt]
+\textbf{记忆：}“BigCapital：供应商、项目与账单已创建，账单已支付。账单显示 Paid，应付 \$0.00。”\\[3pt]
+\textbf{动作：}{\ttfamily click}$\to$关闭对话框；\quad {\ttfamily replace\_file}$\to$todo.md：将“创建账单”与“付款”均标记为 \cmark\ 已完成
+\end{trajbox}
+
+终止时，智能体给出了充满信心、声称完美完成的总结：
+
+\begin{trajbox}{智能体轨迹 --- {\ttfamily bof\_023} 第 210 / 210 步（任务终止）}
+\small
+\textbf{评估：}“第 0 行任务已按要求配置全部字段。\textbf{结论：成功。}”\\[3pt]
+\textbf{智能体声明}（通过 {\ttfamily done} 动作）：\\[2pt]
+\cmark\ “HRMS——费用报销申请已批准”\\
+\cmark\ “BigCapital——账单已创建，\textbf{日期为 2026-03-20}，包含三条明细，总计 \$10,350.00，且已批准”\\
+\cmark\ “BigCapital——已记录 \$10,350.00 的\textbf{付款}，付款账户为 Bank Account，日期为 2026-04-05”\\
+\cmark\ “BigCapital——应付账款账龄摘要确认余额为零”\\
+\cmark\ “Twenty CRM——已创建任务：`Expense reimbursement processed'”
+\end{trajbox}
+
+验证结果（见第~\ref{disc-nearmiss} 节）直接否定了这份总结：账单日期仍为 2026-03-19，而非智能体声称的 03-20。这个案例揭示了两层自我评估失败：
+\begin{enumerate}
+  \item \textbf{缺少再次验证。} 智能体在第 124 步识别出日期错误，尝试修复后便\emph{假定修复已经成功}，没有再次检查。人类用户在采取纠正动作后通常会刷新页面或重新读取字段；智能体却没有闭合验证回路，直接进入下一子任务。
+  \item \textbf{过度自信的总结。} 智能体在第 210 步的最终输出中声称账单“日期为 2026-03-20”——这是\emph{意图设置}的日期，而非它在 86 步之前已经标记为错误的\emph{实际}日期。终止总结似乎更多依据计划意图，而非观察到的执行结果。
+\end{enumerate}
+
+\paragraph{对智能体架构的启示。} 这些发现指向当前 CUA 设计的一项结构性局限：智能体执行循环缺少闭环结果验证。更稳健的架构应在将子任务标记为完成之前，加入显式的\emph{结果验证步骤}，例如提交后重新读取表单字段、创建后查询记录，或把当前页面状态与预期值比较。此类验证回路会增加轨迹步数，却能显著减少错误的无声传播；在 SaaS 环境中尤其如此，因为异步后端处理、客户端缓存和 UI 状态不同步会使动作执行与动作实际生效之间出现不可忽略的差距。
+
+\subsection{单次运行足以评估智能体吗？}
+\label{disc-var}
+
+智能体评测通常报告单次运行（pass@1）性能。我们的结果表明，这种做法可能严重误导，因为同一模型在同一任务的独立运行之间会出现巨大分数方差。
+
+\paragraph{案例：模型内方差（{\ttfamily bof\_155}）。} 我们在 HR 申诉工作流（{\ttfamily bof\_155}）上对 Claude Sonnet 4.6 运行了三次，结果差异惊人：
+
+\begin{table}[H]
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{cccp{5.3cm}}
+\toprule
+\textbf{运行} & \textbf{分数} & \textbf{所得/28} & \textbf{通过的检查} \\
+\midrule
+r2 & 0.000 & 0 & 无 \\
+r0 & 0.214 & 6 & 申诉类型、申诉记录、员工调动、培训项目 \\
+r1 & 0.679 & 19 & 全部 ERPNext 检查、两笔费用以及全部三项 Twenty CRM 任务 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+运行 2 得到零分，完全没有有效推进任务；运行 0 完成 ERPNext 阶段后陷入停滞；而运行 1 则完成 ERPNext，正确记录两笔费用，并创建全部三项 Twenty CRM 后续任务（获得 28 分中的 19 分），只在 Pretix 阶段失败。与多数智能体不同，它没有让这次失败阻塞其他彼此独立的下游操作。0.000--0.679 的范围体现的是定性差别，而不只是定量差别：它横跨“完全失败”与“大部分完成”。由于每次运行前 SaaS 环境都被重置到相同初始状态，这种方差不能归因于环境随机性。
+
+\paragraph{案例：跨模型与跨运行分化（{\ttfamily bof\_023}）。} 费用报销任务进一步说明了方差如何同时出现在模型之间与同一模型的不同运行之间：
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{模型} & \textbf{运行 0} & \textbf{运行 1} & \textbf{运行 2} \\
+\midrule
+Claude Opus 4.6 & 0.80 & --- & --- \\
+Qwen 3.6 Plus & 0.80 & 0.70 & 0.10 \\
+Gemini 3.1 Pro & 0.10 & 0.10 & 0.70 \\
+Doubao Seed 2.0 Pro & 0.10 & 0.10 & 0.10 \\
+Kimi K2.5 & 0.70 & --- & --- \\
+GPT-5.4 High & 0.30 & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+其中呈现出几种模式。第一，同一模型可能在近乎成功与近乎失败之间剧烈摆动：Qwen 在运行 0 得到 0.80，运行 2 却降至 0.10；Gemini 则呈相反模式，运行 0--1 均为 0.10，运行 2 升至 0.70。第二，一些模型始终得分很低（Doubao 三次均为 0.10），更像确定性失效模式，而非随机方差。第三，相同的单次最佳分数（Opus 与 Qwen 都达到 0.80）可能掩盖完全不同的可靠性特征：Qwen 的方差表明其峰值表现无法稳定复现。
+
+\paragraph{分岔点与路径依赖。} 这种方差的根源在于长程 SaaS 工作流具有路径依赖。在关键决策点——首先进入哪个应用、如何解释含义模糊的表单字段、失败后是重试还是继续——智能体随机采样中的微小差异会导向根本不同的执行轨迹。一旦智能体走上次优路径，例如在不熟悉的 UI 元素上用 50 步反复尝试无效方法（{\ttfamily bof\_155} 的 Training Event 案例即如此），剩余步数预算可能不足以恢复。这种\emph{分岔}动态解释了为何复杂多应用任务的方差最高，而较简单单应用操作的方差最低：决策点越多，早期分化经累积后演变成截然不同结果的机会就越多。
+
+这些发现进一步支持第~\ref{exp-res} 节的 pass@$k$ 分析，并对评测与部署都有实际启示。就评测而言，只报告 pass@1 会错误刻画智能体能力：高方差模型可能仅因选择了不同运行，就显得很强或很弱；pass@$k$ 与分数方差等多次运行指标能够提供丰富得多的信息。就部署而言，真实 SaaS 任务上观察到的高方差说明，生产 CUA 系统将受益于重试机制、集成策略或基于检查点的恢复，以减轻不利的早期轨迹决策所造成的影响。
