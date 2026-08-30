@@ -1,0 +1,191 @@
+
+
+\section{Attention Acceleration on \sys-PIM} 
+\label{sec:design-dp}
+
+\begin{figure*}[t]
+  \setlength{\abovecaptionskip}{-5pt}
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+    \begin{minipage}[t]{0.95\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/design_arch_pipeline.pdf}
+    \footnotesize
+    \end{minipage}
+    \caption{\textbf{\sys-PIM design with bubble-free pipelining.}}
+  \label{fig:design_arch_pipe}
+\end{figure*}
+
+
+This section describes \sys-PIM, a novel DIMM-PIM hardware design for efficient attention computation.
+
+\myparagraph{Hardware components.}
+As shown in Fig.~\ref{fig:design_arch_pipe}-a, \sys-PIM integrates co-operated processing units (PUs) across both bank and rank levels.
+The bank PUs are integrated near DRAM banks with DRAM process, fetching KV cache from banks and performing score and context computation, 
+while a shared buffer is leveraged to broadcast input vectors to all bank PUs. 
+The bank PUs in all DRAM chips perform multiplication-and-accumulation (MAC) concurrently and generate outputs to the result buffer.
+Softmax unit, adder unit, and re-layout unit are integrated on the buffer chip with logic process as a part of the rank PU, which can execute in an asynchronous manner with bank PUs.
+
+\REVISE{The \sys-PIM workflow avoids modifications to host CPU memory controllers, which works as follows:
+first, CPU offloads PIM requests to the rank PU via normal writes, which are further decoded to PIM commands.
+Then, a dedicated PIM controller issues PIM commands on standard DDR interface to DRAM chips to trigger corresponding operations.
+PIM commands include the ones for metadata setup and data movement, and some key commands are listed as follows. 
+\texttt{PIM\_WR\_R} writes necessary information to registers, 
+such as configurations of computing paradigm (adder tree or accumulator), self-incrementing index mechanisms of buffers, and so on.
+\texttt{PIM\_LD\_SB} loads data from a certain bank to the shared buffer, while \texttt{PIM\_WR\_SB} writes data from rank PU to the shared buffer.
+\texttt{PIM\_MAC} executes MAC operations in all banks while reading necessary data from DRAM cells and shared buffer.
+\texttt{PIM\_RD\_RB} loads data from result buffers of all banks to rank PU. 
+}
+
+
+
+
+
+\subsection{Bubble-free pipelining}
+To eliminate data-synchronization overhead in attention computation, 
+the key is to leverage DIMM-PIM's unique architecture to design a pipelined attention execution that hides communication behind computation. 
+Furthermore, through quantitative analysis and a tailored head-mapping method, we ensure that the communication cost is completely hidden.
+
+\myparagraph{Orchestrating the pipeline with decoupled memory buses and kernel fusion.}
+We orchestrate a pipelined execution for attention kernels in PIM that aggressively overlaps computation and communication, grounded in two architectural observations. 
+First, the internal memory buses (servicing bank PUs accessing banks) and external memory buses (handling rank PUs accessing bank PUs or shared buffer) can be decoupled~\cite{chen2025asyncdimm}, 
+enabling simultaneous execution of compute kernels on bank PUs and data transfer from/to rank PU, as shown in Fig.~\ref{fig:design_arch_pipe}-b.
+Second, inspired by FlashAttention's kernel fusion technique~\cite{dao2022flashatten} (where attention is computed in chunked tiles),
+we orchestrate fine-grained kernel pipelining to maximize concurrency while constraining the intermediate head footprint on rank PUs.
+
+Concretely, during the scoring phase, 
+when each bank PU computes a token-specific output $O_s$ and stages it in its local result buffer,
+the rank PU immediately fetches it via otherwise-idle external buses.
+Our attention kernel operates at the granularity of chunked tiles, where each chunk consists of data generated in parallel by a single head across (possibly) multiple bank PUs.
+After accumulation in adder unit,
+the softmax unit applies per-chunk softmax operations.
+In this way, score and softmax computations are pipelined between bank PUs and rank PU in a chunk-based manner.
+Following the processing of all tokens, a final cross-chunk normalization pass produces the globally-correct softmax output $S$, 
+which is also performed in a streaming, chunk-wise manner.
+It allows the computation of finalized $S$ elements, the write-back communication of $S$ to DRAM chips, and subsequent context computations to be pipelined.
+
+
+
+
+
+
+
+\myparagraph{Enabling bubble-free with quantitative analysis and specific head mapping.}
+\label{sec:design-dp-pipeline}
+Due to the nature of DIMM that multiple co-operated DRAM chips form a rank,
+KV matrix (cache) and related computation would be distributed across these DRAM chips.
+It multiplies the amount of data transfer between buffer chip and DRAM chips, which we refer to as the cross-chip data transfer.
+The cross-chip transfer overhead, even if being overlapped with the execution of the bank PU, 
+can still lead to bubbles in pipelining execution and become the bottleneck due to the limited bandwidth of rank PU.
+To address these challenges, 
+we first quantize the cost of cross-chip data transfer considering the configurations of LLM models, hardware parameters, and head mapping methods.
+Then, we enable bubble-free pipelining with specific head mapping methods.
+The analysis takes score computation of one head as an example, while context computation can follow the similar analysis.
+
+The overheads for transferring score outputs $O_s$ can be denoted as $T_{comm}$,
+following $T_{comm} = {N_{comm}}/{B_{comm}}$, where $N_{comm}$ is the amount of cross-chip data transfer, and $B_{comm}$ is the related bandwidth.
+Specifically:
+\begin{align*}
+  {N_{comm}}={L_t}\times{N_{gqa}}\times{N_{hc}}, {B_{comm}}=({B_{rk}}\times{N_{hc}})/N_{chips}
+\end{align*}
+where $L_t$ is token length, $N_{gqa}$ is GQA group size, $N_{hc}$ is the number of chips allocated for the head, $B_{rk}$ is rank bandwidth, and $N_{chips}$ is total DRAM chips in the rank.
+Thus, the communication time is:
+\begin{align*}
+  {T_{comm}}=({L_t}\times{N_{gqa}}\times{N_{chips}})/{B_{rk}}
+\end{align*}
+which implies that with DIMM's distributed chips, the data transfer could incur $N_{chips}\times$ additional overhead, while GQA size further exacerbates it. 
+
+With the pipelined execution, 
+the key of achieving bubble-free overlapping is $T_{comm} \le T_{comp}$, i.e., the transfer can be fully overlapped by the bank PU computation.
+$T_{comp}$ can be calculated by $T_{comp} = {N_{comp}}/{B_{comp}}$, where $N_{comp}$ is the amount of bank PU data (K Cache) fetching, and $B_{comp}$ is the aggregated bank PU bandwidth.
+Specifically:
+\begin{align*}
+  {N_{comp}}={L_t}\times{E_{h}}\times \lceil {N_{gqa}}/{N_{cmr} \rceil}, {B_{comp}}={B_{bk}}\times{N_{bk}}\times{N_{hc}}
+\end{align*}
+where $E_{h}$ is head embedding size, $B_{bk}$ is bank PU bandwidth, $N_{bk}$ is bank number, and $N_{cmr}$ denotes the compute-memory ratio of arithmetic units in the bank PU. 
+Generally, $N_{cmr}$=1 can maximize bandwidth utilization for MHA computation, while $N_{cmr}$=8 for GQA-8 computation~\cite{park2024attacc}.
+Thus, the computation time is 
+\begin{align*}
+  {T_{comp}}=({L_t}\times{E_{h}}\times \lceil {N_{gqa}}/{N_{cmr}} \rceil)/({B_{bk}}\times{N_{bk}}\times{N_{hc}})
+\end{align*}
+
+Considering both $T_{comm}$ and $T_{comp}$, the key for ensuring bubble-free is $T_{comm} \le T_{comp}$: 
+\begin{align*}
+  \frac{{L_t}\times{N_{gqa}}\times{N_{chips}}}{{B_{rk}}} \le \frac{{L_t}\times{E_{h}}\times \lceil {N_{gqa}}/{N_{cmr}} \rceil}{{B_{bk}}\times{N_{bk}}\times{N_{hc}}}
+\end{align*}
+
+To satisfy the inequation, we identify given specific model and hardware configurations, the head mapping method ($N_{hc}$) is the only tunable variable. 
+This requires our head mapping to satisfy the following condition:
+\begin{align}
+  \label{equ:head-mapping} N_{hc} \le \frac{E_{h} \times B_{rk}\times \lceil {N_{gqa}}/{N_{cmr}} \rceil}{B_{bk} \times N_{bk} \times N_{gqa} \times N_{chips}}
+\end{align}
+
+For example, referring configurations in Table~\ref{tab:simulator} and \ref{tab:model}, our system requires ${N_{hc}}\le{8}$ for MHA ($N_{gqa} = 1$) and ${N_{hc}}\le{1}$ for GQA-8 ($N_{gqa} = 8$).
+In this paper, we apply $N_{hc} = 8$ for MHA and $N_{hc} = 1$ for GQA-8, since mapping a head to more chips potentially simplifies rank-level load balance because heads of models can be mapped to more ranks.
+
+
+
+
+
+
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{5pt}
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+    \begin{minipage}[t]{\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/design-arch-relayout.pdf}
+    \footnotesize
+    \end{minipage}
+    \caption{\textbf{Hybrid re-layout with 8 $\times$8 chips as an example.} \textit{E0-E127: elements 0-127 in a head. C0-C7: DRAM Chip 0-7.} }
+  \label{fig:design_arch_relayout}
+\end{figure}
+
+
+\subsection{Hybrid-grained Re-layout}
+\label{sec:design-dp-relayout}
+
+
+Besides specific head-mapping layouts, 
+DIMMs with distributed DRAM chips also impose constraints on element layout, as shown in Fig.~\ref{fig:design_arch_relayout}-a. 
+For contiguous transfers on the data buses, a single element may span multiple DRAM chips (e.g., an FP16 element across two ×8 chips), 
+which fundamentally prevents PIM execution. 
+Prior CPU-assisted re-layout schemes~\cite{devaux2019true,kim2021gradpim,asghari2016chameleon,lee2024pimmmu,gomez2022benchmarking} require repeated memory accesses, 
+incurring non-negligible overhead (\textsection\ref{sec:eval-ablation}). 
+To address this, we propose \emph{hybrid-grained relayout}, 
+which leverages the rank PU’s re-layout unit to perform in-flight data transformation during communication.
+
+The left of Fig.~\ref{fig:design_arch_relayout} shows the re-layout process with data offloading as an example. 
+The QKV vectors are first buffered in the rank PU’s on-chip SRAM rather than being written directly to DRAM banks. 
+After re-layout, the vectors are then stored in the DRAM chips. 
+The re-layout unit addresses mismatches between element mapping and head mapping via fine-grained and coarse-grained re-layout, respectively:
+First, for fine-grained re-layout, the re-layout unit ensures that each element resides on a single chip.
+As shown in Fig.~\ref{fig:design_arch_relayout}, the bits of a single element are arranged in contiguous burst beats to be stored in one chip (brown dashed block).
+For instance, the 16 bits of element 0 (E0) are transferred in two contiguous burst beats (within a single DDR burst), and are thus stored in Chip 0 (C0). 
+Second, for coarse-grained re-layout, the re-layout unit maps each head to $N_{hc}$ chips.
+Elements from a certain number of heads are scheduled together to follow the head mapping(blue dashed block).
+For example, in Fig.~\ref{fig:design_arch_relayout}-b where $N_{hc}=8$, 
+each burst beat contains elements from a single head after re-layout, 
+so one head is transferred to 8 chips.
+In Fig.~\ref{fig:design_arch_relayout}-c, elements from 8 heads are placed in one burst beat, so each head is transferred to a single chip. 
+For data onloading, the re-layout performs the reverse process.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

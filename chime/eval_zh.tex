@@ -1,0 +1,290 @@
+\input{tab-simulator_zh}
+\input{tab-models_zh}
+\input{tab-traces_zh}
+
+\section{评估}
+\label{sec:eval}
+
+\begin{figure*}[htb]
+  \setlength{\belowcaptionskip}{-5pt}
+  \begin{minipage}[t]{0.24\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-end-to-end-throughput1.eps}
+    \footnotesize
+    \textbf{(a) OpenR1。}
+  \end{minipage}
+  \begin{minipage}[t]{0.24\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-end-to-end-throughput3.eps}
+    \footnotesize
+    \textbf{(b) OpenThoughts。}
+  \end{minipage}
+  \begin{minipage}[t]{0.24\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-end-to-end-throughput2.eps}
+    \footnotesize
+    \textbf{(c) Dolphin。}
+  \end{minipage}
+  \begin{minipage}[t]{0.24\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-end-to-end-throughput-short.eps}
+    \footnotesize
+    \textbf{(d) Dolphin-short。}
+  \end{minipage}
+  \caption{\textbf{真实轨迹上的端到端推理吞吐量。}
+  \normalfont{\textit{仅 GPU 基线的吞吐量归一化为 1。对 OPT-66B 模型，有两条轨迹发生 GPU 显存不足（OOM），因此将 \sys 的吞吐量归一化为 1。在情形 (d) 中，请求长度缩短为原来的 $1/10$。}}}
+  \label{figs:eval-end-to-end-throughput}
+\end{figure*}
+
+\subsection{方法}
+\label{sec:eval-setup}
+\myparagraph{实验设置。}
+按照既有工作~\cite{cao2025moelightening,heo2024neupims,sheng2023flexgen}，我们的目标是在长上下文、解码占主导的场景中实现\emph{高推理吞吐量}。
+评估基于 DGX-A100~\cite{nv2023dgxa100}开展。
+GPU 侧集成 8 块 NVIDIA A100 GPU，每块配有 5 组总容量 80GB 的 HBM2e，FP16 总计算能力为 156 TFLOPs。
+各 GPU 通过 NVLink~\cite{wei2023nvlink}互连。
+CPU 侧有 16 个通道和总容量 2TB 的 2 个 DIMM，并配置本文提出的 PIM。
+我们开发了一个集成以下两部分的模拟器：
+(1) AttAcc~\cite{park2024attacc}，用于 GPU 的基于屋顶线模型的模拟；
+(2) \sys-PIM-sim，即基于修改版 DRAMSim3~\cite{li2020dramsim3}的 \sys-PIM 轨迹驱动模拟。
+我们加入 PIM 命令、相关时序约束和基于 FIFO 的调度方法，以进行周期级模拟。
+
+\myparagraph{基线系统。}
+我们将 \sys 与一个 GPU 基线和四个 AFD 基线系统进行比较：
+(1) \emph{仅 GPU}：完全在 GPU 上执行 LLM 推理；
+(2) \emph{GPU + HBM-PIM}：为所有现有 GPU HBM 配置 Bank 级 PU；
+(3) \emph{GPU + HBM-PIM-EXT}：配置额外的分离式 HBM-PIM；与“HBM-PIM”基线不同，“HBM-PIM-EXT”中的 HBM-PIM 不存储模型参数；
+(4) \emph{GPU + Rank 级 DIMM-PIM}（R-PIM）：为所有 DIMM 配置 Rank 级 PU；
+(5) \emph{GPU + CPU 卸载}：使用 CPU 作为加速器。
+对所有基线系统的模拟均统一假定在 Attention 计算期间最大化利用加速器侧带宽。
+表~\ref{tab:simulator} 列出硬件规格。
+GPU、CPU 和 DIMM（-PIM）配置遵循 DGX-A100 系统的配置。
+对于 HBM-PIM-EXT，考虑到 HBM2e 的价格是 DDR4 的 6$\times$ 以上~\cite{cost-ddr5-hbm,cost-ddr4,cost-ddr5}，我们配置 20 个 HBM-PIM 模块（320GB），使其容量约为 \sys 可用容量的 $1/6$。
+
+\myparagraph{LLM 模型。}
+我们使用模型规模各异的三个 LLM 评估 \sys：OPT-66B、QWEN-72B 和 GPT-175B，数据精度均为 FP16。
+综合考虑 GPU 内存容量与 GPU 间通信开销，我们采用表~\ref{tab:model} 所列的不同并行配置。
+
+\myparagraph{工作负载。}
+我们使用三个真实 LLM 推理数据集：OpenR1-Math-220K~\cite{open-r1}、OpenThoughts-114k-math~\cite{OpenThoughts-114k-math}和 Dolphin-r1~\cite{dophin}。
+这些数据集均用于评估长上下文 LLM 推理性能。
+轨迹细节见表~\ref{tab:traces}。
+此外，为评估短上下文场景，我们加入 Dolphin-short 轨迹，将 Dolphin-r1 中每个文本条目缩短至原长度的 $1/10$。
+
+\subsection{端到端性能}
+\label{sec:eval-end-to-end}
+我们使用不同基线，评估每个 LLM 模型与工作负载组合的端到端吞吐量。
+每次评估均从轨迹中随机选择并执行 1000 个请求。
+总体吞吐量通过输出 Token 总数除以总执行时间计算。
+
+\myparagraph{真实轨迹上的吞吐量。}
+\label{sec:eval-e2e-throughputs}
+图~\ref{figs:eval-end-to-end-throughput}-a、b、c 给出 \sys 相对五个基线的归一化吞吐量。
+结果表明，在不同设置下，\sys 的吞吐量均为所有系统中最高：相对 HBM-PIM 基线最高提升 5.15$\times$，相对 HBM-PIM-EXT 基线最高提升 3.45$\times$，相对仅 GPU 基线最高提升 3.94$\times$，相对 R-PIM 基线最高提升 7.21$\times$。
+这些改进源于以下原因。
+第一，相比基于 HBM 的基线，\sys 能够采用大得多的批大小。
+例如，对 GPT-175B 而言，\sys 使用 2TB 主机内存存储 KV cache；部署模型后，GPU 与 HBM-PIM 基线总共仅余约 310GB 内存，而在相同成本预算下，HBM-PIM-EXT 也只有 320GB 内存。
+第二，CPU 与 R-PIM 基线受带宽限制。
+例如，通过 Bank 级 PU，\sys 可提供约为 R-PIM 8$\times$ 的带宽。
+
+我们观察到，HBM-PIM 的子批次方法可通过增强并行性高效实现高吞吐量，展现出较大潜力；不过，我们的分析也揭示了它在使用 OPT-66B 处理 Dolphin 轨迹时的局限。
+将一个批次拆分为多个子批次会减小批大小，导致 GPU 严重利用不足，性能甚至低于传统仅 GPU 实现。
+相反，\sys 可受益于大得多的批大小，因此实现更高吞吐量。
+
+\begin{figure}[t]
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-breakdown-gpt175b.eps}
+    \footnotesize
+    \textbf{(a) GPT-175B。}
+  \end{minipage}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-breakdown-qwen72b.eps}
+    \footnotesize
+    \textbf{(b) QWEN-72B。}
+  \end{minipage}
+  \caption{\textbf{\sys 性能提升的分解。}
+  \textit{结果使用 OpenR1 轨迹评估。“C-N\%”表示 \sys 仅有 N\% 的内存容量可用。“BS”表示批大小，“Latency”表示每批次延迟。GPU 基线的结果归一化为 1。}}
+  \label{figs:eval-breakdown}
+\end{figure}
+
+\myparagraph{性能提升来源分解。}
+我们分析了相对 GPU 与 HBM-PIM 基线的性能提升来源。
+图~\ref{figs:eval-breakdown} 展示端到端评估得到的吞吐量、平均批大小（两个子批次之和）以及平均每批次延迟。
+相比 GPU 和 HBM-PIM，\sys 将批大小提高 6.6$\times$，而每批次延迟仅增加 $2.2\times$。
+这表明，\sys 的吞吐量提升主要源自批大小增大以及相应的 GPU 利用率提升。
+
+此外，图~\ref{figs:eval-breakdown} 展示了批大小增长影响吞吐量的趋势。
+我们手动限制 \sys 的可用内存容量并测量相应性能。
+随着可用内存从 10\% 逐步增加到 100\%，批大小线性增长。
+但由于每批次延迟也会增加，吞吐量的提升速率逐渐下降。
+这一观察与图~\ref{fig:intro-motiv} 的分析一致：增大批大小给吞吐量带来的边际收益会递减。
+
+\myparagraph{短上下文场景中的性能。}
+如图~\ref{figs:eval-end-to-end-throughput}-d 所示，在短上下文场景中，\sys 仍然通过实现更大的批大小，获得高于 GPU 与 HBM-PIM 基线的吞吐量。
+然而，相比图~\ref{figs:eval-end-to-end-throughput}-c，\sys 在各模型上的优势均有所减弱。
+原因在于，短上下文场景中增大批大小的边际收益递减。
+这一观察也与第~\ref{sec:motiv-discussion-scenarios} 节的分析一致。
+
+\begin{figure}[tb]
+  \setlength{\belowcaptionskip}{-5pt}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-scalability-175B-openr1.eps}
+    \footnotesize
+    \textbf{(a) GPT-175B。}
+  \end{minipage}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-scalability-GQA-openr1.eps}
+    \footnotesize
+    \textbf{(b) QWEN-72B。}
+  \end{minipage}
+  \caption{\textbf{可扩展性分析。}
+  \normalfont{\textit{结果使用 OpenR1 轨迹评估。基础内存配置的性能归一化为 1。}}}
+  \label{figs:eval-scalability-analysis}
+\end{figure}
+
+\myparagraph{可扩展性分析。}
+我们进一步使用不同 \sys-PIM 配置评估 \sys 性能，结果表明，性能可扩展性要求同时扩展内存容量和带宽。
+我们首先把“1 个秩组、512GB”设为基础内存配置。
+在此基础上，不同基线以不同方式扩展内存：
+“Bw-only”表示只通过增加秩组扩展内存带宽，而容量保持 512GB；“Cap-only”表示只把容量从 512GB 扩展至 4TB；“Bw-Cap”表示同时扩展带宽与容量。
+我们从轨迹中执行 1000 个请求并计算平均吞吐量。
+
+图~\ref{figs:eval-scalability-analysis} 展示 GPT-175B 与 QWEN-72B 在 OpenR1 轨迹上的结果。
+其他模型与轨迹的结果相似。
+结果表明，仅扩展带宽或容量均不能有效提高吞吐量。
+例如，在 GPT-175B 上单独将内存容量或带宽扩大 8$\times$ 时，吞吐量分别只增加 2.28$\times$ 和 1.01$\times$。
+相反，同时扩大带宽与容量时，吞吐量增加 8.23$\times$。
+这表明 \sys 能够有效利用容量和带宽两方面的可扩展性价值。
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{1pt}
+  \setlength{\belowcaptionskip}{-5pt}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-hardware-ablation-MHA.eps}
+    \footnotesize
+    \textbf{(a) MHA。}
+  \end{minipage}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-hardware-ablation-GQA.eps}
+    \footnotesize
+    \textbf{(b) GQA。}
+  \end{minipage}
+  \caption{\textbf{硬件消融研究。}\textit{\sys 朴素实现的延迟归一化为 1。}}
+  \label{figs:eval-hardware-ablation}
+\end{figure}
+
+\subsection{消融研究}
+\label{sec:eval-ablation}
+\myparagraph{\sys-PIM 的消融研究。}
+我们分析以下硬件优化：(1) 无气泡流水线（第~\ref{sec:design-dp-pipeline} 节）；(2) 混合粒度重布局（第~\ref{sec:design-dp-relayout} 节）。
+我们实现了一个基线 Bank 级 \sys-PIM，它将 Head 计算映射到多个芯片。
+按照既有工作~\cite{seo2025facil}，我们保守地把 CPU 侧重布局成本估算为：读取一种布局存储的数据并按另一种布局写回所需的内存访问时间。
+不同 Token 长度下的性能结果见图~\ref{figs:eval-hardware-ablation}。
+第一，无气泡流水线在 MHA 和 GQA 计算中分别将延迟降低约 27.9\% 和 74.4\%，这归功于重叠执行与特定 Head 映射方法。
+第二，硬件混合粒度重布局最高可将延迟降低 17\%。
+随着 Token 长度增加，收益占比下降，是因为 Attention 计算逐渐主导总体执行时间。
+不过，由于每一层、每次生成 Token 都会累积重布局开销，我们认为该优化仍有必要。
+采用全部硬件优化后，\syscolor 可实现 1.42--4.18$\times$ 的加速。
+此外，所有 Bank 级实现相对 Rank 级 DIMM-PIM（R-DP）均可实现超过 1.5$\times$ 的加速。
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{0.5pt}
+  \setlength{\belowcaptionskip}{-5pt}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-request-select-mha.eps}
+    \footnotesize
+    \textbf{(a) GPT-175B。}
+  \end{minipage}
+  \begin{minipage}[t]{0.49\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-request-select-gqa.eps}
+    \footnotesize
+    \textbf{(b) QWEN-72B。}
+  \end{minipage}
+  \caption{\textbf{\sys-sys 提高资源效率。}
+  \textit{“1$\times$ Cap”表示根据表~\ref{tab:model} 得到的基础内存容量（GPT-175B 为 2TB，QWEN-72B 为 1TB）。结果使用 OpenR1 轨迹评估。}}
+  \label{figs:eval-scheduler}
+\end{figure}
+
+\myparagraph{调度器消融研究。}
+我们评估 \sys 调度器如何有效提高资源利用率。
+图~\ref{figs:eval-scheduler} 的左、右纵轴分别展示不同调度方法的平均吞吐量和 Token 间隔时间（TBT）。
+基线表示优先填满 \sys-PIM 容量的调度策略，\sys 则表示对齐预测调度。
+结果表明，\sys 调度器可以在不牺牲吞吐量的情况下，将延迟最高降低 70.93\%，说明它能够消除 GPU 侧的空闲气泡。
+通过使包含预填充请求的批次对齐并改善负载均衡，\sys 甚至能够略微提高吞吐量。
+此外，对 MHA 模型而言，如果增加 \sys-PIM 容量，基线会选择更大的批大小并导致 TBT 升高，却不能提高吞吐量（因为 Attention 成为瓶颈）；而 \sys 可以避免产生气泡，阻止 TBT 增长。
+\sys 在 MHA 模型上的表现更好；原因在于，对 GQA 模型而言，要让 Attention 成为瓶颈，需要选择占用更大内存容量的请求，甚至可能根本无法达到 Attention 瓶颈。
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{1pt}
+  \setlength{\belowcaptionskip}{-5pt}
+  \centering
+  \begin{minipage}[t]{0.68\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-pcie-latency-percentage.eps}
+    \footnotesize
+    \textbf{(a) PCIe 开销。}
+  \end{minipage}
+  \begin{minipage}[t]{0.30\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs-eval/eval-energy-full-trace.eps}
+    \footnotesize
+    \textbf{(b) 能耗。}
+  \end{minipage}
+  \caption{\textbf{PCIe 开销与能耗。}
+  \textit{(a) 中的“P”和“D”表示一个批次内预填充与解码请求的批大小和 Token 长度；(b) 中“GPU”的能耗归一化为 1。}}
+  \label{figs:eval-pcie-energy}
+\end{figure}
+
+\myparagraph{PCIe 开销分析。}
+我们评估采用与不采用秩组粒度通信--计算重叠时，跨设备 PCIe 通信如何降低吞吐量。
+如图~\ref{figs:eval-pcie-energy} 所示，在不同批次配置下，采用该优化可将开销最高降低 75.08\%。
+这表明，DGX-A100 的 4 个秩组能够以秩组为粒度独立通信和计算，从而隐藏大部分 PCIe 开销。
+
+\subsection{成本分析}
+\myparagraph{能耗。}
+我们评估了 \sys、GPU 和 HBM-PIM 的能耗。
+GPU 侧能耗采用 AttAcc 模拟器中的评估方法。
+对 PIM 侧能耗，第一步使用功耗参数（如 VDD、IDD）与时序参数（如 tRAS、tRP），计算 ACT、RD、WR 等操作的能耗~\cite{micronddr4power1,micronddr4power2}。
+第二步按照既有缩放方法~\cite{mike2017fgdram,park2021trim,park2024attacc}，计算 DRAM 芯片（或 DRAM Die）内部读写（如 MAC、加载共享缓冲区）的能耗。
+第三步从 CACTI-IO~\cite{Jouppi2012cactiio}获得芯片 I/O 能耗。
+我们提供三个基线：GPU、HBM-PIM，以及不采用子批次调度的 HBM-PIM。
+
+图~\ref{figs:eval-pcie-energy}-b 详细展示 GPT-175B 在 OpenR1 轨迹上的能耗分解，其中 FC 与 Attention 计算占据主导。
+第一，\sys 将总能耗降低约 40\%，主要原因是在 GPU 上用更大的批大小执行 FC，减少了加载权重的次数。
+第二，采用子批次调度的 HBM-PIM 会消耗更多能量，因为它把批大小减半。
+第三，在 Attention 计算中，\sys-PIM 的多芯片分布式计算能耗与 GPU 相当，但高于 HBM-PIM。
+
+\myparagraph{硬件开销。}
+我们评估 Bank PU 的面积开销；它们集成在 DRAM 芯片中，会直接影响内存容量。
+假设命令解码和数据路径复用现有 DRAM 逻辑，我们使用 TSMC 28nm 工艺综合该设计。
+单个 Bank PU 和共享缓冲区分别占用 0.0032$\,mm^2$ 和 0.051$\,mm^2$。
+考虑到逻辑工艺与 DRAM 工艺的密度差异，我们估计在 1z-nm DRAM 节点上实现时，综合面积约会翻倍。
+虽然高效支持 GQA 要求按比例扩展 Bank PU，但基于两个原因，我们认为该开销完全可以接受。
+第一，DIMM 的巨大容量能够有效摊薄面积成本。
+此外，新兴 3D 集成技术可以进一步缓解甚至消除这种 Die 面积代价。
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{2pt}
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+  \begin{minipage}[t]{\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/pipeline-timeline.pdf}
+    \footnotesize
+  \end{minipage}
+  \caption{\textbf{单个 LLM 层中 CHIME 流水线的解码执行时间线。}
+  \textit{该批次使用 GPT-175B 与 OpenR1 轨迹执行。}}
+  \label{fig:eval-pipeline-timeline}
+\end{figure}
+
+\myparagraph{时间线分解分析。}
+如图~\ref{fig:eval-pipeline-timeline} 所示，我们从端到端评估的实际执行中提取一个具有代表性的批次作为示例，并进行详细的时间线分解分析。
+我们观察到，采用本文设计后，GPU 与 PIM 两侧的计算能够以较少气泡有效组成流水线。

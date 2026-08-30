@@ -1,0 +1,64 @@
+\section{引言}
+\label{sec:intro}
+
+\emph{“无论其他养分多么充足，植物的生长都受供应量最少的养分所限制。”}
+\begin{flushright}
+  ---\emph{利比希定律}~\cite{liebigslaw}，Justus von Liebig（1803--1873）。
+\end{flushright}
+
+在长程推理、复杂代码生成等应用的推动下，大语言模型（LLM）处理和生成更长序列的需求正在快速增长~\cite{deepseekai2025deepseekr1,plaat2024reasoning,huang2023reasoning,zhou2024survey,zhong2024evaluation,grattafiori2024llama3}。
+在这些长上下文场景中，解码过程会成为显著的性能瓶颈。
+此外，日益增长的 KV cache 对推理系统的内存容量与带宽提出了越来越高的要求。
+
+为应对这一内存挑战，Attention--FC 分离（AFD）已成为一种有前景的方案~\cite{step3blog,step3system,heo2024neupims,park2024attacc,he2025papi,jiang2024neo,zhu2025megascaleinfer}。
+AFD 系统对 LLM 推理工作负载进行划分：将内存密集的 Attention 操作与 KV cache 卸载至内存资源丰富的专用设备（下文称为\textit{“加速器”}），而计算密集的全连接（FC）操作仍在 GPU 或 NPU 上执行。
+例如，利用基于 HBM 的存内计算（HBM-PIM），可以通过显著提高带宽来大幅降低 Attention 延迟~\cite{heo2024neupims,park2024attacc,he2025papi}。
+总体而言，AFD 系统展现出提高吞吐量的潜力。
+
+然而，AFD 架构的这一潜力并不总能直接兑现。
+我们的研究揭示了一个关键但反直觉的现象：\textbf{单纯增强加速器并不总能保证系统性能更好。}
+在使用 OpenR1~\cite{open-r1} 的 GPT-175B 评估中，我们发现，即使为 DGX-A100 的 HBM 配置 PIM，并将带宽从 1$\times$ 提升至 16$\times$，吞吐量提升仍不足 1\%。
+现有性能模型无法解释这一令人困惑的结果；例如，经典屋顶线模型~\cite{roofline}孤立地分析设备，无法捕捉 AFD 系统中分离组件之间的复杂相互作用。
+
+为解决这一问题，我们设计了\textbf{分离式屋顶线模型（DRM）}（第~\ref{s:demys} 节），这是首个用于分析 AFD 系统在不同场景下性能的一般模型。
+DRM 整体刻画加速器和 GPU 的性能，并特别对二者的相互依赖关系建模。
+借助 DRM，我们得到一条指导 AFD 系统设计的原则：系统吞吐量受最稀缺资源限制，而这一资源可能是加速器的内存带宽，也可能是其内存容量。
+关键在于，改善任何非瓶颈资源都只会带来递减、甚至可以忽略的收益。
+这解释了上一段中的现象，也促使我们设计一种能在容量、带宽和可扩展性之间实现更均衡权衡的新型加速器。
+
+本文表明，将 PIM 集成到 \textit{DIMM} 中，即在主机内存模块内配置 Bank 级处理单元，是实现这种平衡的一类新型加速器。
+因此，我们提出采用 \textit{DIMM-PIM} 的 AFD 系统。
+与以往 HBM/GDDR-PIM 方案~\cite{heo2024neupims,park2024attacc,he2025papi,gu2025cent}相比，采用 DIMM-PIM 的 AFD 系统具有三个关键优势。
+第一，它在提供远高于标准主机内存带宽的同时，直接缓解 HBM-PIM 的容量瓶颈，从而提高总体吞吐量。
+第二，它继承标准 DIMM 接口优良的可扩展性和可配置性，能够适应多样化的内存需求并具有面向未来的能力。
+第三，如第~\ref{sec:motiv-dimm-pim-proposal} 节所分析，它具有更高的经济效率：成本可能低于 HBM/GDDR-PIM，内存浪费也更少。
+
+然而，在 AFD 系统中有效利用 DIMM-PIM 并非易事。
+朴素地集成 DIMM-PIM 会在 PIM 硬件内部和整个推理系统中引入额外同步开销，包括传输、布局与进度同步，并可能严重阻塞推理。
+具体而言：
+
+第一，与以往 HBM-PIM/GDDR-PIM 架构~\cite{he2025papi,heo2024neupims,park2024attacc,gu2025cent}相比，DIMM-PIM 架构包含\textit{多个分布式协作 DRAM 芯片}，从而加剧两类同步开销：
+(1) \textit{数据同步：}Attention 计算分布在多个 DRAM 芯片上，需要通过跨芯片传输来同步数据，例如为 ``softmax'' 累加各芯片的部分输出。
+(2) \textit{布局同步：}基于 DIMM 的数据存储布局可能与 PIM 计算所需布局不一致；例如，单个元素可能条带化分布在多个芯片上，而 PIM 计算要求每个元素完整驻留于单个芯片。
+因此，在执行 Attention 之前必须对齐布局。
+这些开销会在 PIM 执行中造成大量停顿，使 DIMM-PIM 无法达到其理论性能。
+
+第二，在 GPU 与 DIMM-PIM 之间分离推理过程还会引入两类同步开销：
+(1) \textit{数据同步：}PIM 需要从 GPU 获取 Q、K、V 张量，并将 Attention 输出返回 GPU。
+这些经由 PCIe 的传输会阻塞 PIM 执行。
+(2) \textit{进度同步：}当 PIM 和 GPU 上的并行操作完成时间不平衡时，较早完成的设备必须等待，从而产生空闲“气泡”。
+可并行任务的执行延迟还会发生变化，使工作负载对齐更加困难，进一步加剧这一问题。
+
+为应对上述挑战，我们提出 \sys，这是首个将新型 DIMM-PIM 设计作为加速器的 AFD 系统，可从硬件内部一直到整个系统降低同步开销。
+首先，我们设计用于高效 Attention 计算的 DIMM-PIM 硬件 \sys-PIM（第~\ref{sec:design-dp} 节）。
+它分别通过两项关键技术消除数据同步和布局同步开销：\emph{无气泡流水线}与\emph{混合粒度重布局}。
+具体而言，该流水线把数据传输与 Bank PU 的并发执行重叠起来以隐藏传输开销，并在定量分析的基础上采用特定 Head 映射，进一步实现无气泡执行。
+混合粒度重布局分别在元素级（粗粒度）和比特级（细粒度）执行数据布局变换，以最低延迟解决布局不匹配问题。
+
+其次，我们设计集成 DIMM-PIM 的推理系统 \sys-sys（第~\ref{sec:design-sys} 节），分别通过\emph{秩组粒度通信--计算重叠}和\emph{对齐预测调度}降低数据同步与进度同步开销。
+秩组粒度通信--计算重叠利用能够独立通信与计算的最细粒度，即\emph{秩组（rankset）}；一个秩组由每个通道中的一个 Rank 组成。
+该设计使不同秩组能够并行通信和计算，以支持异步数据传输，从而用计算有效隐藏 GPU 与 \sys-PIM 之间的通信开销。
+对齐预测调度能够对两个设备上的操作性能建模，并据此选择请求组成子批次，使这些子批次在两个设备上的预测延迟对齐。
+这样可以以最少的空闲气泡最大化两个设备上的并行执行。
+
+在三个 LLM 模型与三个真实轨迹~\cite{open-r1,dophin,OpenThoughts-114k-math,bai2024longbench}上的综合评估表明，\sys 通过显著增大批大小，相比最先进的 HBM-PIM 方案~\cite{heo2024neupims,park2024attacc}可实现最高 5.15$\times$ 的加速。

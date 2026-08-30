@@ -1,0 +1,450 @@
+\begin{figure}[t]
+   \setlength{\abovecaptionskip}{1pt}
+   \setlength{\belowcaptionskip}{-10pt}
+  \centering
+   \begin{minipage}[t]{\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-LLM-inference.pdf}
+    \footnotesize
+    \end{minipage}
+    \caption{\textbf{LLM inference process.} %
+    }
+
+ \label{fig:motiv-LLM-inference}
+\end{figure}
+
+\section{The Rise of AF-Disaggregated Systems}
+
+
+
+
+
+
+\subsection{LLM Inference Process}
+Fig.~\ref{fig:motiv-LLM-inference} illustrates the LLM inference process~\cite{anil2023palm2,devlin2019bert,grattafiori2024llama3,kalyan2023survey}, which includes two stages, i.e., prefilling and decoding. 
+The LLM model constitutes a sequence of layers, 
+each comprising two major kinds of operations: 
+(1) attention operations~\cite{vaswani2017attention} and
+(2) fully-connected (FC) operations, which encompass QKV Gen, projection, Feed-forward Network, etc. 
+MHA and GQA are leading attention operators, with MHA computing each head independently and GQA grouping query heads for parallel processing.
+The computations of attention consist of independent heads,
+each following score ($Q \times K_t$), softmax, and context computations ($S \times V$).
+
+
+
+
+\subsection{Attention-FC Disaggregated Inference System}
+\label{sec:attn-fc-disaggregation}
+Attention and FC operations typically have different characteristics. 
+Specifically, benefiting from batching~\cite{amey2024sarathi,yu2022orca,kwon2023pagedattention}, FC operations are compute-intensive and demand compute resources for acceleration.
+On the contrary, decoding attention is typically bandwidth-intensive~\cite{park2024attacc} and does not benefit from batching, since the KV cache is distinct and specific for each request. 
+The latency of attention is primarily determined by memory bandwidth for loading the KV cache.
+Considering the different characteristics of the two operations, 
+some current works, i.e., Attention-FC disaggregated inference systems (``AFD systems'' in short), disaggregate the attention and FC operations on different hardware platforms.
+Specifically, they batch FC operations on the compute-rich GPU/NPU, while offloading the KV cache and the decoding attention to a platform (called \textit{accelerators}) better suited for its memory-intensive nature. 
+
+
+To improve the overall utilization, 
+current AFD systems typically apply \emph{sub-batch scheduling}~\cite{heo2024neupims,jiang2024neo,zhu2025megascaleinfer}, 
+making two (or even more) interleaved sub-batches to run in parallel across the two devices, as shown in Fig.~\ref{fig:intro-motiv}-a.
+During inference,
+the execution of an individual batch cannot be parallelized on two devices, e.g., GPU has to wait for the completion of attention before starting FC.
+Sub-batch scheduling enables attention and FC of different batches to run concurrently on the two devices, which could improve the throughput and resource utilization of AFD systems.
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{1pt}
+  \setlength{\belowcaptionskip}{-10pt}
+ \centering
+  \begin{minipage}[t]{\linewidth}
+   \centering
+   \includegraphics[width=\textwidth]{figs/DRM-analysis.pdf}
+   \footnotesize
+   \end{minipage}
+   \caption{\textbf{\sys's Disaggregated Roofline Model and case studies.} 
+        \textit{``DIMM-PIM'' denotes \sys's proposal, leveraging DIMM-based host memory with bank-level PUs as the accelerator. ``Throughput'' denotes tokens per second.}
+   }
+ \label{fig:intro-motiv}
+\end{figure}
+
+
+
+\subsection{Processing-In-Memory (PIM)}
+PIM is a promising solution to offer high aggregated bandwidth by integrating processing units (PUs) in memory devices, such as HBM~\cite{lee2021hbmpim,he2020newton,kim2021aquabolt,kim2021aquabolthcs,lee2025paise}, 
+GDDR~\cite{lee2022gddr6,kwon2022system,kim2024skhynix,kwon2023memorycentric,lee2024cost}, 
+and DIMM~\cite{lee2022axdimm,devaux2019true,ke2020recnmp,ke2021near}.
+For example, with two DIMMs (e.g., two ranks of 16 banks per DIMM) in one channel, 
+placing PUs near ranks (\textbf{rank PU}) can achieve about 4$\times$ the bandwidth of host CPU, while integrating PUs near banks (\textbf{bank PU}) can improve bandwidth by more than 30$\times$. 
+In this case, some state-of-the-art AFD systems are built upon PIM devices, such as  HBM-PIM~\cite{heo2024neupims,park2024attacc,he2025papi} or GDDR-PIM~\cite{gu2025cent}, delivering substantial performance gains over GPUs.
+
+
+
+\section{Characterizing AFD Systems with DRM}
+\label{s:demys}
+In this section, we first introduce \textbf{Disaggregated Roofline Model (DRM)}, a unique analytical model specifically designed for AFD systems, characterizing the performance across diverse scenarios.
+Based on the model, we analyze the memory bottlenecks for current AFD systems whose attention is offloaded to various memory-enhanced devices, 
+including HBM-PIM, which boosts bandwidth, and CPUs (with host memory), which expand capacity.
+According to the analysis, we conclude how the ``Liebig's Law'' manifests for AFD systems, 
+which informs the design of accelerators with effective memory enhancement to achieve high throughput.
+
+
+
+
+
+
+
+
+
+
+
+
+
+\subsection{DRM Modeling and Bottleneck Analysis}
+\label{s:motiv-analytic-model}
+Characterizing the throughput of AFD systems requires comprehensively considering two factors: 
+the throughput on the GPU side for executing FC operations, 
+and the throughput on the accelerator side for executing attention operations.
+We first identify that when the throughputs on the two devices are not equal, the throughput of the inference system is only affected by the device that becomes the bottleneck.
+For example in the right of Fig.~\ref{fig:intro-motiv}-a, the bottleneck is the GPU, and the accelerator suffers idle bubbles consequently.
+In this case, increasing the throughput on the accelerator side will only result in more idle bubbles, having no effect on improving the overall throughput.
+The left of Fig.~\ref{fig:intro-motiv}-a shows an opposite example.
+In conclusion:
+
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{Implication~\uppercase\expandafter{\romannumeral1}} 
+\textit{The overall inference throughput of AFD systems is determined by the lower throughputs of the two devices that separately execute the FC and attention.
+}
+\end{mdframed}
+
+
+\myparagraph{Construction of DRM.}
+\REVISE{
+Fig.~\ref{fig:intro-motiv}-b presents a conceptual illustration of the DRM,
+which uniformly characterizes the performance of two disaggregated devices by modeling the relationship between batch size and token throughput (tokens per second).
+Token throughput is derived from two key metrics:
+(1) floating point operations per second, which is dictated by the batch-size-dependent arithmetic intensity based on traditional roofline model.
+(2) floating point operations, which scales with the batch size.
+Line-FC shows the GPU token throughput for executing the FC, 
+which increases with the growth of batch size until the GPU is fully utilized, i.e., when the batch size reaches $B_{\rm target}$, the GPU achieves peak throughput $T_{\rm max\_gpu}$.
+Line-ATTN-1, 2, 3 show the token throughputs of different accelerators for executing the attention respectively.
+Since the arithmetic intensity of attention remains constant and low, 
+these throughputs are typically positively correlated with accelerator memory bandwidth, regardless of batch size.
+Moreover, The performance curves in Fig.~\ref{fig:intro-motiv}-b can be not only theoretical, but also profiled.
+}
+  
+
+
+
+
+
+
+
+
+\myparagraph{Bandwidth constraints.}
+According to Implication~\uppercase\expandafter{\romannumeral1}, the throughput of an AFD system is determined by the lower value between the throughput curves of the GPU and the accelerator.
+There can be two types of situations:
+First, the throughput curves of the GPU and the accelerator intersect, e.g., when the accelerator is the CPU. %
+The GPU throughput may initially be lower than that of the CPU when the batch size is very low, and the throughput of the AFD system is determined by Line-FC.
+As the batch size increases, the GPU throughput quickly rises to $T_{\rm bw\_cpu}$, after which the throughput of the AFD system is determined by Line-ATTN-3, which is constrained by the CPU memory bandwidth.
+Second, if the throughput curves of the GPU and the accelerator do not intersect, the throughput of the AFD system is always determined by the lower curve. 
+E.g., if the accelerator is HBM-PIM in Fig.~\ref{fig:intro-motiv}-b, the throughput is always limited by the GPU side (Line-FC). 
+
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{Implication~\uppercase\expandafter{\romannumeral2}} 
+\textit{The bandwidth of the accelerator limits the throughput of AFD systems when the attention becomes the bottleneck.
+}
+\end{mdframed}
+
+
+
+
+
+\myparagraph{Capacity constraint.}
+Another factor is the memory capacity on the accelerator side to store the KV cache. 
+Insufficient memory capacity restricts the maximum number of requests that can be accommodated, preventing the GPU side from fully utilizing GPU resources. 
+In Fig.~\ref{fig:intro-motiv}-b, Line-Cap-1, 2, 3 show the maximum batch sizes that can be accommodated by various accelerators, i.e., $B_{\rm hp}$, $B_{\rm dp}$, $B_{\rm cpu}$ for HBM-PIM, DIMM-PIM and CPU respectively.
+The GPU throughput for executing the FC is thus limited by these maximum batch sizes.
+For example, when the accelerator is the HBM-PIM, the maximum GPU throughput on Line-FC is limited below $T_{\rm cap\_hp}$, since the batch size of this AFD system is at most $B_{\rm hp}$.
+When the bottleneck is on the GPU side, e.g., HBM-PIM as the accelerator, the AFD system's throughput is constrained by the limited batch size.
+
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{Implication~\uppercase\expandafter{\romannumeral3}} 
+\textit{The capacity that stores the KV cache limits the overall throughput of AFD systems when the FC becomes the bottleneck.
+}
+\end{mdframed}
+
+
+
+
+\myparagraph{Dynamic workloads and shifting rooflines.}
+As DRM is an analytical model for design-time architectural analysis, 
+its purpose is not to predict the precise latency of a given request~\cite{stojkovic2025dynamoLLM,kakolyris2025throttllem}. 
+Nevertheless, DRM could also illustrate how the performance rooflines shift in response to varying runtime workload characteristics.
+For example, with longer context, the maximum batch size that can be accommodated within the same capacity and the throughput of processing a larger KV cache with the same bandwidth decreases, 
+so it causes the capacity lines (Line-Cap-1, 2, 3 in Fig.~\ref{fig:intro-motiv}-b) to shift leftward and the Line-ATTN-1, 2, 3 to shift downward, 
+while for the GPU, Line-FC remains almost unchanged. 
+Consequently, it illustrates how longer contexts exacerbate memory bottlenecks along both the bandwidth and capacity.
+
+
+\myparagraph{\REVISE{Characterizing communication overhead.}}
+\REVISE{
+The methodology of DRM is also capable of characterizing the communication overhead between GPUs and attention accelerators,
+considering it as a part of attention overhead.
+Within the DRM, the decrease of communication bandwidth (e.g., utilizing PCIe 3.0 instead of PCIe 4.0)
+results in a downward shift of the attention performance curve.
+According to our detailed analysis in \textsection\ref{sec:design-sys-comm}, the communication overhead in AFD systems is constant, and is optimized by our design.
+}
+
+
+\myparagraph{The ``Liebig's Law'' for AFD systems.}
+Considering Implication~\uppercase\expandafter{\romannumeral2} and~\uppercase\expandafter{\romannumeral3}, 
+for a given GPU configuration that executes FC, 
+the accelerator's memory bandwidth and capacity respectively limit the throughput when the attention or FC becomes the bottleneck. 
+Further, according to Implication~\uppercase\expandafter{\romannumeral1}, this indicates that the overall throughput is determined by the memory capacity or bandwidth whose throughput limit is lower,
+which we refer to as the weaker point of memory.
+We conclude that the accelerator's memory impact on overall throughput follows Liebig's Law, that is:
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{Liebig's Law:}
+\textit{The throughput of an AFD system is constrained by the weaker point in terms of either memory capacity or bandwidth.
+}
+\end{mdframed}
+Although Liebig's Law is a general principle applicable to any system, the analysis methodology with DRM first reveals how the Law manifests for AFD systems.
+
+
+
+
+
+
+
+\myparagraph{Case study.} 
+Fig.~\ref{fig:intro-motiv}-c extracts concrete examples from Fig.~\ref{fig:intro-motiv}-b as case studies. 
+The weaker point of the ``CPU'' is the limited bandwidth of the host memory, 
+so the throughput of the CPU AFD system is constrained by $T_{\rm \text{bw\_cpu}}$ even if it has sufficient memory capacity to accommodate larger batch sizes. 
+The weaker point of the ``HBM-PIM'' is the limited HBM capacity, so the throughput is constrained by $T_{\rm \text{cap\_hp}}$ even if it can execute attention extremely quickly.
+
+
+
+
+
+
+\myparagraph{\REVISE{Quantitative analysis on Liebig's Law.}}
+\REVISE{
+To illustrate Liebig's Law quantitatively, we extend the illustrative figure of Fig.~\ref{fig:intro-motiv} to Fig.~\ref{fig:motiv-memory-bottleneck}.
+Fig.~\ref{fig:motiv-memory-bottleneck} quantifies the throughput limitation assuming 8$\times$A100 of DGX-A100 are used for computing FC, 
+while using accelerators for attention with various memory configurations.
+It clearly demonstrates Liebig's Law, i.e., better throughput can only be achieved when both capacity and bandwidth are scaled simultaneously. 
+If only one of them is scaled, for example, fixing the capacity and scaling the bandwidth, 
+the throughput will only improve with increasing bandwidth until the bandwidth reaches a certain point. 
+Beyond that point, higher bandwidth yields no further improvement, as capacity becomes the bottleneck.
+}
+
+
+\begin{figure}[t]
+  \setlength{\belowcaptionskip}{-10pt}
+ \centering
+ \begin{minipage}[t]{0.96\linewidth}
+  \centering
+  \includegraphics[width=\textwidth]{figs/motiv-contour-A100-2048.pdf}
+  \footnotesize
+  \end{minipage}
+  
+  \caption{\REVISE{\textbf{Contour plot of the throughput with memory bottlenecks.}} 
+\textit{
+\REVISE{
+``$L_{t}$=2048'' above denotes that each request has a context length of 2048 tokens.
+Memory configurations of ``PAPI'', ``NeuPIMs'', ``AttAcc'' and ``CENT'' are derived from the papers~\cite{he2025papi,heo2024neupims,park2024attacc,gu2025cent}.
+``DGX-A100'', ``DGX-H100'' and ``HGX-B200''~\cite{nv2023dgxa100,hgxb200,h20} represents using GPUs for attention.
+DIMM-S, DIMM-L denote two different types of DDR4 memory.
+Every point represents the total memory capacity and bandwidth under the corresponding number of memory chips, 
+for example, 
+the point ``64$\times$'' on the ``DIMM-L'' line (green line) represents the memory capacity and bandwidth corresponding to 64$\times$ DIMM-L memory chips.
+We assume that the PIM performance of each memory device can reach the ideal case, i.e., the equivalent memory bandwidth is scaled by 16$\times$.
+The performance is simulated with AttAcc~\cite{park2024attacc} simulator with GPT-175B model.
+}}
+   }
+\label{fig:motiv-memory-bottleneck}
+\end{figure}
+
+
+
+
+
+\subsection{Limitations on Prior Works}
+Existing works have made considerable efforts to enhance memory for improving inference throughput.
+However, they mainly focus on addressing one dimension of the memory bottleneck, either capacity or bandwidth.
+Their neglect of Liebig's Law renders the resulting performance gains potentially inefficient or insufficient. 
+\REVISE{
+To illustrate, we plot the hardware configurations of various hardware types under scaling scenarios in Fig.~\ref{fig:motiv-memory-bottleneck}:
+including HBM2e, GDDR, two types of DDR4 memory and their PIM variants.
+Some listed systems~\cite{gu2025cent} in Fig.~\ref{fig:motiv-memory-bottleneck} are not specifically designed for AFD, and we mainly consider their hardware for executing attention.
+We can conclude that prior works suffer from the ``Liebig's Law'' in the following aspects:
+}
+
+\myparagraph{Insufficient memory enhancement.}
+\REVISE{
+First, without adequate scaling, 
+these memory enhancement techniques could be insufficient to prevent memory from becoming a throughput bottleneck. 
+This can be illustrated by examining the hardware parameters claimed in their respective papers in conjunction with Fig.~\ref{fig:motiv-memory-bottleneck}. 
+Specifically, works based on HBM-PIM could suffer from insufficient memory capacity~\cite{he2025papi,heo2024neupims,park2024attacc}, 
+while others suffer from insufficient memory bandwidth of DIMMs~\cite{liu2025hermes,jiang2024neo}.
+}
+
+\myparagraph{Inefficient memory enhancement.}
+\REVISE{
+Further, current works suffer from excessive memory resources. 
+For example, although current GDDR/HBM-PIM based methods~\cite{he2025papi,heo2024neupims,park2024attacc,gu2025cent} are limited by capacity, 
+their bandwidth could be orders of magnitude larger than the requirement, which provides almost no benefit to throughput. 
+Moreover, even if scaling them could potentially achieve high throughput, 
+such scaling could simultaneously lead to substantial bandwidth waste, 
+as illustrated in Fig.~\ref{fig:motiv-memory-bottleneck}.
+}
+
+
+
+
+\subsection{Proposal of Choosing DIMM for PIM Intergration}
+\label{sec:motiv-dimm-pim-proposal}
+Based on our analysis, we find that integrating PIM with \textit{DIMM}s (i.e., \textit{DIMM-PIM}) is a promising accelerator for attention. 
+Specifically, \textit{DIMM-PIM} augments DIMM-based host memory with bank-level PIM units, combining the strengths of PIM and \textit{DIMM}s. 
+Therefore, we propose AFD systems that integrate \textit{DIMM-PIM}, which offer the following benefits:
+
+
+\myparagraph{Better performance with more balanced memory configuration.}
+\REVISE{
+Typically, DIMM-PIM can alleviate the capacity bottleneck of HBM-PIM and the bandwidth bottleneck of CPU offloading.
+As illustrated in Fig.~\ref{fig:intro-motiv}-b, c, this means that DIMM-PIM potentially improves the overall throughput with a more balanced memory configuration.
+As shown in Fig.~\ref{fig:motiv-memory-bottleneck}, since the DGX-A100 is equipped with 2TB of DIMM memory (DDR4) and 640GB of HBM memory, 
+equipping the DIMMs with PIMs already significantly outperforms equipping the HBMs with PIMs.
+}
+
+
+\myparagraph{Scalable and configurable.}
+DIMM-PIM offers scalability via the standard DIMM form factor, 
+enabling plug-and-play capacity/bandwidth scaling on compatible platforms, 
+and can be further scaled using interconnects such as CXL.
+This allows DIMM-PIM to not only achieve better performance but also potentially adapt to a broader range of scenarios.
+
+\myparagraph{Economic efficiency.}
+\REVISE{
+Beyond performance considerations, DIMM-PIM also offers a significant cost advantage 
+over GDDR- and HBM-based alternatives.
+First, the per-GB cost of HBM2e can be over $6\times$ higher than DDR4~\cite{cost-ddr4,cost-ddr5,cost-ddr5-hbm}, which represents a substantial difference, regardless of whether PIM is integrated. 
+Second, Fig.~\ref{fig:motiv-memory-bottleneck} shows that, 
+the more balanced performance of DIMM-PIM avoids the significant resource over-provisioning inherent in HBM/GDDR-PIM solutions,
+enabling more cost-effective performance scaling.
+}
+
+
+\begin{figure}[t]
+  \setlength{\belowcaptionskip}{-10pt}
+ \centering
+ \begin{minipage}[t]{0.48\linewidth}
+  \centering
+  \includegraphics[width=\textwidth]{figs/motiv-contour-A100-256.pdf}
+  \footnotesize
+   \textbf{\REVISE{(a) $L_{t}$=256.}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-A100-8192.pdf}
+    \footnotesize
+     \textbf{\REVISE{(b) $L_{t}$=8192.}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-H20-2048.pdf}
+    \footnotesize
+      \textbf{\REVISE{(c) 8$\times$H20 for FC.}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-B200-2048.pdf}
+    \footnotesize
+      \textbf{\REVISE{(d) HGX-B200 for FC.}}
+  \end{minipage}
+  
+  \caption{\textbf{\REVISE{Contour plot of the throughput for four scenarios.}}
+        \textit{\REVISE{This figure shares the legend with Fig.~\ref{fig:motiv-memory-bottleneck}. 
+        Compared to the scenario in Fig.~\ref{fig:motiv-memory-bottleneck}, 
+        (a) and (b) vary the context lengths, 
+        while (c) and (d) adjust the number of GPUs used for FC computation.}  }
+   }
+\label{fig:motiv-scenario-shifting}
+\end{figure}
+
+
+\begin{figure}[t]
+  \setlength{\belowcaptionskip}{-10pt}
+ \centering
+ \begin{minipage}[t]{0.96\linewidth}
+  \centering
+  \includegraphics[width=\textwidth]{figs/motiv-scenarios-shift.pdf}
+  \footnotesize
+  \end{minipage}
+  \caption{\REVISE{\textbf{DRM with GPU upgrade.} 
+  \textit{$T_{DP}$ and $T_{HP}$ denote the throughput of DIMM-PIM under its memory bandwidth constraint, and the throughput of HBM-PIM under its memory capacity constraint, respectively.}}}
+\label{fig:motiv-gpu-upgrade}
+\end{figure}
+
+\subsection{Discussion: Bottleneck Shifting across Various Scenarios.}
+\label{sec:motiv-discussion-scenarios}
+\REVISE{
+In practice, AFD systems may adopt various deployment configurations, which could shift the memory bottleneck.
+The deployment configurations include GPU model and quantity, context length, LLM parameter size and architecture, etc. 
+An important contribution of our DRM-based methodology is its ability to analyze, for a given deployment configuration, how the memory configuration of each accelerator affects overall throughput.
+In this section, we further discuss how different deployment configurations could affect the memory bottleneck.
+}
+
+\myparagraph{Different context lengths.}
+\REVISE{
+Fig.~\ref{fig:motiv-memory-bottleneck} and Fig.~\ref{fig:motiv-scenario-shifting}-a, b show how different context lengths affect the performance.
+First, we observe that across various context lengths, 
+the more balanced configuration of DIMM-PIM consistently holds a performance and efficiency advantage, 
+effectively improving throughput while reducing resource over-provisioning. 
+It is because longer contexts exacerbate memory capacity and bandwidth bottlenecks simultaneously. 
+}
+
+\REVISE{
+Second, we observe that with shorter contexts, 
+the performances of various baselines become more comparable, 
+because the marginal benefit of adding resources diminishes when the memory bottleneck is alleviated. 
+We validate this analysis in \textsection\ref{sec:eval-e2e-throughputs}. 
+The impact of context length can also be analyzed in conjunction with Fig.~\ref{fig:intro-motiv}-b.
+}
+
+\myparagraph{Influence of other configurations.}
+\REVISE{
+Our DRM method can also analyze the impact of other configuration changes on accelerator selection. 
+For example, with more advanced GPUs for executing FC, as shown in Fig.~\ref{fig:motiv-gpu-upgrade}, 
+the DRM reveals that this shifts the curve of FC throughput upward, 
+enhancing HBM-PIM throughput while leaving DIMM-PIM throughput unchanged, 
+thereby closing the performance gap of HBM-PIM relative to DIMM-PIM and even turning it into an advantage.
+Fig.~\ref{fig:motiv-memory-bottleneck} and Fig.~\ref{fig:motiv-scenario-shifting}-c, d show examples of this: 
+32$\times$ DIMM-PIM-L outperforms AttAcc~\cite{park2024attacc} with A100 (Fig.~\ref{fig:motiv-memory-bottleneck}), but underperforms AttAcc when paired with B200 (Fig.~\ref{fig:motiv-scenario-shifting}-d).
+Other scenarios, such as varying the number of GPUs used for FC, can also be analyzed following a similar methodology.
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

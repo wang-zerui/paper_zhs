@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **63**
+- Papers: **64**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -26,6 +26,7 @@
 - [ByteCheckpoint](./papers/byte-checkpoint.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fbyte-checkpoint%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/byte-checkpoint/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/byte-checkpoint/main_zh.pdf)
 - [CAKE: Compiler-Agent Co-Design for Frontier Kernel Evolution](./papers/cake.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcake%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/cake/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/cake/main_zh.pdf)
 - [Catalyzer](./papers/catalyzer.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcatalyzer%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/catalyzer/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/catalyzer/main_zh.pdf)
+- [CHIME: A Case for Efficient Long-Context Attention-FC Disaggregated Inference with DIMM-PIM](./papers/chime.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fchime%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/chime/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/chime/main_zh.pdf)
 - [Claw-Anything: Benchmarking Always-On Personal Assistants with Broader Access to User's Digital World](./papers/claw-anything.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fclaw-anything%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/claw-anything/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/claw-anything/main_zh.pdf)
 - [CoAct-1: Computer-using Multi-Agent System with Coding Actions](./papers/coact-1.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcoact-1%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/coact-1/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/coact-1/main_zh.pdf)
 - [Colossal Auto](./papers/colossal-auto.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcolossal-auto%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/colossal-auto/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/colossal-auto/main_zh.pdf)

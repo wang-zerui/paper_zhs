@@ -1,0 +1,140 @@
+\section{Introduction}
+\label{sec:intro}
+
+
+
+\emph{``A plant's growth is limited by the nutrient in shortest supply, regardless of how abundant other nutrients may be.''}
+\begin{flushright}
+  ---\emph{Liebig's Law}~\cite{liebigslaw}, Justus von Liebig (1803-1873).
+\end{flushright}
+
+
+
+
+The demand for Large Language Models (LLMs) to process and generate longer sequences 
+is rapidly increasing, driven by applications like long reasoning and complex code generation~\cite{deepseekai2025deepseekr1,plaat2024reasoning,huang2023reasoning,zhou2024survey,zhong2024evaluation,grattafiori2024llama3}.
+In these long-context scenarios, the decoding process becomes a significant performance bottleneck.
+Moreover, the increasingly longer KV cache imposes growing memory capacity and bandwidth demands on the inference system.
+
+
+To tackle this memory challenge, Attention-FC Disaggregation (AFD) has emerged as a promising solution
+~\cite{step3blog,step3system,heo2024neupims,park2024attacc,he2025papi,jiang2024neo,zhu2025megascaleinfer}.
+AFD systems partition the LLM inference workload: the memory-intensive Attention operations and KV cache are
+offloaded to a specialized memory-rich device (hereafter referred to as the \textit{``accelerator''}), while the compute-intensive
+Fully-Connected (FC) operations remain on the GPU or NPU.
+For example, leveraging HBM-based Processing-in-Memory (HBM-PIM) can dramatically
+reduce the latency of Attention~\cite{heo2024neupims,park2024attacc,he2025papi} with significantly increased bandwidth.
+In conclusion, AFD systems show the potential for higher throughput.
+
+However, the promise of AFD architecture is not always straightforward to realize.
+Our investigation reveals a critical yet counter-intuitive phenomenon: 
+\textbf{simply enhancing the accelerator does not always guarantee better system performance.}
+In an evaluation on GPT-175B with OpenR1~\cite{open-r1}, we found that equipping DGX-A100's HBMs with PIM from 1$\times$ to 16$\times$ higher bandwidth only leads to \textless 1\% throughput improvement.
+This puzzling outcome cannot be explained by existing performance models, such as the classic roofline model~\cite{roofline},
+which analyzes devices in isolation and fails to capture the complex interplay between disaggregated components in an AFD system.
+
+To address this, we design the \textbf{Disaggregated Roofline Model (DRM)}(\textsection\ref{s:demys}), 
+the first general performance model to analyze how AFD systems perform in various scenarios.
+DRM holistically characterizes the performance of both the accelerator and the GPU, crucially modeling their interdependencies.
+Using DRM, we conclude a principle guiding the design for AFD systems:
+the system's throughput is limited by the scarcest resource, be it the accelerator's memory bandwidth or capacity.
+Crucially, improvements to any non-bottleneck resource will result in diminishing or even negligible returns.
+It explains the phenomenon described in the previous paragraph, and motivates the design of a new accelerator that achieves a more balanced tradeoff among capacity, bandwidth, and scalability.
+
+
+
+
+
+
+
+
+
+
+In this paper, we show that PIM integrated with \textit{DIMM}, i.e., equipping host memory modules with bank-level processing units, constitutes a case of a new accelerator that strikes this balance.
+Therefore, we propose AFD systems that leverage \textit{DIMM-PIM}.
+Compared to prior HBM/GDDR-PIM solutions~\cite{heo2024neupims,park2024attacc,he2025papi,gu2025cent}, an AFD system with DIMM-PIM gains three key advantages.
+First, it directly alleviates the capacity bottleneck of HBM-PIM while providing significantly higher bandwidth than standard host memory, enabling higher overall throughput.
+Second, it inherits the superior scalability and configurability of the standard DIMM interface, making the system adaptable and future-proof for diverse memory demands.
+Third, as analyzed in \textsection\ref{sec:motiv-dimm-pim-proposal}, it offers higher economic efficiency, which could be cheaper than HBM/GDDR-PIM and suffer less memory wastage.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+However, effectively leveraging DIMM-PIM in AFD systems is non-trivial. 
+A naive integration of DIMM-PIM introduces additional synchronization overheads both within the PIM hardware and across the inference system, including transfer, layout, and progress synchronization, which can severely stall inference.
+Specifically: 
+
+First, compared with prior HBM-PIM/GDDR-PIM architectures~\cite{he2025papi,heo2024neupims,park2024attacc,gu2025cent}, 
+the DIMM-PIM architecture features \textit{multiple distributed, cooperating DRAM chips}, which aggravate two synchronization overheads:
+(1) \textit{Data synchronization:} attention computation distributed across multiple DRAM chips necessitates data synchronization via cross-chip transfers, e.g., accumulating partial outputs across chips for ``softmax''.
+(2) \textit{Layout synchronization:} the DIMM-based data storage layout may not match the layout required by PIM computation: 
+for instance, a single element may be striped across several chips, while PIM computation requires each element resides in a single chip. 
+Aligning the layout thus becomes a prerequisite for attention execution.
+These overheads introduce substantial stalls in PIM execution, preventing DIMM-PIM from achieving its theoretical performance.
+
+
+
+
+Second, the disaggregation of the inference process between the GPU and DIMM-PIM also introduces two types of synchronization overhead:
+(1) \textit{Data synchronization:} PIM needs to fetch the Q,K,V tensors from the GPU and return the attention outputs to the GPU. 
+These transfers via PCIe can stall PIM execution.
+(2) \textit{Progress synchronization:} when parallel operations on the PIM and GPU have imbalanced completion times, the device that finishes earlier is forced to wait, creating idle ``bubbles''.
+This issue is compounded by the fact that the execution latencies of parallelizable tasks can vary, making workload alignment more challenging.
+
+
+
+
+
+To address these challenges, 
+we propose \sys, the first AFD system that integrates a novel DIMM-PIM design as the accelerator, 
+reducing synchronization overheads from the hardware internals to the overall system.
+First, we design \sys-PIM (\textsection\ref{sec:design-dp}), a DIMM-PIM hardware for efficient attention computation.
+It eliminates the overheads of data and layout synchronization with two key techniques respectively: \emph{bubble-free pipelining} and \emph{hybrid-grained re-layout}.
+Specifically, the pipeline overlaps data transfer with concurrent bank PU execution to hide the transfer overheads, 
+which further enables bubble-free with specific head mapping according to a quantitative analysis.
+The hybrid-grained re-layout performs data layout transformation at element level (coarse-grained) and bit level (fine-grained) to address the layout mismatch with minimum latency.
+
+
+Second, we design \sys-sys (\textsection\ref{sec:design-sys}), a DIMM-PIM integrated inference system that reduces the overheads of data and progress synchronization respectively with \emph{rankset-granular communication computation overlapping} and \emph{alignment-predicting scheduling}.
+Rankset-granular communication computation overlapping exploits the finest granularity of independent communication and computation, i.e., \emph{the rankset}, which consists of one rank from each channel.
+This design achieves parallel communication and computation across ranksets to support asynchronous data transfer, effectively hiding the communication overhead between the GPU and \sys-PIM with computation.
+Alignment-predicting scheduling selects requests to form sub-batches with the ability of modeling the performance of operations on both devices, 
+selecting requests accordingly to form sub-batches whose predicted latencies on the two devices are aligned.
+This maximizes the parallel execution on the two devices with minimum idle bubbles.
+
+
+
+
+Comprehensive evaluations on three LLM models and three real-world traces~\cite{open-r1,dophin,OpenThoughts-114k-math,bai2024longbench} show that \sys achieves up to 5.15$\times$ speedup over state-of-the-art HBM-PIM solutions~\cite{heo2024neupims,park2024attacc} with significantly improved batch sizes.
+
+

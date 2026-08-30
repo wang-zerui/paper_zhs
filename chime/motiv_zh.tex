@@ -1,0 +1,262 @@
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{1pt}
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+  \begin{minipage}[t]{\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-LLM-inference.pdf}
+    \footnotesize
+  \end{minipage}
+  \caption{\textbf{LLM 推理过程。}}
+  \label{fig:motiv-LLM-inference}
+\end{figure}
+
+\section{Attention--FC 分离式系统的兴起}
+
+\subsection{LLM 推理过程}
+图~\ref{fig:motiv-LLM-inference} 展示了 LLM 推理过程~\cite{anil2023palm2,devlin2019bert,grattafiori2024llama3,kalyan2023survey}，其中包括预填充与解码两个阶段。
+LLM 模型由一系列层构成，每层包含两类主要操作：
+(1) Attention 操作~\cite{vaswani2017attention}；
+(2) 全连接（FC）操作，包括 QKV 生成、投影、前馈网络等。
+MHA 与 GQA 是主流 Attention 算子：MHA 独立计算每个 Head，GQA 则对 Query Head 分组并行处理。
+Attention 由彼此独立的 Head 完成计算，每个 Head 依次执行 Score（$Q \times K_t$）、Softmax 和 Context（$S \times V$）计算。
+
+\subsection{Attention--FC 分离式推理系统}
+\label{sec:attn-fc-disaggregation}
+Attention 与 FC 操作通常具有不同特征。
+具体而言，受益于批处理~\cite{amey2024sarathi,yu2022orca,kwon2023pagedattention}，FC 操作计算密集，需要计算资源来加速。
+相反，解码 Attention 通常是带宽密集型操作~\cite{park2024attacc}，且无法从批处理中获益，因为每个请求都有各自独立且专用的 KV cache。
+Attention 延迟主要由加载 KV cache 所需的内存带宽决定。
+考虑到两类操作的不同特征，一些现有工作——即 Attention--FC 分离式推理系统（简称“AFD 系统”）——把 Attention 与 FC 操作分离到不同硬件平台上。
+具体而言，它们在计算资源丰富的 GPU/NPU 上对 FC 操作进行批处理，同时把 KV cache 和解码 Attention 卸载到更适合其内存密集特性的平台（称为\textit{加速器}）。
+
+为提高总体利用率，现有 AFD 系统通常采用\emph{子批次调度}~\cite{heo2024neupims,jiang2024neo,zhu2025megascaleinfer}，如图~\ref{fig:intro-motiv}-a 所示，在两个设备上并行执行两个（甚至更多）交错子批次。
+推理时，单个批次的执行无法在两个设备上并行；例如，GPU 必须等待 Attention 完成后才能开始 FC。
+子批次调度允许不同批次的 Attention 和 FC 在两个设备上并发运行，从而能够提高 AFD 系统的吞吐量与资源利用率。
+
+\begin{figure}[t]
+  \setlength{\abovecaptionskip}{1pt}
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+  \begin{minipage}[t]{\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/DRM-analysis.pdf}
+    \footnotesize
+  \end{minipage}
+  \caption{\textbf{\sys 的分离式屋顶线模型与案例研究。}
+  \textit{“DIMM-PIM”表示 \sys 的方案，即采用配有 Bank 级 PU 的 DIMM 主机内存作为加速器。“Throughput”表示每秒处理的 Token 数。}}
+  \label{fig:intro-motiv}
+\end{figure}
+
+\subsection{存内计算（PIM）}
+PIM 通过在 HBM~\cite{lee2021hbmpim,he2020newton,kim2021aquabolt,kim2021aquabolthcs,lee2025paise}、GDDR~\cite{lee2022gddr6,kwon2022system,kim2024skhynix,kwon2023memorycentric,lee2024cost}和 DIMM~\cite{lee2022axdimm,devaux2019true,ke2020recnmp,ke2021near}等内存设备中集成处理单元（PU），提供较高的聚合带宽，是一种有前景的方案。
+例如，当一个通道中包含两个 DIMM（如每个 DIMM 含两个 Rank、每个 Rank 含 16 个 Bank）时，在 Rank 附近部署 PU（\textbf{Rank PU}）可获得约为主机 CPU 4$\times$ 的带宽，而在 Bank 附近集成 PU（\textbf{Bank PU}）可将带宽提高 30$\times$ 以上。
+因此，一些最先进的 AFD 系统构建在 HBM-PIM~\cite{heo2024neupims,park2024attacc,he2025papi}或 GDDR-PIM~\cite{gu2025cent}等 PIM 设备之上，相比 GPU 可获得显著的性能提升。
+
+\section{使用 DRM 刻画 AFD 系统}
+\label{s:demys}
+本节首先介绍\textbf{分离式屋顶线模型（DRM）}，这是一个专为 AFD 系统设计的分析模型，可刻画不同场景下的性能。
+基于该模型，我们分析现有 AFD 系统的内存瓶颈；这些系统把 Attention 卸载到不同的内存增强设备上，包括提高带宽的 HBM-PIM，以及扩展容量的 CPU（配合主机内存）。
+根据分析，我们总结“利比希定律”在 AFD 系统中的具体表现，以此指导加速器通过有效增强内存来实现高吞吐量。
+
+\subsection{DRM 建模与瓶颈分析}
+\label{s:motiv-analytic-model}
+刻画 AFD 系统吞吐量需要综合考虑两个因素：GPU 侧执行 FC 操作的吞吐量，以及加速器侧执行 Attention 操作的吞吐量。
+我们首先指出，当两个设备的吞吐量不相等时，推理系统的吞吐量只受成为瓶颈的那个设备影响。
+例如，在图~\ref{fig:intro-motiv}-a 右侧，GPU 是瓶颈，加速器因而出现空闲气泡。
+此时，提高加速器侧吞吐量只会产生更多空闲气泡，无法提升总体吞吐量。
+图~\ref{fig:intro-motiv}-a 左侧展示了相反的例子。
+由此得到：
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{推论 I：}
+\textit{AFD 系统的总体推理吞吐量由分别执行 FC 与 Attention 的两个设备中吞吐量较低者决定。}
+\end{mdframed}
+
+\myparagraph{DRM 的构建。}
+图~\ref{fig:intro-motiv}-b 给出 DRM 的概念示意图；它对批大小与 Token 吞吐量（Token/s）之间的关系建模，从而统一刻画两个分离设备的性能。
+Token 吞吐量由两个关键度量推导而来：
+(1) 每秒浮点运算数，它由传统屋顶线模型中依赖批大小的算术强度决定；
+(2) 浮点运算量，它随批大小增长。
+Line-FC 表示 GPU 执行 FC 时的 Token 吞吐量；随着批大小增大，该吞吐量持续上升，直至 GPU 得到充分利用，即当批大小达到 $B_{\rm target}$ 时，GPU 达到峰值吞吐量 $T_{\rm max\_gpu}$。
+Line-ATTN-1、2、3 分别表示不同加速器执行 Attention 时的 Token 吞吐量。
+由于 Attention 的算术强度保持恒定且较低，这些吞吐量通常与加速器内存带宽正相关，而与批大小无关。
+此外，图~\ref{fig:intro-motiv}-b 中的性能曲线既可以来自理论分析，也可以通过性能剖析获得。
+
+\myparagraph{带宽约束。}
+根据推论 I，AFD 系统吞吐量由 GPU 和加速器两条吞吐量曲线中的较低值决定。
+这里可能出现两种情况。
+第一，GPU 与加速器的吞吐量曲线相交，例如加速器为 CPU 时。
+当批大小很小时，GPU 吞吐量起初可能低于 CPU，此时 AFD 系统吞吐量由 Line-FC 决定。
+随着批大小增加，GPU 吞吐量迅速上升到 $T_{\rm bw\_cpu}$；此后 AFD 系统吞吐量由受 CPU 内存带宽约束的 Line-ATTN-3 决定。
+第二，如果 GPU 与加速器的吞吐量曲线不相交，AFD 系统吞吐量始终由较低的曲线决定。
+例如，当图~\ref{fig:intro-motiv}-b 中的加速器为 HBM-PIM 时，吞吐量始终受 GPU 侧（Line-FC）限制。
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{推论 II：}
+\textit{当 Attention 成为瓶颈时，加速器带宽会限制 AFD 系统吞吐量。}
+\end{mdframed}
+
+\myparagraph{容量约束。}
+另一个因素是加速器侧用于存储 KV cache 的内存容量。
+内存容量不足会限制可容纳请求的最大数量，使 GPU 侧无法充分利用 GPU 资源。
+在图~\ref{fig:intro-motiv}-b 中，Line-Cap-1、2、3 表示不同加速器可容纳的最大批大小，即 HBM-PIM、DIMM-PIM 与 CPU 分别对应的 $B_{\rm hp}$、$B_{\rm dp}$、$B_{\rm cpu}$。
+因此，GPU 执行 FC 的吞吐量也受这些最大批大小限制。
+例如，当加速器为 HBM-PIM 时，由于该 AFD 系统的批大小至多为 $B_{\rm hp}$，Line-FC 上的最大 GPU 吞吐量被限制在 $T_{\rm cap\_hp}$ 以下。
+当瓶颈位于 GPU 侧时——例如采用 HBM-PIM 作为加速器——AFD 系统吞吐量就受有限批大小约束。
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{推论 III：}
+\textit{当 FC 成为瓶颈时，用于存储 KV cache 的容量会限制 AFD 系统总体吞吐量。}
+\end{mdframed}
+
+\myparagraph{动态工作负载与屋顶线移动。}
+DRM 是面向设计阶段架构分析的解析模型，其目的并非预测某个给定请求的精确延迟~\cite{stojkovic2025dynamoLLM,kakolyris2025throttllem}。
+不过，DRM 也能说明性能屋顶线如何随运行时工作负载特征变化而移动。
+例如，上下文变长时，同等容量可容纳的最大批大小会降低，在相同带宽下处理更大 KV cache 的吞吐量也会下降；因此，容量线（图~\ref{fig:intro-motiv}-b 中的 Line-Cap-1、2、3）向左移动，Line-ATTN-1、2、3 向下移动，而 GPU 的 Line-FC 几乎保持不变。
+由此可以看出，长上下文会同时加剧带宽和容量两方面的内存瓶颈。
+
+\myparagraph{刻画通信开销。}
+DRM 的方法还能够刻画 GPU 与 Attention 加速器之间的通信开销，并将其视作 Attention 开销的一部分。
+在 DRM 中，通信带宽下降（例如用 PCIe 3.0 代替 PCIe 4.0）会使 Attention 性能曲线向下移动。
+根据第~\ref{sec:design-sys-comm} 节的详细分析，AFD 系统中的通信开销是恒定的，并由我们的设计加以优化。
+
+\myparagraph{AFD 系统的“利比希定律”。}
+综合推论 II 和 III，对于一个执行 FC 的给定 GPU 配置，当 Attention 或 FC 成为瓶颈时，加速器的内存带宽或容量会分别限制吞吐量。
+进一步结合推论 I，这意味着总体吞吐量由内存容量和带宽二者中吞吐量上限较低的一方决定，我们称之为内存的薄弱点。
+由此可得，加速器内存对总体吞吐量的影响遵循利比希定律：
+
+\begin{mdframed}[backgroundcolor=gray!10,linecolor=black,linewidth=1pt]
+\textbf{利比希定律：}
+\textit{AFD 系统吞吐量受内存容量或带宽中较薄弱的一方约束。}
+\end{mdframed}
+尽管利比希定律是适用于任何系统的一般原则，DRM 的分析方法首次揭示了该定律在 AFD 系统中的具体表现。
+
+\myparagraph{案例研究。}
+图~\ref{fig:intro-motiv}-c 从图~\ref{fig:intro-motiv}-b 中提取具体示例作为案例。
+“CPU”的薄弱点是主机内存带宽有限；因此，即使内存容量足以容纳更大的批次，CPU AFD 系统的吞吐量仍受 $T_{\rm \text{bw\_cpu}}$ 约束。
+“HBM-PIM”的薄弱点是 HBM 容量有限；因此，即使它能够极快地执行 Attention，吞吐量仍受 $T_{\rm \text{cap\_hp}}$ 约束。
+
+\myparagraph{利比希定律的定量分析。}
+为了定量说明利比希定律，我们把图~\ref{fig:intro-motiv} 的示意图扩展为图~\ref{fig:motiv-memory-bottleneck}。
+图~\ref{fig:motiv-memory-bottleneck} 对吞吐量上限进行了量化：假设使用 DGX-A100 的 8$\times$A100 计算 FC，同时采用不同内存配置的加速器计算 Attention。
+该图清楚展示了利比希定律，即只有同时扩展容量与带宽才能获得更高吞吐量。
+若仅扩展其中一项，例如固定容量而扩展带宽，则吞吐量只会随带宽增加而提升到某个临界点。
+超过该点后，由于容量成为瓶颈，更高带宽不再带来进一步提升。
+
+\begin{figure}[t]
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+  \begin{minipage}[t]{0.96\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-A100-2048.pdf}
+    \footnotesize
+  \end{minipage}
+  \caption{\textbf{存在内存瓶颈时的吞吐量等高线图。}
+  \textit{上方“$L_t$=2048”表示每个请求的上下文长度为 2048 个 Token。“PAPI”“NeuPIMs”“AttAcc”和“CENT”的内存配置取自相应论文~\cite{he2025papi,heo2024neupims,park2024attacc,gu2025cent}。“DGX-A100”“DGX-H100”和“HGX-B200”~\cite{nv2023dgxa100,hgxb200,h20}表示使用 GPU 计算 Attention。DIMM-S 和 DIMM-L 表示两种不同类型的 DDR4 内存。每个点表示相应数量内存芯片下的总容量与总带宽；例如，“DIMM-L”曲线（绿线）上的“64$\times$”点表示 64 个 DIMM-L 内存芯片对应的容量与带宽。我们假设每种内存设备的 PIM 性能均可达到理想情况，即等效内存带宽提高 16$\times$。性能使用 AttAcc~\cite{park2024attacc}模拟器和 GPT-175B 模型进行模拟。}}
+  \label{fig:motiv-memory-bottleneck}
+\end{figure}
+
+\subsection{以往工作的局限}
+现有工作为增强内存、提高推理吞吐量付出了大量努力。
+然而，它们主要聚焦于内存瓶颈的一个维度，即容量或带宽。
+由于忽视利比希定律，其性能收益可能效率不高或并不充分。
+为说明这一点，我们在图~\ref{fig:motiv-memory-bottleneck} 中绘制了不同硬件类型在扩展场景下的配置，包括 HBM2e、GDDR、两种 DDR4 内存及其 PIM 变体。
+图中列出的部分系统~\cite{gu2025cent}并非专为 AFD 设计；我们主要考察其用于执行 Attention 的硬件。
+可以看出，以往工作在以下方面受到“利比希定律”制约：
+
+\myparagraph{内存增强不足。}
+第一，在扩展不足时，这些内存增强技术可能仍无法阻止内存成为吞吐量瓶颈。
+结合图~\ref{fig:motiv-memory-bottleneck} 考察各论文所声称的硬件参数即可说明这一点。
+具体而言，基于 HBM-PIM 的工作可能受到内存容量不足的制约~\cite{he2025papi,heo2024neupims,park2024attacc}，另一些工作则受 DIMM 内存带宽不足限制~\cite{liu2025hermes,jiang2024neo}。
+
+\myparagraph{内存增强效率不高。}
+此外，现有工作还存在内存资源过量的问题。
+例如，尽管当前基于 GDDR/HBM-PIM 的方法~\cite{he2025papi,heo2024neupims,park2024attacc,gu2025cent}受容量限制，其带宽却可能比实际需求高出若干数量级，对吞吐量几乎没有帮助。
+而且，即使对它们进行扩展在理论上能够实现高吞吐量，这种扩展也可能同时造成大量带宽浪费，如图~\ref{fig:motiv-memory-bottleneck} 所示。
+
+\subsection{选择 DIMM 集成 PIM 的方案}
+\label{sec:motiv-dimm-pim-proposal}
+基于上述分析，我们发现，将 PIM 与 \textit{DIMM} 集成（即 \textit{DIMM-PIM}）是一种有前景的 Attention 加速器。
+具体而言，\textit{DIMM-PIM}通过 Bank 级 PIM 单元增强基于 DIMM 的主机内存，结合了 PIM 与 \textit{DIMM} 的优势。
+因此，我们提出集成 \textit{DIMM-PIM} 的 AFD 系统，其优势如下。
+
+\myparagraph{通过更均衡的内存配置获得更好性能。}
+通常，DIMM-PIM 能够缓解 HBM-PIM 的容量瓶颈以及 CPU 卸载的带宽瓶颈。
+如图~\ref{fig:intro-motiv}-b、c 所示，这意味着 DIMM-PIM 有望以更均衡的内存配置提高总体吞吐量。
+如图~\ref{fig:motiv-memory-bottleneck} 所示，DGX-A100 配备 2TB DIMM 内存（DDR4）和 640GB HBM，因此为 DIMM 配置 PIM 已明显优于为 HBM 配置 PIM。
+
+\myparagraph{可扩展且可配置。}
+DIMM-PIM 通过标准 DIMM 形态提供可扩展性，能够在兼容平台上以即插即用方式扩展容量和带宽，还可通过 CXL 等互连进一步扩展。
+这使 DIMM-PIM 不仅能够获得更好性能，也可能适应更广泛的场景。
+
+\myparagraph{经济效率。}
+除性能外，DIMM-PIM 相比 GDDR 和 HBM 方案还具有显著成本优势。
+第一，HBM2e 的每 GB 成本可能比 DDR4 高 6$\times$ 以上~\cite{cost-ddr4,cost-ddr5,cost-ddr5-hbm}；无论是否集成 PIM，这都是显著差异。
+第二，图~\ref{fig:motiv-memory-bottleneck} 表明，DIMM-PIM 更均衡的性能能够避免 HBM/GDDR-PIM 方案固有的大量资源过度配置，从而以更高的成本效率扩展性能。
+
+\begin{figure}[t]
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-A100-256.pdf}
+    \footnotesize
+    \textbf{(a) $L_t$=256。}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-A100-8192.pdf}
+    \footnotesize
+    \textbf{(b) $L_t$=8192。}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-H20-2048.pdf}
+    \footnotesize
+    \textbf{(c) 使用 8$\times$H20 计算 FC。}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-contour-B200-2048.pdf}
+    \footnotesize
+    \textbf{(d) 使用 HGX-B200 计算 FC。}
+  \end{minipage}
+  \caption{\textbf{四种场景下的吞吐量等高线图。}
+  \textit{本图与图~\ref{fig:motiv-memory-bottleneck} 共用图例。相比图~\ref{fig:motiv-memory-bottleneck} 的场景，(a) 和 (b) 改变上下文长度，(c) 和 (d) 则调整用于 FC 计算的 GPU。}}
+  \label{fig:motiv-scenario-shifting}
+\end{figure}
+
+\begin{figure}[t]
+  \setlength{\belowcaptionskip}{-10pt}
+  \centering
+  \begin{minipage}[t]{0.96\linewidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/motiv-scenarios-shift.pdf}
+    \footnotesize
+  \end{minipage}
+  \caption{\textbf{GPU 升级时的 DRM。}
+  \textit{$T_{DP}$ 和 $T_{HP}$ 分别表示受内存带宽约束的 DIMM-PIM 吞吐量，以及受内存容量约束的 HBM-PIM 吞吐量。}}
+  \label{fig:motiv-gpu-upgrade}
+\end{figure}
+
+\subsection{讨论：不同场景下的瓶颈迁移}
+\label{sec:motiv-discussion-scenarios}
+在实践中，AFD 系统可能采用不同的部署配置，从而使内存瓶颈发生迁移。
+这些部署配置包括 GPU 型号与数量、上下文长度、LLM 参数规模与架构等。
+基于 DRM 的方法有一项重要贡献：对于给定部署配置，它可以分析每种加速器的内存配置如何影响总体吞吐量。
+本节进一步讨论不同部署配置可能如何影响内存瓶颈。
+
+\myparagraph{不同上下文长度。}
+图~\ref{fig:motiv-memory-bottleneck} 与图~\ref{fig:motiv-scenario-shifting}-a、b 展示了不同上下文长度对性能的影响。
+第一，我们观察到，在不同上下文长度下，DIMM-PIM 更均衡的配置始终具有性能与效率优势，能够在提高吞吐量的同时减少资源过度配置。
+原因在于，更长的上下文会同时加剧内存容量与带宽瓶颈。
+第二，我们观察到，在上下文较短时，各基线的性能更为接近，因为内存瓶颈缓解后，增加资源的边际收益会递减。
+我们在第~\ref{sec:eval-e2e-throughputs} 节验证了这一分析。
+上下文长度的影响也可结合图~\ref{fig:intro-motiv}-b 进行分析。
+
+\myparagraph{其他配置的影响。}
+DRM 方法还可以分析其他配置变化对加速器选择的影响。
+例如，如图~\ref{fig:motiv-gpu-upgrade} 所示，当采用更先进的 GPU 执行 FC 时，DRM 表明 FC 吞吐量曲线会上移，从而提高 HBM-PIM 吞吐量而不改变 DIMM-PIM 吞吐量；这会缩小 HBM-PIM 相对 DIMM-PIM 的性能差距，甚至使前者取得优势。
+图~\ref{fig:motiv-memory-bottleneck} 和图~\ref{fig:motiv-scenario-shifting}-c、d 给出了示例：使用 A100 时，32$\times$ DIMM-PIM-L 的性能优于 AttAcc~\cite{park2024attacc}（图~\ref{fig:motiv-memory-bottleneck}），但与 B200 配合时则低于 AttAcc（图~\ref{fig:motiv-scenario-shifting}-d）。
+其他场景，例如改变用于 FC 的 GPU 数量，也可沿用类似方法进行分析。
