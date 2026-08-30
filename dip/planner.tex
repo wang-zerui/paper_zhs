@@ -1,0 +1,192 @@
+\section{Modality-Aware Partitioner}
+\label{section:modality-aware-partitioning}
+
+Building on the principles in \S\ref{section:design-decisions},
+we propose \emph{modality-aware partitioning}.
+This approach partitions each modality module into multiple model chunks before training,
+and dynamically splits microbatches into modality-specific sub-microbatches during training.
+Specifically, for the $i$-th modality, {\sys} determines two parameters:
+the sub-microbatch size $B_i$ and the number of pipeline segments $K_i$.
+Consequently, the $i$-th modality module is partitioned into $P \cdot K_i$ model chunks,
+distributed across $P$ pipeline ranks.
+
+\heading{Determine Sub-Microbatch Size}
+\sys{} independently selects the minimum viable sub-microbatch size $B_i$ for each modality module through systematic profiling.
+Although smaller sub-microbatch sizes enable finer-grained pipeline partitioning and higher scheduling efficiency,
+excessively small sizes may lead to GPU underutilization (\figref{figure:pipeline-scheduling}).
+To balance these trade-offs, \sys{} measures the computation latency of each modality module across varying sub-microbatch sizes.
+The optimal $B_i$ is determined as the smallest sub-microbatch size that maintains at least 95\%
+of the peak GPU computational efficiency observed across all tested configurations.
+
+\heading{Partition Model Chunks}
+After determining sub-microbatch sizes, \sys{} partitions each modality module to achieve global latency balancing.
+Given $n$ modality modules with sorted computation latencies $T_1 \leq T_2 \leq \cdots \leq T_n$
+(measured at their respective $B_i$ sizes),
+\sys{} assigns pipeline segment counts proportional to these latencies.
+Specifically, the fastest module ($T_1$) is configured as a single pipeline segment,
+while the $i$-th module is partitioned into $K_i = \lfloor T_i / T_1 \rfloor$ segments.
+For a modality module comprising $L_i$ layers,
+\sys{} distributes layers across $P \cdot K_i$ model chunks,
+with each chunk containing $L_i/(P \cdot K_i)$ consecutive layers.
+
+\heading{Construct Sub-Microbatch}
+During training execution, \sys{} dynamically constructs sub-microbatches for each modality module
+based on the content of incoming microbatches.
+For a microbatch assigned to the $i$-th modality module with $N_i$ instances,
+\sys{} splits it into $M_i = \lceil N_i/B_i \rceil$ uniformly partitioned sub-microbatches.
+This process generates $2 M_i \cdot K_i$ pipeline segments in total
+(accounting for both forward and backward computations) for the modality module.
+
+\section{Pipeline Schedule Searcher}
+\label{section:pipeline-schedule-searcher}
+
+\subsection{MCTS-Based Pipeline Segment Reordering}
+\label{section:segment-reordering}
+
+\sys{} determines the relative ordering between pipeline segments by assigning scheduling priorities to them.
+These priorities are subsequently utilized in the pipeline stage interleaving phase (\S\ref{section:stage-interleaving}).
+To efficiently explore the search space of possible priority assignments, \sys{} employs Monte Carlo tree search (MCTS)~\cite{mcts}.
+
+\heading{Search Tree Construction}
+Given $n$ pipeline segments, MCTS constructs a sequence of length $n$ by iteratively selecting the segment for each position $i$ (from $1$ to $n$).
+The segment at the $i$-th position receives a priority of $n - i$, ensuring earlier selected segments obtain higher priorities.
+
+The algorithm builds a search tree where each node at depth $d$ corresponds to the $d$-th element in the sequence.
+Consequently, any root-to-node path ending at depth $d$ represents a partial sequence for the first $d$ positions.
+Each node $v$ maintains the highest performance score $s_v$ observed among its descendants in the MCTS tree.
+
+\heading{Search Loop}
+MCTS iteratively performs the following four phases until convergence:
+
+\begin{enumerate}
+    \item \textbf{Node Selection:} Starting from the root, MCTS navigates downward by selecting child nodes that maximize the upper confidence bound (UCB) score $s_v^\alpha + \beta\sqrt{(\log{N_x}) / N_v}$.
+    Here, $x$ denotes the current node, $v$ is the target child node, $N_x$ and $N_v$ are visit counts, and $\alpha$, $\beta$ are hyperparameters.
+    This process repeats until a leaf node $u$ is reached.
+
+    \item \textbf{Tree Expansion:} A new node representing the next element after $u$ is added to the search tree.
+    Then $u$ is set to the newly created node.
+
+    \item \textbf{Random Rollouts:} Multiple rollouts (\eg 10 trials) generate complete sequences by randomly assigning segments to remaining positions after $u$.
+    Each sequence then undergoes pipeline stage interleaving (\S\ref{section:stage-interleaving}) and per-layer memory optimization (\S\ref{section:memory-optimization}) to compute performance scores (\ie end-to-end iteration time).
+
+    \item \textbf{Score Backpropagation:} The best rollout score among all trials propagates upward from $u$ to update the performance scores of ancestor nodes.
+\end{enumerate}
+
+This loop continues until either a predefined time budget is exhausted or the entire search space is explored.
+
+\heading{Optimization}
+We observe that segments processing the same modality within a single microbatch have identical pipeline structures and similar stage latencies.
+Consequently, their relative ordering does not impact end-to-end performance.
+This insight allows \sys{} to assign identical priorities to such segments and enforce a fixed ordering between them, significantly reducing the search space.
+
+\subsection{Greedy Pipeline Stage Interleaving}
+\label{section:stage-interleaving}
+
+After assigning priorities to segments,
+\sys{} employs a dual-queue algorithm to adaptively interleave forward and backward pipeline stages.
+When both schedulable forward and backward stages are available,
+\sys{} mimics Megatron-LM's memory-efficient ``one-\-forward-\-one-\-backward'' (1F1B) pattern~\cite{megatron-lm-arxiv20,dynapipe-eurosys24}.
+When either type is unavailable,
+a greedy strategy fills pipeline bubbles to construct compact schedules.
+
+\heading{Initialization}
+\sys{} first obtains the stage latencies and memory consumptions for all stages via the training simulator,
+using the most memory-efficient scheme determined in \S\ref{section:memory-optimization}.
+This step ensures sufficient optimization space for subsequent per-layer memory optimizations.
+
+For each pipeline rank, \sys{} maintains:
+(1) the end time of the last scheduled stage ($t_\mathrm{last}$, initially zero);
+(2) two priority queues ($Q_\mathrm{fw}$, $Q_\mathrm{bw}$) storing forward and backward stages in descending priority order; and
+(3) the minimum start time ($t_\mathrm{min}$) among stages in $Q_\mathrm{fw}$ and $Q_\mathrm{bw}$.
+Each stage maintains a minimum schedulable start time ($t_\mathrm{start}$) initialized to zero for stages with no predecessors and $+\infty$ otherwise.
+
+\heading{Iterative Scheduling}
+\sys{} iteratively selects a pipeline rank and schedules one stage from it:
+\begin{enumerate}
+    \item Select the pipeline rank with the smallest $t_\mathrm{min}$.
+    \item Compare the minimum start times of stages in $Q_\mathrm{fw}$ ($t_\mathrm{fw}$) and $Q_\mathrm{bw}$ ($t_\mathrm{bw}$) against $t_\mathrm{last}$.
+    \item If both $t_\mathrm{fw} < t_\mathrm{last}$ and $t_\mathrm{bw} < t_\mathrm{last}$,
+          schedule alternating forward/backward stages based on the last scheduled stage's computation type,
+          emulating the 1F1B pattern.
+    \item Otherwise, select the stage with the smallest $t_\mathrm{start}$ to minimize pipeline bubble between $t_\mathrm{min}$ and stage's start time.
+\end{enumerate}
+
+The selected stage is dequeued and scheduled on the pipeline rank.
+Subsequently, $t_\mathrm{last}$, $t_\mathrm{min}$, and $t_\mathrm{start}$ values for all successor stages are updated.
+
+\heading{Memory Constraints}
+Throughout scheduling, \sys{} tracks real-time memory consumption across pipeline ranks.
+When a rank exceeds memory capacity, its forward queue is temporarily disabled to prevent memory overflow.
+
+\subsection{Per-Layer Memory Optimization}
+\label{section:memory-optimization}
+
+\sys{} adaptively selects appropriate memory optimization strategies (\eg activation checkpointing)
+for all model layers.
+Since the stage interleaving scheme is predetermined by the dual-queue algorithm (\S\ref{section:stage-interleaving}),
+this phase independently optimizes end-to-end latency for each pipeline rank.
+
+\heading{Offline Candidate Generation}
+Before training, \sys{} enumerates all possible optimization strategies for each model layer
+and estimates their execution time and memory consumption using a training simulator.
+The system then groups each forward stage with its corresponding backward stage into a \emph{stage pair}.
+For each stage pair, \sys{} selects up to $S$ candidate strategies (\eg $S = 10$)
+from the combinatorial space of layer-wise strategies through a three-step process:
+(1) identifying the fastest candidate,
+(2) identifying the most memory-efficient candidate, and
+(3) evenly partitioning the memory range between these extremes into $S-2$ buckets,
+then selecting the most time-efficient candidate within each bucket via a multiple-choice knapsack algorithm~\cite{multi-choice-knapsack}.
+
+\heading{ILP Formulation}
+For each pipeline rank, \sys{} employs an ILP solver to select optimal candidates.
+Given $n$ stage pairs, each with $S$ candidate strategies, let $s_i$, $t_i$ denote the start and end timestamps of the $i$-th stage pair,
+and $\mathrm{lat}_{i,j}$, $\mathrm{mem}_{i,j}$ denote the stage latency and memory consumption of the $j$-th candidate for the $i$-th stage pair.
+The formulation uses:
+
+\begin{itemize}
+    \item \textbf{Variables:} $o_{i,j} \in \{0,1\}$ indicating whether the $j$-th candidate is selected for the $i$-th stage pair.
+    \item \textbf{Objective:} Minimize total latency $\sum_i^n \sum_j^S o_{i,j} \cdot \mathrm{lat}_{i,j}$.
+    \item \textbf{Selection Constraints:} Each stage pair selects exactly one strategy, \ie $\sum_j^S o_{i,j} = 1$ ($\forall 1 \leq i \leq n$).
+    \item \textbf{Memory Constraints: } At any time $s_k$, the memory limit $M$ is satisfied,
+    \ie $\sum_i^n [s_i \leq s_k \leq t_i] \sum_j^S o_{i,j} \cdot \mathrm{mem}_{i,j} \leq M$ ($\forall 1 \leq k \leq n$),
+    where $[\cdot]$ is the Iverson bracket~\cite{iverson-bracket}.
+\end{itemize}
+
+\heading{Optimizations}
+Although the problem scale has been significantly reduced compared to the monolithic, end-to-end ILP formulation,
+solving an ILP instance may still require several seconds.
+We introduce two techniques to achieve efficient solving ($<$10 ms per instance on a single CPU core):
+(1) warm-starting the ILP solver with a greedy initial solution, and
+(2) permitting a small optimality gap (\eg $\leq 5\%$) for early termination,
+as closing the final 5\% gap incurs diminishing returns but prohibitive computational costs.
+
+\subsection{Time Complexity Analysis}
+
+In this section, we outline the algorithmic structure of {\sys}'s training planner and
+analyze its time complexity.
+The planner operates as an iterative search loop that continues until a predefined time budget is exhausted.
+Each iteration consists of three stages:
+pipeline segment reordering (\S\ref{section:segment-reordering}),
+pipeline stage interleaving (\S\ref{section:stage-interleaving}), and
+per-layer memory optimization (\S\ref{section:memory-optimization}).
+For the complexity analysis of a single search iteration, let
+$p$ denote the number of pipeline ranks,
+$n$ the number of sub-microbatches, and
+$S$ the number of candidate memory-saving strategies.
+Additionally, let $\mathrm{ApproxILP}(m, k)$ represent the time complexity of the approximate ILP solver for
+an instance with $\mathrm O(m)$ variables and $\mathrm O(k)$ constraints.
+
+First, pipeline segment reordering generates an ordering for all sub-microbatches in $\mathrm O(n)$ time.
+Second, the greedy scheduling algorithm for pipeline stage interleaving runs in time proportional to the total number of pipeline stages, \ie $\mathrm O(p \cdot n)$.
+Finally, per-layer memory optimization solves a set of small, approximate ILP instances to select the optimal configuration for each pipeline rank.
+Each ILP instance requires creating $n \cdot S$ indicator variables ($o_{i,j}$),
+along with $n$ selection constraints and $n$ memory constraints.
+Consequently, the time complexity for per-layer memory optimization is $\mathrm O(p \cdot \mathrm{ApproxILP}(n \cdot S, n))$.
+Combining all these steps, the overall time complexity for a single search iteration is $\mathrm O(p \cdot (n + \mathrm{ApproxILP}(n \cdot S, n)))$.
+
+In contrast, a full ILP baseline approach is inherently inefficient due to the massive scale of variables and constraints involved.
+First, it requires solving the entire pipeline globally, rather than decomposing the problem per pipeline rank.
+Second, it necessitates $\mathrm O(n^2)$ ordering constraints to prevent overlapping stage executions within each pipeline rank, whereas {\sys} avoids this overhead through efficient explicit scheduling.
+Furthermore, in the memory optimization phase, assuming $L$ layers per pipeline stage and $c$ candidate strategies per layer, the search space expands to $c^L$ candidates per stage.
+Consequently, the complexity of the baseline ILP approach escalates to $\mathrm O(\mathrm{ApproxILP}(p \cdot n \cdot c^L, p \cdot n^2))$.
+We empirically compare the performance of this baseline against {\sys}'s training planner in \S\ref{section:planner-evaluation} and \figref{figure:search-scalability}.

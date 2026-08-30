@@ -1,0 +1,111 @@
+\begin{table}[!t]
+    \caption{
+        评估中使用的模型规格。
+    }
+    \label{table:model-params}
+
+    \footnotesize
+    \begin{tabular}{lccccc}
+    \toprule
+    \textbf{名称} & \textbf{\makecell{层数}} & \textbf{\makecell{嵌入\\维度}} & \textbf{\makecell{FFN 隐藏\\维度}} & \textbf{\makecell{注意力\\头数}} & \textbf{\makecell{注意力\\组数}} \\
+    \midrule
+    ViT 5B~\cite{vit22b-arxiv23} & 63 & 1792 & 15360 & 16 & 16 \\
+    ViT 22B~\cite{vit22b-arxiv23} & 48 & 6144 & 24576 & 48 & 48 \\
+    \midrule
+    Llama3 8B~\cite{llama3-arxiv24} & 32 & 4096 & 14336 & 32 & 8 \\
+    Qwen2 32B~\cite{qwen2-5-arxiv25} & 64 & 5120 & 27648 & 40 & 8 \\
+    Qwen2 72B~\cite{qwen2-5-arxiv25} & 80 & 8192 & 29568 & 64 & 8 \\
+    \midrule
+    DiT 5B~\cite{moviegen-arxiv24} & 28 & 3584 & 10240 & 28 & 28 \\
+    DiT 30B~\cite{moviegen-arxiv24} & 48 & 6144 & 24576 & 48 & 48 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[!t]
+    \caption{
+        评估中使用的模型组合。
+    }
+    \label{table:model-setup}
+
+    \small
+    \begin{tabular}{llccc}
+    \toprule
+    \textbf{名称} & \textbf{模型配置} & \textbf{TP} & \textbf{PP} & \textbf{GPU 数} \\
+    \midrule
+    VLM-S & ViT 5B + Llama3 8B & 4 & 4 & 16 \\
+    VLM-M & ViT 5B + Qwen2 32B & 8 & 4 & 32 \\
+    VLM-L & ViT 22B + Qwen2 72B & 8 & 8 & 64 \\
+    \midrule
+    T2V-S & Llama3 8B + DiT 5B & 4 & 4 & 16 \\
+    T2V-L & Qwen2 32B + DiT 30B & 8 & 8 & 64 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{实现}
+\label{section:implementation}
+
+\sys{} 以 Megatron-LM~\cite{megatron-lm-arxiv20} 的扩展形式实现，
+其中包含一个与 Megatron-LM 运行时协同工作的中央规划器。
+规划器反复预取训练元数据、搜索流水线调度，
+并将优化后的调度部署到 GPU 集群。
+
+\subsection{训练仿真器}
+\label{section:multimodal-training-simulator}
+
+\sys{} 使用算子级分析建模进行性能预测。
+仿真器构建包含两类节点的有向无环图（DAG）：
+(1) 表示底层 GPU 操作（例如矩阵乘法和集合通信）的算子节点；
+(2) 对应数据缓冲区（例如模型参数）的张量节点。
+每个节点被分配到特定设备（GPU、CPU 或 NVLink），并通过依赖边相连。
+
+在延迟估计中，每个算子节点由以下量刻画：
+浮点运算次数 $N_\mathrm{fop}$、
+以字节计的内存访问量 $N_\mathrm{mem}$，
+以及以字节计的网络传输量 $N_\mathrm{net}$。
+给定设备能力（以 FLOPS 计的计算能力 $F$、
+以字节/秒计的内存带宽 $B_\mathrm{mem}$，
+以及以字节/秒计的网络吞吐量 $B_\mathrm{net}$），延迟按下式计算：
+$
+\max\{
+    \alpha_\mathrm{fop}N_\mathrm{fop}/F,
+    \alpha_\mathrm{mem}N_\mathrm{mem}/B_\mathrm{mem},
+    \alpha_\mathrm{net}N_\mathrm{net}/B_\mathrm{net}
+\}
+$，
+其中 $\alpha_\mathrm{fop}$、$\alpha_\mathrm{mem}$ 和 $\alpha_\mathrm{net}$ 是效率缩放因子。
+用户也可以使用自定义估计规则覆盖该成本模型。
+
+仿真器按拓扑顺序填充算子时间戳，
+随后通过检查相关算子节点确定张量生命周期。
+利用这些生命周期，可以构建内存消耗时间线，
+从而估计各设备的峰值内存使用量。
+
+\subsection{并行调度搜索}
+
+\sys{} 在 CPU 核心上执行训练仿真器和搜索算法。
+它首先使用预取的元数据，对各个微批次计算图进行仿真，以获取流水线阶段延迟。
+调度搜索期间，多个工作进程并行探索调度空间，并共享全局 MCTS 搜索统计信息。
+每轮搜索结束后，这些工作进程通过互斥锁保护的操作，以原子方式更新全局 MCTS 统计信息。
+由于工作进程每次同步之间会执行多次回放，从而摊薄同步开销，因此竞争始终很小。
+为避免干扰正常训练进程，\sys{} 将搜索工作进程数量限制为可用 CPU 核心的至多 50\%
+（例如一台配有 8 块 H800 GPU 的机器上使用 64 个核心）。
+
+\subsection{执行计划部署}
+
+将仿真的流水线调度部署到 GPU 集群，需要把它们编译为指定计算和通信模式的物理执行计划。
+
+\heading{调度编译}
+\sys{} 沿用 DynaPipe~\cite{dynapipe-eurosys24}，定义构成流水线执行计划的动作序列：
+\begin{itemize}
+    \item 流水线阶段被转换为 \texttt{fw\_stage}/\texttt{bw\_stage} 动作，并采用\S\ref{section:memory-optimization}给出的优化策略。
+    \item 点到点（P2P）通信使用与计算重叠的异步内核（\texttt{isend}、\texttt{irecv}）。
+    \item 根据仿真时间线插入同步动作（\texttt{wait\_isend}、\newline\texttt{wait\_irecv}）。
+\end{itemize}
+
+\heading{运行时修改}
+我们扩展了 Megatron-LM 的 \texttt{schedules} 模块以支持动态计划。
+每个流水线工作进程通过 RPC 从中央规划器接收一个动作列表，
+并按顺序执行其中的动作。
+连续的 P2P 内核会被组合成批处理操作，以提高效率。

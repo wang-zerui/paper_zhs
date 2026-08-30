@@ -15,6 +15,7 @@
 * [ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents](papers/computerrl.md)
 * [CONCUR](papers/concur.md)
 * [Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents](papers/darwin-godel-machine.md)
+* [DIP: Efficient Large Multimodal Model Training with Dynamic Interleaved Pipeline](papers/dip.md)
 * [DualPath](papers/dualpath.md)
 * [EAGLE-3](papers/eagle-3.md)
 * [EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty](papers/eagle-feature-uncertainty.md)

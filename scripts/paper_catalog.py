@@ -122,6 +122,7 @@ TITLE_OVERRIDES = {
     "DualPath": "DualPath",
     "dualpath": "DualPath",
     "darwin-godel-machine": "Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents",
+    "dip": "DIP: Efficient Large Multimodal Model Training with Dynamic Interleaved Pipeline",
     "KVPR": "KVPR",
     "kvpr": "KVPR",
     "LLM-viewer": "LLM Viewer",

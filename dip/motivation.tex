@@ -1,0 +1,104 @@
+\subsection{Sources of Dynamic Imbalance}
+\label{section:dynamic-imbalance}
+
+Due to the heterogeneity of multimodal model architectures and the diversity of training data,
+the training process for LMMs differs significantly from that for unimodal models in
+\emph{pipeline stage imbalance} and \emph{training data dynamicity}.
+
+\heading{Pipeline Stage Imbalance}
+Optimal pipeline efficiency requires balanced stage partitioning to minimize bubbles, yet inherent computational disparities between modality modules introduce fundamental challenges.
+Consider a 37B VLM comprising a 5B ViT encoder (64 layers) and 32B language model (64 layers) on H800 GPUs,
+processing a batch with 8 images and 8192 text tokens.
+Each ViT layer processes the images in 6.75ms (forward+backward), while each LM layer requires 10.5ms for the tokens.
+The optimal partitioning scheme produced by exhaustive search across 16 pipeline stages yields stage latencies between 63ms and 73.5ms (\ie 16.7\% variation).
+With 64 microbatches and Megatron-LM's 1F1B pipeline schedule, this imbalance introduces 22.8\% additional pipeline bubbles, demonstrating the inherent difficulty in achieving perfectly balanced partitioning.
+
+\heading{Training Data Dynamicity}
+This challenge is further compounded by the dynamic heterogeneity in multimodal training data,
+where the variability across batches from different modalities induces fluctuating computational demands.
+Multimodal data originates from diverse sources including:
+image-description pairs~\cite{laion5b-nips22,coyo-700m},
+video with captions~\cite{share-gpt4-video-arxiv24,internvid-arxiv23,mmtrail-arxiv24,msr-vtt-cvpr16}, and
+interleaved image-text content~\cite{obelics-arxiv23,mmc4-arxiv23}.
+Data samples typically comprise images/videos with descriptive texts, exhibiting significant \emph{cross-dataset variation} in modality data ratios (\figref{figure:data-distribution}a--b).
+For instance,
+the LAION-2B~\cite{laion5b-nips22} dataset consists of images paired with short captions, with a small text-image ratio (16.4 tokens/image), while the OBELICS~\cite{obelics-arxiv23} dataset contains full-length multimodal documents
+with highly variable ratios (0.4 to 3115 tokens/image).
+
+This variation further induces \emph{cross-batch imbalance} during data packing.
+Typically, data samples are packed into larger batches to enhance computation efficiency~\cite{dynapipe-eurosys24,wlb-llm-osdi25}.
+In vision-language models (VLMs),
+both images and texts are tokenized (\eg one image into 169 patch tokens)
+and then greedily packed up to the model's context length (\eg 8192 tokens) to form a microbatch.
+Similarly, for text-to-video (T2V) diffusion models,
+video clips with similar durations and aspect ratios are often grouped for batch processing~\cite{moviegen-arxiv24,step-t2v-arxiv25}.
+However, data packing fails to ensure balanced workloads across multiple modalities
+due to their divergent distributions (\figref{figure:data-distribution}c--d).
+For instance, consider two microbatches with same 8192-token capacity:
+the first contains 10 images (\ie 1690 patch tokens) accompanied by 6502 text tokens,
+whereas the second consists of only a single image and 8023 text tokens.
+These two microbatches impose disparate computational demands:
+the FLOPs required for the image pipeline stages in the first microbatch are $10\times$ higher than those in the second.
+This discrepancy leads to imbalanced pipeline stages across microbatches (\figref{figure:imbalanced-pipeline}).
+Furthermore, for a T2V model comprising a 7B LM and a 5B DiT,
+the most computationally intensive batch (data batch index 100 in \figref{figure:data-distribution}d) imposes a $4.15\times$ greater computational load than the smallest batch (data batch index 1),
+even after data packing.
+
+% This variation further induces \emph{cross-batch imbalance} during data packing.
+% Data samples can be packed into larger batches for better computation efficiency~\cite{dynapipe-eurosys24,wlb-llm-osdi25}.
+% For vision-language models (VLMs), both images and texts are first encoded into tokens (\eg one image into 169 patch tokens).
+% After that, data samples are greedily packed up to the context length of the model (\eg 8192 tokens) to form one microbatch.
+% For text-to-video (T2V) diffusion models, video clips with similar durations and aspect ratios can be grouped together and processed in one batch~\cite{moviegen-arxiv24,step-t2v-arxiv25}.
+% However, data packing fails to achieve balanced workloads when dealing with multiple modalities due to their divergent distributions (\figref{figure:data-distribution}c--d).
+% For example, suppose there are two microbatches both with 8192 tokens, the first microbatch contains 10 images (\ie 1690 patch tokens) and 6502 text tokens,
+% while the second microbatch may only contain text tokens.
+% These two microbatches will exhibit very distinct computation requirements and lead to imbalanced pipeline stages,
+% For a T2V model with 7B LM and 5B DiT, the largest data sample (data batch index 100 in \figref{figure:data-distribution}d) still incurs $4.15\times$ greater computational load than the smallest (data batch index 1) after data packing.
+
+\subsection{Negative Impact on Pipeline Parallelism}
+\label{section:impact-on-pipeline-parallelism}
+
+The combination of pipeline stage imbalance and training data dynamicity leads to the \emph{dynamic imbalance} problem.
+As depicted in \figref{figure:imbalanced-pipeline}, this issue introduces significant pipeline bubbles in Megatron-LM's 1F1B pipeline schedule, and severely degrades training throughput.
+
+To quantify this impact, we compare two model setups with the same number of parameters:
+a unimodal LM (7B) and
+a vision-language model (ViT 2B + LM 5B).
+Under identical 1F1B pipeline configurations
+(using balanced parameter partitioning and fixed computational budgets),
+the VLM incurs a 12.5\% overhead on static data due to stage imbalance.
+With real-world dynamic data, this overhead escalates to 40.3\%,
+as shown in \tableref{table:imbalanced-pipeline}.
+
+\begin{table}[t]
+    \caption{
+        Training performance of 7B models on 8 GPUs (TP=2, PP=4).
+        ``PFLOPs'' denotes the floating-point operations per iteration in petaFLOPs,
+        which is controlled to a fixed value for fair comparison.
+        ``MFU'' refers to model FLOPs utilization.
+    }
+    \label{table:imbalanced-pipeline}
+    \small
+    \begin{tabular}{>{\raggedright}p{4cm}ccc}
+    \toprule
+    \textbf{Model Setup} & \textbf{Time (s)} & \textbf{PFLOPs} & \textbf{MFU} \\
+    \midrule
+    LM 7B & 4.068 & 12.8 & 0.400 \\
+    ViT 2B + LM 5B (static data) & 4.567 & 12.7 & 0.351 \\
+    ViT 2B + LM 5B (dynamic data) & 6.789 & 12.8 & 0.239 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\heading{Impact on Pipeline Design}
+Such performance degradation renders the fixed pipeline schedules used in unimodal LLMs impractical.
+Since each iteration processes a distinct data batch, the optimal pipeline schedule changes dynamically.
+
+Precomputation of pipeline schedules is also infeasible. The number of possible input combinations grows exponentially in two dimensions: the number of modalities and the number of microbatches. In our experimental setup, each microbatch can contain up to 48 images (\S\ref{section:datasets}), leading to $49^{64} \approx 1.5\mathrm{e}108$ distinct input configurations for 64 microbatches. This makes it impossible to exhaustively precompute optimal schedules for all scenarios. Although precomputing over a subset of inputs could reduce overhead, selecting a representative subset from this enormous space is highly challenging, and fails to generalize to unseen inputs.
+% Moreover, any changes to the dataset (\eg new data or reshuffling) or parallelism configurations (\eg TP/PP sizes) also invalidate precomputed schedules, necessitating costly regeneration.
+
+Several prior works have addressed the issue of dynamicity in text sequence lengths,
+by improving data packing strategies to reduce discrepancies between microbatches~\cite{wlb-llm-osdi25},
+or adaptively reordering microbatches to minimize bubbles caused by irregular inputs~\cite{dynapipe-eurosys24,flexpipe-atc25}.
+However, these methods are inadequate for solving dynamic imbalance in multimodal training, as they overlook the heterogeneity among modality modules.
+Unlike in unimodal LLMs, where sequence length variations affect all layers uniformly, multimodal microbatches affect modality-specific modules differently. For example, increasing the number of images substantially raises computational demands on image encoders, while barely affecting the language model backbone. This inter-modality imbalance makes data-centric approaches designed for unimodal models ineffective for LMM training.

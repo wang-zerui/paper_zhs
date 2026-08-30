@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **62**
+- Papers: **63**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -32,6 +32,7 @@
 - [ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents](./papers/computerrl.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fcomputerrl%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/computerrl/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/computerrl/main_zh.pdf)
 - [CONCUR](./papers/concur.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fconcur%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/concur/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/concur/main_zh.pdf)
 - [Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents](./papers/darwin-godel-machine.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fdarwin-godel-machine%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/darwin-godel-machine/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/darwin-godel-machine/main_zh.pdf)
+- [DIP: Efficient Large Multimodal Model Training with Dynamic Interleaved Pipeline](./papers/dip.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fdip%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/dip/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/dip/main_zh.pdf)
 - [DualPath](./papers/dualpath.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fdualpath%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/dualpath/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/dualpath/main_zh.pdf)
 - [EAGLE-3](./papers/eagle-3.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Feagle-3%2Fpaper_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/eagle-3/paper_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/eagle-3/paper_zh.pdf)
 - [EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty](./papers/eagle-feature-uncertainty.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Feagle-feature-uncertainty%2Fexample_paper_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/eagle-feature-uncertainty/example_paper_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/eagle-feature-uncertainty/example_paper_zh.pdf)

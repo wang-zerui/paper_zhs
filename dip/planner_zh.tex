@@ -1,0 +1,190 @@
+\section{模态感知划分器}
+\label{section:modality-aware-partitioning}
+
+在\S\ref{section:design-decisions}所述原则的基础上，
+我们提出\emph{模态感知划分}。
+该方法在训练开始前将每个模态模块划分为多个模型块，
+并在训练期间将微批次动态拆分为特定于模态的子微批次。
+具体而言，对于第 $i$ 个模态，{\sys} 确定两个参数：
+子微批次大小 $B_i$ 和流水线段数量 $K_i$。
+因此，第 $i$ 个模态模块被划分为 $P \cdot K_i$ 个模型块，
+并分布在 $P$ 个流水线秩上。
+
+\heading{确定子微批次大小}
+\sys{} 通过系统化性能分析，为每个模态模块独立选择可行的最小子微批次大小 $B_i$。
+较小的子微批次虽然能实现粒度更细的流水线划分和更高的调度效率，
+但过小的批次也可能导致 GPU 利用不足（\figref{figure:pipeline-scheduling}）。
+为权衡二者，\sys{} 测量每个模态模块在不同子微批次大小下的计算延迟。
+最优 $B_i$ 被确定为满足以下条件的最小子微批次大小：
+其 GPU 计算效率至少达到全部测试配置中峰值效率的 95\%。
+
+\heading{划分模型块}
+确定子微批次大小后，\sys{} 对每个模态模块进行划分，以实现全局延迟均衡。
+给定 $n$ 个模态模块，其计算延迟按 $T_1 \leq T_2 \leq \cdots \leq T_n$ 排序
+（均在各自的 $B_i$ 大小下测得），
+\sys{} 按这些延迟的比例分配流水线段数量。
+具体而言，最快的模块（$T_1$）被配置为单个流水线段，
+第 $i$ 个模块则被划分为 $K_i = \lfloor T_i / T_1 \rfloor$ 个流水线段。
+对于包含 $L_i$ 层的模态模块，
+\sys{} 将其各层分布到 $P \cdot K_i$ 个模型块中，
+每个模型块包含 $L_i/(P \cdot K_i)$ 个连续层。
+
+\heading{构造子微批次}
+训练执行期间，\sys{} 根据传入微批次的内容，
+为每个模态模块动态构造子微批次。
+对于分配给第 $i$ 个模态模块、包含 $N_i$ 个实例的微批次，
+\sys{} 将其均匀拆分为 $M_i = \lceil N_i/B_i \rceil$ 个子微批次。
+对于该模态模块，此过程总计生成 $2 M_i \cdot K_i$ 个流水线段
+（同时计入前向和反向计算）。
+
+\section{流水线调度搜索器}
+\label{section:pipeline-schedule-searcher}
+
+\subsection{基于 MCTS 的流水线段重排}
+\label{section:segment-reordering}
+
+\sys{} 通过为流水线段分配调度优先级，确定它们之间的相对顺序。
+这些优先级随后用于流水线阶段交错步骤（\S\ref{section:stage-interleaving}）。
+为高效探索可能的优先级分配空间，\sys{} 采用蒙特卡洛树搜索（MCTS）~\cite{mcts}。
+
+\heading{搜索树构建}
+给定 $n$ 个流水线段，MCTS 通过依次为每个位置 $i$（从 $1$ 到 $n$）选择流水线段，构造一个长度为 $n$ 的序列。
+位于第 $i$ 个位置的流水线段获得优先级 $n-i$，从而确保越早选中的段具有越高优先级。
+
+该算法构建一棵搜索树，其中深度 $d$ 处的每个节点对应序列中的第 $d$ 个元素。
+因此，任何终止于深度 $d$ 节点的根到节点路径，都表示前 $d$ 个位置的一个部分序列。
+每个节点 $v$ 保存其在 MCTS 树中的后代曾达到的最高性能分数 $s_v$。
+
+\heading{搜索循环}
+MCTS 反复执行以下四个阶段，直至收敛：
+
+\begin{enumerate}
+    \item \textbf{节点选择：}MCTS 从根节点出发，选择使置信上界（UCB）分数 $s_v^\alpha + \beta\sqrt{(\log{N_x}) / N_v}$ 最大的子节点并向下遍历。
+    其中，$x$ 表示当前节点，$v$ 表示候选子节点，$N_x$ 和 $N_v$ 分别为访问次数，$\alpha$、$\beta$ 为超参数。
+    该过程持续到到达叶节点 $u$。
+
+    \item \textbf{树扩展：}向搜索树加入一个表示 $u$ 之后下一个元素的新节点，
+    随后将 $u$ 设为新建节点。
+
+    \item \textbf{随机回放：}执行多次回放（例如 10 次试验），随机把流水线段分配到 $u$ 之后的剩余位置，从而生成完整序列。
+    每个序列随后经过流水线阶段交错（\S\ref{section:stage-interleaving}）和逐层内存优化（\S\ref{section:memory-optimization}），以计算性能分数（即端到端迭代时间）。
+
+    \item \textbf{分数反向传播：}所有试验中的最佳回放分数从 $u$ 向上传播，以更新各祖先节点的性能分数。
+\end{enumerate}
+
+该循环持续执行，直到预设时间预算耗尽或整个搜索空间均被探索。
+
+\heading{优化}
+我们观察到，同一微批次中处理同一种模态的流水线段具有相同的流水线结构和相近的阶段延迟。
+因此，它们之间的相对顺序不会影响端到端性能。
+利用这一洞察，\sys{} 可以为此类流水线段分配相同优先级并强制采用固定顺序，从而显著缩小搜索空间。
+
+\subsection{贪心流水线阶段交错}
+\label{section:stage-interleaving}
+
+为各流水线段分配优先级后，
+\sys{} 使用双队列算法自适应地交错前向和反向流水线阶段。
+当可调度的前向和反向阶段同时存在时，
+\sys{} 模仿 Megatron-LM 节省内存的“一次前向、一次反向”（1F1B）模式~\cite{megatron-lm-arxiv20,dynapipe-eurosys24}。
+当任一类型不可用时，
+则使用贪心策略填充流水线气泡，构造紧凑调度。
+
+\heading{初始化}
+\sys{} 首先通过训练仿真器获取所有阶段的延迟和内存消耗，
+并采用\S\ref{section:memory-optimization}确定的最节省内存方案。
+这一步为随后的逐层内存优化确保足够的优化空间。
+
+对于每个流水线秩，\sys{} 维护：
+(1) 最近已调度阶段的结束时间（$t_\mathrm{last}$，初始为零）；
+(2) 两个按优先级降序存放前向和反向阶段的优先队列（$Q_\mathrm{fw}$、$Q_\mathrm{bw}$）；以及
+(3) $Q_\mathrm{fw}$ 和 $Q_\mathrm{bw}$ 中各阶段的最小开始时间（$t_\mathrm{min}$）。
+每个阶段都维护一个可调度的最小开始时间 $t_\mathrm{start}$：无前驱阶段时初始化为零，否则初始化为 $+\infty$。
+
+\heading{迭代式调度}
+\sys{} 迭代选择一个流水线秩，并从该秩调度一个阶段：
+\begin{enumerate}
+    \item 选择 $t_\mathrm{min}$ 最小的流水线秩。
+    \item 将 $Q_\mathrm{fw}$ 中阶段的最小开始时间 $t_\mathrm{fw}$ 和 $Q_\mathrm{bw}$ 中阶段的最小开始时间 $t_\mathrm{bw}$ 与 $t_\mathrm{last}$ 比较。
+    \item 若 $t_\mathrm{fw} < t_\mathrm{last}$ 且 $t_\mathrm{bw} < t_\mathrm{last}$，
+          则根据最近已调度阶段的计算类型交替调度前向或反向阶段，
+          以模拟 1F1B 模式。
+    \item 否则，选择 $t_\mathrm{start}$ 最小的阶段，以尽量减小 $t_\mathrm{min}$ 与该阶段开始时间之间的流水线气泡。
+\end{enumerate}
+
+选中的阶段从队列中出队，并在该流水线秩上完成调度。
+随后更新 $t_\mathrm{last}$、$t_\mathrm{min}$，以及所有后继阶段的 $t_\mathrm{start}$。
+
+\heading{内存约束}
+在整个调度过程中，\sys{} 实时跟踪各流水线秩的内存消耗。
+当某个秩超过内存容量时，其前向队列会暂时停用，以防止内存溢出。
+
+\subsection{逐层内存优化}
+\label{section:memory-optimization}
+
+\sys{} 为所有模型层自适应选择适当的内存优化策略（例如激活检查点）。
+由于阶段交错方案已由双队列算法（\S\ref{section:stage-interleaving}）预先确定，
+该阶段可独立优化每个流水线秩的端到端延迟。
+
+\heading{离线候选生成}
+训练开始前，\sys{} 为每个模型层枚举所有可能的优化策略，
+并使用训练仿真器估计其执行时间和内存消耗。
+系统随后将每个前向阶段与其对应的反向阶段组合成一个\emph{阶段对}。
+对于每个阶段对，\sys{} 通过以下三步，从逐层策略的组合空间中选出至多 $S$ 个候选策略（例如 $S=10$）：
+(1) 找出最快候选；
+(2) 找出最节省内存的候选；
+(3) 将这两个极值之间的内存范围均匀划分为 $S-2$ 个桶，
+再通过多选背包算法~\cite{multi-choice-knapsack}选出每个桶中时间效率最高的候选。
+
+\heading{ILP 表述}
+对于每个流水线秩，\sys{} 使用 ILP 求解器选择最优候选。
+给定 $n$ 个阶段对、每个阶段对有 $S$ 个候选策略，令 $s_i$、$t_i$ 表示第 $i$ 个阶段对的开始和结束时间戳，
+$\mathrm{lat}_{i,j}$、$\mathrm{mem}_{i,j}$ 分别表示第 $i$ 个阶段对的第 $j$ 个候选的阶段延迟和内存消耗。
+其表述使用：
+
+\begin{itemize}
+    \item \textbf{变量：}$o_{i,j} \in \{0,1\}$，表示是否为第 $i$ 个阶段对选择第 $j$ 个候选。
+    \item \textbf{目标：}最小化总延迟 $\sum_i^n \sum_j^S o_{i,j} \cdot \mathrm{lat}_{i,j}$。
+    \item \textbf{选择约束：}每个阶段对恰好选择一种策略，即 $\sum_j^S o_{i,j}=1$（$\forall 1 \leq i \leq n$）。
+    \item \textbf{内存约束：}在任意时刻 $s_k$，均满足内存上限 $M$，
+    即 $\sum_i^n [s_i \leq s_k \leq t_i] \sum_j^S o_{i,j} \cdot \mathrm{mem}_{i,j} \leq M$（$\forall 1 \leq k \leq n$），
+    其中 $[\cdot]$ 为 Iverson 括号~\cite{iverson-bracket}。
+\end{itemize}
+
+\heading{优化}
+与整体式端到端 ILP 表述相比，问题规模虽然已经显著缩小，
+但求解一个 ILP 实例仍可能需要数秒。
+我们引入两项技术实现高效求解（单个 CPU 核心上每个实例 $<$10 ms）：
+(1) 使用贪心初始解对 ILP 求解器进行热启动；
+(2) 允许较小的最优性间隙（例如 $\leq 5\%$）以提前终止，
+因为弥合最后 5\% 的差距收益递减，却需要高昂的计算成本。
+
+\subsection{时间复杂度分析}
+
+本节概述 {\sys} 训练规划器的算法结构，
+并分析其时间复杂度。
+规划器以迭代搜索循环运行，直至预设时间预算耗尽。
+每次迭代包含三个阶段：
+流水线段重排（\S\ref{section:segment-reordering}）、
+流水线阶段交错（\S\ref{section:stage-interleaving}），以及
+逐层内存优化（\S\ref{section:memory-optimization}）。
+为分析单次搜索迭代的复杂度，令
+$p$ 表示流水线秩数量，
+$n$ 表示子微批次数量，
+$S$ 表示候选节省内存策略的数量。
+此外，令 $\mathrm{ApproxILP}(m,k)$ 表示近似 ILP 求解器在
+具有 $\mathrm O(m)$ 个变量和 $\mathrm O(k)$ 个约束的实例上的时间复杂度。
+
+首先，流水线段重排以 $\mathrm O(n)$ 时间生成所有子微批次的顺序。
+其次，流水线阶段交错使用的贪心调度算法，其运行时间与流水线阶段总数成正比，即 $\mathrm O(p \cdot n)$。
+最后，逐层内存优化求解一组小型近似 ILP 实例，为每个流水线秩选择最优配置。
+每个 ILP 实例需要创建 $n \cdot S$ 个指示变量（$o_{i,j}$），
+以及 $n$ 个选择约束和 $n$ 个内存约束。
+因此，逐层内存优化的时间复杂度为 $\mathrm O(p \cdot \mathrm{ApproxILP}(n \cdot S,n))$。
+综合这些步骤，单次搜索迭代的总体时间复杂度为 $\mathrm O(p \cdot (n + \mathrm{ApproxILP}(n \cdot S,n)))$。
+
+相比之下，完整 ILP 基线方法由于涉及规模巨大的变量和约束，本质上效率低下。
+第一，它必须全局求解整条流水线，而不是按流水线秩分解问题。
+第二，为防止每个流水线秩内的阶段执行重叠，它需要 $\mathrm O(n^2)$ 个顺序约束；{\sys} 则通过高效的显式调度避免了这一开销。
+此外，在内存优化阶段，假设每个流水线阶段包含 $L$ 层、每层有 $c$ 个候选策略，则每个阶段的搜索空间会扩张至 $c^L$ 个候选。
+因此，基线 ILP 方法的复杂度上升为 $\mathrm O(\mathrm{ApproxILP}(p \cdot n \cdot c^L,p \cdot n^2))$。
+我们在\S\ref{section:planner-evaluation}和\figref{figure:search-scalability}中对该基线与 {\sys} 训练规划器的性能进行了实证比较。

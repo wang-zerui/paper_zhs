@@ -1,0 +1,112 @@
+\begin{table}[!t]
+    \caption{
+        Model specifications used in the evaluation.
+    }
+    \label{table:model-params}
+
+    \footnotesize
+    \begin{tabular}{lccccc}
+    \toprule
+    \textbf{Name} & \textbf{\makecell{\# of\\Layers}} & \textbf{\makecell{Embed\\Dim}} & \textbf{\makecell{FFN\\Hidden\\Dim}} & \textbf{\makecell{\# of\\ Attn.\\Heads}} & \textbf{\makecell{\# of\\ Attn.\\Groups}} \\
+    \midrule
+    ViT 5B~\cite{vit22b-arxiv23} & 63 & 1792 & 15360 & 16 & 16 \\
+    ViT 22B~\cite{vit22b-arxiv23} & 48 & 6144 & 24576 & 48 & 48 \\
+    \midrule
+    Llama3 8B~\cite{llama3-arxiv24} & 32 & 4096 & 14336 & 32 & 8 \\
+    Qwen2 32B~\cite{qwen2-5-arxiv25} & 64 & 5120 & 27648 & 40 & 8 \\
+    Qwen2 72B~\cite{qwen2-5-arxiv25} & 80 & 8192 & 29568 & 64 & 8 \\
+    \midrule
+    DiT 5B~\cite{moviegen-arxiv24} & 28 & 3584 & 10240 & 28 & 28 \\
+    DiT 30B~\cite{moviegen-arxiv24} & 48 & 6144 & 24576 & 48 & 48 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{table}[!t]
+    \caption{
+        Model combinations used in the evaluation.
+    }
+    \label{table:model-setup}
+
+    \small
+    \begin{tabular}{llccc}
+    \toprule
+    \textbf{Name} & \textbf{Model Setup} & \textbf{TP} & \textbf{PP} & \textbf{\#GPU} \\
+    \midrule
+    VLM-S & ViT 5B + Llama3 8B & 4 & 4 & 16 \\
+    VLM-M & ViT 5B + Qwen2 32B & 8 & 4 & 32 \\
+    VLM-L & ViT 22B + Qwen2 72B & 8 & 8 & 64 \\
+    \midrule
+    T2V-S & Llama3 8B + DiT 5B & 4 & 4 & 16 \\
+    T2V-L & Qwen2 32B + DiT 30B & 8 & 8 & 64 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{Implementation}
+\label{section:implementation}
+
+\sys{} is implemented as an extension to Megatron-LM~\cite{megatron-lm-arxiv20},
+featuring a central planner that coordinates with Megatron-LM's runtime.
+The planner iteratively prefetches training metadata, performs pipeline schedule searches,
+and deploys the optimized schedules to GPU clusters.
+
+\subsection{Training Simulator}
+\label{section:multimodal-training-simulator}
+
+\sys{} employs operator-level analytical modeling for performance prediction.
+The simulator constructs directed acyclic graphs (DAGs) with two node types:
+(1) operator nodes representing low-level GPU operations (\eg matrix multiplication, collective communication), and
+(2) tensor nodes corresponding to data buffers (\eg model parameters).
+Each node is assigned to a specific device (GPU/CPU/NVLink) and connected with dependency edges.
+
+For latency estimation, each operator node is characterized by:
+the number of floating-point operations $N_\mathrm{fop}$,
+memory accesses $N_\mathrm{mem}$ in bytes,
+and network transfers $N_\mathrm{net}$ in bytes.
+Given device capabilities (computational capacity $F$ in FLOPS,
+memory bandwidth $B_\mathrm{mem}$ in bytes/s,
+and network throughput $B_\mathrm{net}$ in bytes/s), the latency is computed as
+$
+\max\{
+    \alpha_\mathrm{fop}N_\mathrm{fop}/F,
+    \alpha_\mathrm{mem}N_\mathrm{mem}/B_\mathrm{mem},
+    \alpha_\mathrm{net}N_\mathrm{net}/B_\mathrm{net}
+\}
+$,
+where $\alpha_\mathrm{fop}$, $\alpha_\mathrm{mem}$, and $\alpha_\mathrm{net}$ are efficiency scaling factors.
+Users may override this cost model with custom estimation rules.
+
+The simulator populates operator timestamps in topological order,
+then determines tensor lifetimes by examining related operator nodes.
+These lifetimes enable construction of memory consumption timelines
+for peak memory usage estimation across devices.
+
+\subsection{Parallel Schedule Search}
+
+\sys{} executes the training simulator and search algorithms on CPU cores.
+It begins by simulating individual microbatch computation graphs using prefetched metadata to obtain pipeline stage latencies.
+During schedule search, multiple workers explore the schedule space in parallel while sharing global MCTS search statistics.
+After each search round, these workers atomically update the global MCTS statistics via mutex-protected operations.
+Contention remains minimal because workers perform multiple rollouts between synchronizations, thereby amortizing the overhead.
+To avoid interference with normal training processes, \sys{} constrains the search worker count to at most 50\% of available CPU cores
+(\eg 64 cores on a machine with 8 H800 GPUs).
+
+\subsection{Execution Plan Deployment}
+
+Deploying simulated pipeline schedules to GPU clusters requires compiling them into physical execution plans
+that specify computation and communication patterns.
+
+\heading{Schedule Compilation}
+\sys{} defines action sequences constituting pipeline execution plans, following DynaPipe~\cite{dynapipe-eurosys24}:
+\begin{itemize}
+    \item Pipeline stages translate to \texttt{fw\_stage}/\texttt{bw\_stage} actions with optimization strategies from \S\ref{section:memory-optimization}.
+    \item Point-to-point (P2P) communications use asynchronous kernels (\texttt{isend}, \texttt{irecv}) overlapped with computations.
+    \item Synchronization actions (\texttt{wait\_isend}, \texttt{wait\_irecv}) are inserted based on simulated timelines.
+\end{itemize}
+
+\heading{Runtime Modifications}
+We extend Megatron-LM's \texttt{schedules} module to support dynamic plans.
+Each pipeline worker receives an action list via RPC from the central planner
+and executes it sequentially.
+Consecutive P2P kernels are grouped into a batched operation to enhance efficiency.

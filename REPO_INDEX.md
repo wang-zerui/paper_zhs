@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：71
-- 含 `00README.json`：56
-- 有本地候选 PDF：69
-- 含中文 PDF：61
-- 带源码包：47
-- 含 tracked files 的目录：68
+- 论文目录：72
+- 含 `00README.json`：57
+- 有本地候选 PDF：70
+- 含中文 PDF：62
+- 带源码包：48
+- 含 tracked files 的目录：69
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -41,6 +41,7 @@
 | context-folding | Context Folding | ✅ | paper.tex | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar | 34 |
 | darwin-godel-machine | Darwin Godel Machine: Open-Ended Evolution of Self-Improving Agents | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 48 |
 | Deep-Learning-Workload-Scheduling-in-GPU-Datacenters-Taxonomy-Challenges-and-Vision | Deep Learning Workload Scheduling in GPU Datacenters Taxonomy Challenges and Vision | — | — | — | — | — | — | 15 |
+| dip | DIP: Efficient Large Multimodal Model Training with Dynamic Interleaved Pipeline | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 49 |
 | dualpath | DualPath | ✅ | paper.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
 | eagle-3 | EAGLE-3 | — | — | paper_zh.pdf | paper_zh.pdf | ✅ | source.tar.gz | 17 |
 | eagle-feature-uncertainty | EAGLE Speculative Sampling Requires Rethinking Feature Uncertainty | — | — | example_paper_zh.pdf | example_paper_zh.pdf | ✅ | source.tar | 33 |

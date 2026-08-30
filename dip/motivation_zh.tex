@@ -1,0 +1,90 @@
+\subsection{动态不均衡的来源}
+\label{section:dynamic-imbalance}
+
+由于多模态模型架构的异构性和训练数据的多样性，
+LMM 的训练过程与单模态模型显著不同，主要体现在
+\emph{流水线阶段不均衡}和\emph{训练数据动态性}两个方面。
+
+\heading{流水线阶段不均衡}
+最优流水线效率要求均衡地划分阶段以尽量减少气泡，但模态模块之间固有的计算差异带来了根本性挑战。
+考虑一个在 H800 GPU 上运行的 37B VLM，它由一个 5B ViT 编码器（64 层）和一个 32B 语言模型（64 层）组成，
+处理的批次包含 8 幅图像和 8192 个文本 token。
+每个 ViT 层处理图像需要 6.75ms（前向加反向），而每个 LM 层处理这些 token 需要 10.5ms。
+在 16 个流水线阶段上穷举搜索得到的最优划分方案，其阶段延迟介于 63ms 和 73.5ms 之间（即相差 16.7\%）。
+采用 64 个微批次和 Megatron-LM 的 1F1B 流水线调度时，这种不均衡会引入额外 22.8\% 的流水线气泡，说明实现完全均衡划分存在固有困难。
+
+\heading{训练数据动态性}
+多模态训练数据的动态异构性使这一挑战进一步加剧：
+不同模态的批次差异会带来波动的计算需求。
+多模态数据来自多种来源，包括：
+图像--描述对~\cite{laion5b-nips22,coyo-700m}、
+带字幕的视频~\cite{share-gpt4-video-arxiv24,internvid-arxiv23,mmtrail-arxiv24,msr-vtt-cvpr16}，以及
+图文交错内容~\cite{obelics-arxiv23,mmc4-arxiv23}。
+数据样本通常由图像或视频及其描述文本组成，不同数据集之间的模态数据比例存在显著的\emph{跨数据集差异}（\figref{figure:data-distribution}a--b）。
+例如，
+LAION-2B~\cite{laion5b-nips22} 数据集由图像和简短字幕配对构成，文本--图像比很小（16.4 token/图像）；而 OBELICS~\cite{obelics-arxiv23} 数据集包含完整的多模态文档，
+其比例变化范围极大（0.4 到 3115 token/图像）。
+
+在数据打包过程中，这种差异还会引起\emph{跨批次不均衡}。
+通常会将数据样本打包成更大的批次，以提高计算效率~\cite{dynapipe-eurosys24,wlb-llm-osdi25}。
+对于视觉语言模型（VLM），
+图像和文本都会被 token 化（例如一幅图像转为 169 个 patch token），
+随后以贪心方式打包至模型上下文长度上限（例如 8192 token），形成一个微批次。
+类似地，对于文本到视频（T2V）扩散模型，
+通常会把时长和宽高比相近的视频片段分组，以便进行批处理~\cite{moviegen-arxiv24,step-t2v-arxiv25}。
+然而，由于不同模态的分布存在差异，数据打包无法保证多个模态之间的工作负载均衡（\figref{figure:data-distribution}c--d）。
+例如，考虑两个容量同为 8192 token 的微批次：
+第一个包含 10 幅图像（即 1690 个 patch token）和 6502 个文本 token，
+而第二个仅包含一幅图像和 8023 个文本 token。
+这两个微批次带来的计算需求截然不同：
+第一个微批次中图像流水线阶段所需的 FLOPs 是第二个的 $10\times$。
+这种差异导致不同微批次的流水线阶段不均衡（\figref{figure:imbalanced-pipeline}）。
+此外，对于由 7B LM 和 5B DiT 组成的 T2V 模型，
+即使经过数据打包，计算最密集的批次（\figref{figure:data-distribution}d 中的数据批次 100）的计算负载仍是最小批次（数据批次 1）的 $4.15\times$。
+
+\subsection{对流水线并行的负面影响}
+\label{section:impact-on-pipeline-parallelism}
+
+流水线阶段不均衡和训练数据动态性共同导致了\emph{动态不均衡}问题。
+如\figref{figure:imbalanced-pipeline}所示，该问题在 Megatron-LM 的 1F1B 流水线调度中引入显著气泡，并严重降低训练吞吐量。
+
+为量化这一影响，我们比较了两个参数量相同的模型配置：
+单模态 LM（7B），以及
+视觉语言模型（ViT 2B + LM 5B）。
+在相同的 1F1B 流水线配置下
+（采用参数量均衡划分并固定计算预算），
+VLM 在静态数据上因阶段不均衡产生 12.5\% 的开销。
+使用真实世界动态数据时，该开销上升到 40.3\%，
+如\tableref{table:imbalanced-pipeline}所示。
+
+\begin{table}[t]
+    \caption{
+        7B 模型在 8 块 GPU（TP=2，PP=4）上的训练性能。
+        “PFLOPs”表示每次迭代的浮点运算量（单位为 petaFLOPs），
+        为公平比较，该数值被控制为固定值。
+        “MFU”表示模型 FLOPs 利用率。
+    }
+    \label{table:imbalanced-pipeline}
+    \small
+    \begin{tabular}{>{\raggedright}p{3.7cm}ccc}
+    \toprule
+    \textbf{模型配置} & \textbf{时间（s）} & \textbf{PFLOPs} & \textbf{MFU} \\
+    \midrule
+    LM 7B & 4.068 & 12.8 & 0.400 \\
+    ViT 2B + LM 5B（静态数据） & 4.567 & 12.7 & 0.351 \\
+    ViT 2B + LM 5B（动态数据） & 6.789 & 12.8 & 0.239 \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+\heading{对流水线设计的影响}
+这种性能下降使单模态 LLM 使用的固定流水线调度不再可行。
+由于每次迭代处理不同的数据批次，最优流水线调度会动态变化。
+
+预计算流水线调度同样不可行。可能的输入组合数量会沿两个维度指数增长：模态数量和微批次数量。在我们的实验设置中，每个微批次最多可包含 48 幅图像（\S\ref{section:datasets}）；对于 64 个微批次，这会形成 $49^{64} \approx 1.5\mathrm{e}108$ 种不同输入配置。因此，不可能为所有场景穷举预计算最优调度。尽管只为输入的某个子集进行预计算可以减少开销，但从如此庞大的空间中选择具有代表性的子集极具挑战，而且无法泛化到未见输入。
+
+若干先前工作通过改进数据打包策略来减少微批次之间的差异~\cite{wlb-llm-osdi25}，
+或通过自适应重排微批次来尽量减少不规则输入造成的气泡~\cite{dynapipe-eurosys24,flexpipe-atc25}，
+从而解决文本序列长度的动态性问题。
+然而，这些方法忽略了模态模块之间的异构性，因此不足以解决多模态训练中的动态不均衡。
+在单模态 LLM 中，序列长度变化会均匀影响所有层；与之不同，多模态微批次对特定模态模块的影响并不相同。例如，增加图像数量会显著提高图像编码器的计算需求，却几乎不影响语言模型骨干。这种模态间不均衡使面向单模态模型设计、以数据为中心的方法无法有效用于 LMM 训练。
