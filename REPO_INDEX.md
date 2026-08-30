@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：73
-- 含 `00README.json`：58
-- 有本地候选 PDF：71
-- 含中文 PDF：63
-- 带源码包：49
-- 含 tracked files 的目录：70
+- 论文目录：74
+- 含 `00README.json`：59
+- 有本地候选 PDF：72
+- 含中文 PDF：64
+- 带源码包：50
+- 含 tracked files 的目录：71
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -81,6 +81,7 @@
 | roll-art | RollArt | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 50 |
 | router_survey | Router Survey | — | — | main.pdf | — | — | — | 0 |
 | sage-sched | SageSched | ✅ | 0-main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
+| skvm | SkVM: Revisiting Language VM for Skills across Heterogenous LLMs and Harnesses | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 42 |
 | speculative-actions | Speculative Actions | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | 2510.04371-source.tar | 36 |
 | step-3-5 | Step3.5 Turbo 2026 | ✅ | step3p5_turbo_2026.tex | step3p5_turbo_2026.pdf | step3p5_turbo_2026.pdf | — | source.tar.gz | 21 |
 | step-gui | Step-GUI | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 57 |
