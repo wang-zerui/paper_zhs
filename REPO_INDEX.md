@@ -89,6 +89,7 @@
 | startupbench | StartupBench: Benchmarking General-Purpose Agents on Market-Validated End-to-End Workflows | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 47 |
 | step-3-5 | Step3.5 Turbo 2026 | ✅ | step3p5_turbo_2026.tex | step3p5_turbo_2026.pdf | step3p5_turbo_2026.pdf | — | source.tar.gz | 21 |
 | step-gui | Step-GUI | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 57 |
+| symbolic-learning-self-evolving-agents | Symbolic Learning Enables Self-Evolving Agents | ✅ | neurips_2024.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 35 |
 | tclone | Tclone | ✅ | main.tex | main_zh.pdf | — | ✅ | — | 0 |
 | td-pipe | TD-Pipe | ✅ | main.tex | — | — | — | — | 29 |
 | terminus-4b | Terminus 4B | ✅ | neurips_2025.tex | neurips_2025_zh.pdf | neurips_2025_zh.pdf | ✅ | source.tar | 38 |

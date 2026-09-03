@@ -1,0 +1,84 @@
+\section{Agent Symbolic Learning}
+
+\input{sections/algo}
+
+
+\subsection{Problem Formulation}
+
+We first formulate the \baby framework by drawing analogies to the components and procedures used in neural network training. We define the key components of the framework and explain the notations used throughout this section.
+
+The \baby framework, as illustrated in Figure \ref{fig:workflow}, is inspired by the connectionist learning procedures used for training neural nets~\citep{hinton1990connectionist}. We first introduce the notations for key concepts by making analogies to that in the connectionist learning framework:
+
+\begin{itemize}
+    
+    \item \textbf{Agent Pipeline} $\Pipeline$: Similar to the computational graph in neural nets that represents the structure of layers and their connections, \textit{agent pipeline} represents the sequence of nodes (or steps) through which the agent processes input data. A sequence of nodes $\{\Node_1, \Node_2, \ldots, \Node_n\}$ that process the input data through various stages. Note that in some agent frameworks, the agent pipeline is input-dependent since the nodes are dynamically assigned during execution, which is similar to the case of dynamic neural nets.
+
+    \item \textbf{Node} $\Node$: An individual step within an agent pipeline. The role of a node in an agent is similar to a layer in a neural network. A node $\Node_n$ receives \textbf{Node Input} $\NodeInput$, which are also in natural language form. In general, the input for a node consists of the output of the previous node and (optionally) inputs from the environment (e.g., human input). The node $\Node_n$ processes the input $\NodeInput$ with an LLM using both \textbf{prompts} $\NodePrompt$ and \textbf{tools} $\NodeTool$\footnote{$\NodeTool$ consists of the input and output for tool usage, and the implementation of the tool itself.}. The output $\NodeOutput$ is in natural language and passed to the next node.
+        
+        
+    \item \textbf{Trajectory} $\Trajectory$: Similar to the role of computational graph of neural nets, the trajectory stores all information during the forward pass, including the inputs, outputs, prompts, and tools usage for each node, and is responsible for gradient back-propagation.
+    
+    \item \textbf{Language Loss} $\LanguageLoss$: Language loss in the \baby framework is similar to the loss in neural networks since they both measure the discrepancy between the expected and actual outcomes. The main difference is that the language loss is in textual form and is produced by a natural language loss function implemented by a carefully designed prompt while conventional losses are float numbers computed with loss functions that are numerical equations. 
+    
+    \item \textbf{Language Gradient} $\LanguageGradient$: Similar to the role of gradients in connectionist learning, \textit{language gradients} are textual analyses and reflections used for updating each component in the agent with respect to the language loss.
+\end{itemize}
+
+
+
+% \begin{itemize}
+
+%     \item \textbf{Nodes vs. Layers}: Each \textit{node} 
+    
+%     \item \textbf{Prompts and Tools vs. Weights}: In neural networks, weights are parameters that are adjusted during training. In the \baby framework, \textit{prompts} and \textit{tools} are the symbolic components optimized during training.
+    
+
+%     \item \textbf{Language Loss Function vs. Loss Function}: The \textit{language loss} in the \baby 
+%  framework is similar to the loss in neural networks since they both measure the discrepancy between the expected and actual outcomes. The main difference is that the language loss is in textual form and is produced by a natural language loss function implemented by a carefully designed prompt while conventional losses are float numbers computed with loss functions that are numerical equations. 
+    
+%     \item \textbf{Language Gradients vs. Gradients}: Similar to the role of gradients in connectionist learning, \textit{language gradients} are textual analyses and reflections used for updating each component in the agent with respect to the language loss.
+% \end{itemize}
+
+\begin{figure}[tp]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figs/workflow.pdf}
+    \caption{Illustration of the \baby framework.}
+    \label{fig:workflow}
+    \vspace{-10pt}
+\end{figure}
+
+\subsection{Agent Symbolic Learning Procedure}
+
+After defining the key components, we can summarize the workflow of the \baby framework in Algorithm \ref{algo:main}. In this section, we describe each step in the \baby framework in detail.
+
+\paragraph{Forward Pass} 
+The forward pass is almost identical to standard agent execution. The main difference is that we store the input, prompts, tool usage, and the output to the trajectory, which is used for language gradient back-propagation. This is similar to deep learning frameworks such as PyTorch~\citep{paszke2019pytorch} and TensorFlow~\citep{abadi2016tensorflow} that store the intermediate outputs and activation in the computation graph of the neural network.
+
+\paragraph{Language Loss Computation}
+After the forward pass, we compute the language loss for a training example by feeding the trajectory into an LLM using a carefully designed prompt template $\mathcal{P}_{\text{loss}}$: 
+\begin{equation}
+    \LanguageLoss = \text{LLM}( \mathcal{P}_{\text{loss}}(\Trajectory))
+\end{equation}
+The key is the design for the prompt template, which is expected to \textit{holistically} evaluate how the agent performs with respect to the input, environment, and task requirements. To this end, we carefully design a prompt template for language loss computation consisting of the following components: task description, input, trajectory, few-shot demonstrations, principles, and output format control. Among them, task description, input, and trajectory are data-dependent while the few-shot demonstrations, principles, and output format control are fixed for all tasks and training examples. The language loss consists of both natural language comments and a numerical score (also generated via prompting). We can optionally feed the ground-truth label for the input when generating the language loss. We call this scenario \textit{supervised agent learning}. It can also generate language loss without ground-truth by evaluating the output and trajectory according to the task description. In this case, we can say that the agent is doing \textit{unsupervised agent learning}, which enables language agents to self-evolving.
+We present the detailed implementation of this prompt template in the Appendix.
+
+\paragraph{Back-propagation of Language Gradients}
+In standard connectionist learning, the goal of gradient back-propagation is to calculate the impact of the weights with respect to the overall loss so that the optimizers can update the weights accordingly. Similarly, in our framework, we also design a ``back-propagation'' algorithm for language gradients. Specifically, we iterate from the last node to the first node and compute the gradient for each node with LLMs using a carefully designed prompt: 
+\begin{equation}
+    \NodeGradient = \text{LLM}(\mathcal{P}_{\text{gradient}}(\PreviousNodeGradient, \NodeInput, \NodeOutput, \NodePrompt, \NodeTool, \LanguageLoss))
+\end{equation}
+The prompt template $\mathcal{P}_{\text{gradient}}$ is designed to instruct the LLM to generate language gradients that are analyses and reflections for the symbolic components within the node. Inspired by the idea of back-propagation, we give the language gradients of the node executed after the current node, as well as the information on the execution of the current node, which is stored in the trajectory. That's to say, when doing analysis and reflection, the LLM not only needs to consider how the prompts and tools suit the subgoal of the current node but also has to consider how they affect the accomplishment of the subgoal of the next node. By chaining from top to bottom, the language gradients for all nodes are relevant and responsible for the overall success of the agent. This method effectively reduces the risk of optimizing toward the local optimum for each isolated prompt and tool, leading to the overall performance of agent systems. 
+
+\paragraph{Language Gradient-based Update}
+The final step in the framework is to update the prompts and tools in each node and optimize the overall agent pipeline with the help of language gradients. This is accomplished via ``symbolic optimizers''. Symbolic optimizers are carefully designed prompt pipelines that can optimize the symbolic weights of an agent. We create three types of symbolic optimizers: PromptOptimizer, ToolOptimizer, and PipelineOptimizer. We present detailed implementation of these prompts in the Appendix.
+
+\noindent\textbf{PromptOptimizer:} To facilitate prompt optimization, we split prompts into different components, including task description, few-shot examples, principles, and output format control. We then design separate prompts tailored for the optimization of each prompt component. All prompts share a detailed explanation and demonstration of how the LLM should focus on the language gradients when reasoning about how to edit the original prompt components.
+
+\noindent\textbf{ToolOptimizer:} The ToolOptimizer is a pipeline of prompts that first instructs the LLM to decide the kind of operation it should use: whether the tools should be improved (by editing the tool description used for function calling), deleted, or new tools need to implement. Then the ToolOptimizer calls different prompts specifically designed for tool editing, deletion, and creation. 
+
+\noindent\textbf{PipelineOptimizer:}
+The goal of the PipelineOptimizer is to optimizer the agent pipeline consisting of nodes and their connections. The prompt is designed to first introduce the agent programming language used to define the agent pipeline (we use the agent programming language introduced in~\citet{zhou2023agents}). Then the prompt describes the definition of a few atomic operations that the LLM can use to update the pipeline, including adding, deleting, and moving the nodes. It then instructs the LLM to first analyze how the pipeline could be improved and then implement the update using the atomic operations. Detailed descriptions of the agent programming language and the atomic operations used to update the agent pipeline are available in the Appendix.
+
+Since all aforementioned optimizers operate in natural language space and some optimization operations need to be done in code space, we use a simple strategy that retries any illegal update up to three times and discards the update if the error persists. We also use a rollback strategy that re-runs the current example after optimization and rolls back to the original agent if the performance evaluated using the language-based loss function drops. Furthermore, we also include a ``learning rate'' component for each prompts in the optimizers which controls how aggressive the LLM should be when optimizing prompts, tools, and agent pipelines.
+
+\paragraph{Batched Training}
+The aforementioned optimization scheme works with one training example at a time, which resembles stochastic gradient descent. Inspired by the fact that mini-batch stochastic gradient descent works better, or more stably, in practice, we also devise a batched training variant for symbolic optimizers. Specifically, we conduct forward pass, loss computation, and back-propagation for each example separately. Then we feed a batch of language gradients for the same node, and prompt the LLM to holistically consider all these language gradients when updating the agent.   

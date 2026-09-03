@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Papers: **68**
+- Papers: **69**
 - Source: 仓库里的 tracked PDF
 - Mode: GitBook Sync / GitHub repo integration
 
@@ -79,6 +79,7 @@
 - [StartupBench: Benchmarking General-Purpose Agents on Market-Validated End-to-End Workflows](./papers/startupbench.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstartupbench%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/startupbench/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/startupbench/main_zh.pdf)
 - [Step3.5 Turbo 2026](./papers/step-3-5.md) · PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstep-3-5%2Fstep3p5_turbo_2026.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/step-3-5/step3p5_turbo_2026.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/step-3-5/step3p5_turbo_2026.pdf)
 - [Step-GUI](./papers/step-gui.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fstep-gui%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/step-gui/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/step-gui/main_zh.pdf)
+- [Symbolic Learning Enables Self-Evolving Agents](./papers/symbolic-learning-self-evolving-agents.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fsymbolic-learning-self-evolving-agents%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/symbolic-learning-self-evolving-agents/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/symbolic-learning-self-evolving-agents/main_zh.pdf)
 - [Task-CoEvolve: Efficient Harness Optimization via Adaptive Validation Task Selection](./papers/task-coevolve.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ftask-coevolve%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/task-coevolve/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/task-coevolve/main_zh.pdf)
 - [Tclone](./papers/tclone.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Ftclone%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/tclone/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/tclone/main_zh.pdf)
 - [ThunderAgent](./papers/thunderagent.md) · 中文 PDF · [Viewer](https://mozilla.github.io/pdf.js/web/viewer.html?file=https%3A%2F%2Fraw.githubusercontent.com%2Fwang-zerui%2Fpaper_zhs%2Fmain%2Fthunderagent%2Fmain_zh.pdf) · [PDF](https://raw.githubusercontent.com/wang-zerui/paper_zhs/main/thunderagent/main_zh.pdf) · [GitHub](https://github.com/wang-zerui/paper_zhs/blob/main/thunderagent/main_zh.pdf)

@@ -63,6 +63,7 @@
 * [StartupBench: Benchmarking General-Purpose Agents on Market-Validated End-to-End Workflows](papers/startupbench.md)
 * [Step3.5 Turbo 2026](papers/step-3-5.md)
 * [Step-GUI](papers/step-gui.md)
+* [Symbolic Learning Enables Self-Evolving Agents](papers/symbolic-learning-self-evolving-agents.md)
 * [Task-CoEvolve: Efficient Harness Optimization via Adaptive Validation Task Selection](papers/task-coevolve.md)
 * [Tclone](papers/tclone.md)
 * [ThunderAgent](papers/thunderagent.md)
