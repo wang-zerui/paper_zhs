@@ -3,6 +3,7 @@
 * [首页](README.md)
 * [Scalable Training of Mixture-of-Experts Models with Megatron Core](papers/2603-07685.md)
 * [Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses](papers/agentic-harness-engineering.md)
+* [Offline Training of Language Model Agents with Functions as Learnable Weights](papers/agentoptimizer.md)
 * [ARL Tangram](papers/arl-tangram.md)
 * [Baichuan M3](papers/baichuan-m3.md)
 * [BlitzScale](papers/blitzscale.md)

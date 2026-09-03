@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：77
-- 含 `00README.json`：62
-- 有本地候选 PDF：75
-- 含中文 PDF：67
-- 带源码包：53
-- 含 tracked files 的目录：74
+- 论文目录：78
+- 含 `00README.json`：63
+- 有本地候选 PDF：76
+- 含中文 PDF：68
+- 带源码包：54
+- 含 tracked files 的目录：75
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -25,6 +25,7 @@
 | 2603.07685 | Scalable Training of Mixture-of-Experts Models with Megatron Core | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 102 |
 | agentconductor | Agentconductor | ✅ | example_paper.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 21 |
 | agentic-harness-engineering | Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses | ✅ | neurips_2025.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 66 |
+| agentoptimizer | Offline Training of Language Model Agents with Functions as Learnable Weights | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 24 |
 | agentv-rl | Agentv Rl | ✅ | arxiv.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 17 |
 | aorchestra | Aorchestra | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 94 |
 | arl-tangram | ARL Tangram | ✅ | xiaomi.tex | xiaomi_zh.pdf | xiaomi_zh.pdf | ✅ | — | 48 |
