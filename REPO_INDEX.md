@@ -60,7 +60,7 @@
 | harnessx | HarnessX: A Composable, Adaptive, and Evolvable Agent Harness Foundry | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 56 |
 | hyper-parallel | HyperParallel | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 15 |
 | ICLR_camera_ready_v0 | FlexRL: Scaling VLM RL Training via Efficient Load Balancing | — | — | main.pdf | main.pdf | — | — | 63 |
-| jit-agent | JIT-Agent: Scaling Harness Intelligence via Just-in-Time Harness Evolution | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 30 |
+| jit-agent | JIT-Agent: Scaling Harness Intelligence via Just-in-Time Harness Evolution | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 27 |
 | kvcache-cache-in-the-wild | KVCache Cache in the Wild: Characterizing and Optimizing KVCache Cache at a Large Cloud Provider | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 95 |
 | kvpr | KVPR | ✅ | acl_latex.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 18 |
 | LLM-viewer | LLM Viewer | — | — | main_zh.pdf | main_zh.pdf | ✅ | source.tar.gz | 62 |
