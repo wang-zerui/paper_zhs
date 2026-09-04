@@ -31,6 +31,7 @@
 * [GatedAttn](papers/gated-attn.md)
 * [GLM5](papers/glm-5.md)
 * [GUI-Actor](papers/gui-actor.md)
+* [HarnessX: A Composable, Adaptive, and Evolvable Agent Harness Foundry](papers/harnessx.md)
 * [HyperParallel](papers/hyper-parallel.md)
 * [HeteroPod: XPU-Accelerated Infrastructure Offloading for Commodity Cloud-Native Applications](papers/heteropod.md)
 * [FlexRL: Scaling VLM RL Training via Efficient Load Balancing](papers/iclr-camera-ready-v0.md)

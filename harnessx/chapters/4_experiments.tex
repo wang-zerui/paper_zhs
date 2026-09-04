@@ -1,0 +1,202 @@
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate \ProjectName along five axes: overall effectiveness across benchmarks and model families (Section~\ref{sec:exp-main}), the impact of variant-management strategies on stability (Section~\ref{sec:exp-strategy}), the relative contribution of evolver architecture versus infrastructure (Section~\ref{sec:exp-meta-agent}), gains from joint model--harness co-evolution (Section~\ref{sec:exp-coevolution}), and empirical confirmation of the predicted failure modes (Section~\ref{sec:exp-failure}).
+
+\subsection{Experimental Setup}
+\label{sec:exp-setup}
+
+\paragraph{Benchmarks.}
+As summarized in Table~\ref{tab:benchmarks}, we evaluate on five benchmarks spanning multi-step retrieval, embodied planning, web interaction, multi-turn dialogue, and software engineering. Unless otherwise noted, each experiment runs for up to $T{=}15$ evolution rounds with early stopping after $P{=}3$ consecutive rounds without a shipped edit. The full task set is evaluated every round (no subsampling). The meta-agent token budget varies by benchmark (100M--175M total) but is held constant across task agents within a benchmark.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Benchmark characteristics.}
+\label{tab:benchmarks}
+\begin{tabular}{llcl}
+\toprule
+\textbf{Benchmark} & \textbf{Domain} & \textbf{Sampled Tasks} & \textbf{Verifier} \\
+\midrule
+GAIA (Level 1--3) & Multi-step retrieval & 103 & Exact match \\
+ALFWorld & Embodied planning & 134 & Goal completion \\
+WebShop & Web interaction & 100 & Attribute match \\
+$\tau^3$-Bench & Multi-turn dialogue & 3 domains & Rule compliance \\
+SWE-bench Verified & Software engineering & 55 & Patch resolution \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Models.}
+We distinguish two roles: the \textit{meta-agent} (Claude Opus 4.6 unless otherwise noted) drives the AEGIS evolution loop; the \textit{task agent} runs under the evolved harness to solve benchmark tasks. Task agents span three families (Claude Sonnet 4.6, GPT-5.4, and Qwen3.5-9B) to test whether a single meta-agent can evolve effective harnesses across model families.
+
+\paragraph{Baselines.}
+\textbf{(1) Static Harness}: a \ProjectName configuration constructed from published benchmark-specific prompts and tool definitions, held fixed across all rounds.
+\textbf{(2) Claude Code SDK (CC SDK)}\footnote{Claude Code SDK v0.0.25, \texttt{model="opus"} (Claude Opus 4.6), \texttt{max\_turns=200}. Experiments conducted in May 2026.}: a single-agent evolver (one LLM session per round) that replaces the four-stage pipeline while retaining the same infrastructure and round budget, isolating AEGIS's multi-stage architecture from the shared infrastructure (Section~\ref{sec:exp-meta-agent}). This baseline also serves as a proxy for monolithic evolvers such as SICA~\cite{robeyns2025self}.
+
+\paragraph{Metrics.} Task success rate (\%) under the benchmark-specific verifier. Each task receives two independent attempts per round (pass@2: solved if either succeeds), reducing sampling noise while preserving a binary per-task signal for the seesaw constraint (at the cost of masking sub-threshold success-probability drift; Section~\ref{sec:exp-strategy}).
+
+\paragraph{Scope.} All reported gains are measured on the same task set used for evolution; held-out generalization to unseen tasks is not evaluated in this work.
+
+\begin{figure*}[!htbp]
+  \centering
+  \includegraphics[width=0.85\textwidth]{images/Evolution_Main.pdf}
+  \caption{Evolution trajectories (pass@2 success rate vs.\ round). Dashed lines: static-harness baselines.}
+  \label{fig:evolution-curves}
+\end{figure*}
+
+
+\subsection{Main Results}
+\label{sec:exp-main}
+
+Table~\ref{tab:main-results} and Figure~\ref{fig:evolution-curves} report pass@2 success rates before and after harness evolution. AEGIS improves 14 of 15 model--benchmark configurations, with an average gain of +14.5\% (up to +44.0\%). The single stagnating configuration (GAIA, GPT-5.4, $\Delta{=}0.0$) reflects a fundamental limitation of single-harness evolution on heterogeneous task sets; Section~\ref{sec:exp-strategy} shows that variant isolation resolves this. One configuration regressed mid-run ($\tau^3$-Bench Telecom, $-$14.0\% at R7) due to accumulated same-type edits, recovering by R9 (Section~\ref{sec:exp-failure}).
+
+
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Main results (pass@2 success rate, \%). Evolved = peak accuracy achieved. ``--'' indicates domain-averaged results where no single peak round applies.}
+\label{tab:main-results}
+\begin{tabular}{llcccc}
+\toprule
+\textbf{Benchmark} & \textbf{Task agent} & \textbf{Initial} & \textbf{Evolved} & \textbf{$\Delta$} & \textbf{Best round} \\
+\midrule
+\multirow{3}{*}{ALFWorld}
+  & Claude Sonnet 4.6 & 83.6 & 94.8 & +11.2 & 7 \\
+  & GPT-5.4           & 76.9 & \textbf{97.8} & +20.9 & 4 \\
+  & Qwen3.5-9B        & 53.0 & 97.0 & +44.0 & 9 \\
+\midrule
+\multirow{3}{*}{WebShop}
+  & Claude Sonnet 4.6 & 60.0 & \textbf{76.0} & +16.0 & 7 \\
+  & GPT-5.4           & 55.0 & 73.0 & +18.0 & 8 \\
+  & Qwen3.5-9B        & 36.0 & 49.0 & +13.0 & 7 \\
+\midrule
+\multirow{3}{*}{GAIA}
+  & Claude Sonnet 4.6 & 73.8 & \textbf{83.5} & +9.7 & 11 \\
+  & GPT-5.4           & 73.8 & 73.8 & 0.0 & 4 \\
+  & Qwen3.5-9B        & 20.3 & 37.4 & +17.1 & 4 \\
+\midrule
+\multirow{3}{*}{SWE-bench Verified}
+  & Claude Sonnet 4.6 & 76.4 & \textbf{87.3} & +10.9 & 3 \\
+  & GPT-5.4           & 45.5 & 63.6 & +18.2 & 3 \\
+  & Qwen3.5-9B        & 23.6 & 41.8 & +18.2 & 2 \\
+\midrule
+\multirow{3}{*}{$\tau^3$-Bench (Avg.)}
+  & Claude Sonnet 4.6 & 89.6 & \textbf{95.0} & +5.4 & -- \\
+  & GPT-5.4           & 76.2 & 90.7 & +14.5 & -- \\
+  & Qwen3.5-9B        & 93.5 & 94.6 & +1.1 & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\textbf{Overall performance.} Evolution improves 14 of 15 configurations. Gains range from +11.2\% to +44.0\% on ALFWorld, +13.0\% to +18.0\% on WebShop, and +10.9\% to +18.2\% on SWE-bench Verified. On GAIA, Sonnet 4.6 (+9.7\%) and Qwen3.5-9B (+17.1\%) improve, while GPT-5.4 stagnates ($\Delta{=}0.0$; resolving its failures demands mutually conflicting edits that no single-harness strategy can accommodate). On $\tau^3$-Bench, GPT-5.4 gains most (+14.5\%) while Qwen3.5-9B gains only +1.1\% due to its near-ceiling 93.5\% baseline.
+
+\textbf{Inverse scaling with baseline performance.} Across benchmarks, the weakest task agent (Qwen3.5-9B) consistently gains most: +44.0\% on ALFWorld (baseline 53.0\%), +17.1\% on GAIA (baseline 20.3\%), and +18.2\% on SWE-bench Verified (baseline 23.6\%). Stronger models (Sonnet 4.6, GPT-5.4) gain less on ALFWorld (+11.2\%, +20.9\%) and SWE-bench (+10.9\%, +18.2\%). The exception is GAIA GPT-5.4 ($\Delta{=}0.0$), where task heterogeneity prevents a single harness from improving aggregate accuracy---an observation that motivates the variant-isolation ablation in Section~\ref{sec:exp-strategy}. The overall pattern suggests that weaker models exhibit more behavioral gaps addressable by harness-level edits; once baseline performance is sufficiently high, remaining failures increasingly require task-specific adaptations rather than global improvements.
+
+\textbf{Cross-model generalization.} The meta-agent (Opus 4.6) evolves harnesses for task agents across model families without family-specific adaptation. On ALFWorld, cross-family agents (GPT-5.4: +20.9\%, Qwen3.5-9B: +44.0\%) gain more than the same-family agent (Sonnet 4.6: +11.2\%), indicating that gain magnitude tracks baseline performance rather than proximity to the meta-agent's family.
+
+\textbf{Convergence rate tracks failure-mode concentration.} ALFWorld (GPT-5.4) peaks at R4 and SWE-bench Verified (all agents) peaks at R2--R3; in both cases, failures concentrate in one or two component types, enabling rapid convergence. GAIA (Sonnet 4.6) requires 11 rounds because failures span four component types (prompt, tool, processor, configuration), forcing sequential exploration of multiple edit neighborhoods.
+
+\paragraph{Domain-level variation within $\tau^3$-Bench.}
+The averaged $\tau^3$-Bench gains mask substantial per-domain variation. GPT-5.4 gains +25.4\% on Telecom (67.5\%~$\to$~93.0\% at R2) and +9.7\% on Retail (84.2\%~$\to$~93.9\% at R6). However, Sonnet 4.6 on Telecom regresses $-$14.0\% in a single round (R7) due to accumulated same-type edits, recovering by R9 (Section~\ref{sec:exp-failure}). This illustrates a structural limitation of per-edit gating: sub-threshold coupling from consecutive same-type edits accumulates undetected until a tipping point triggers visible regression.
+
+\paragraph{Post-peak degradation on SWE-bench.}
+On SWE-bench Verified (GPT-5.4), evolution peaks at 63.6\% (R3, +18.2\%) but degrades to 50.9\% by R5 ($-$12.7\% from peak); final accuracy still exceeds the static baseline by +5.4\%. Two factors accelerate degradation on this benchmark: (1)~with only 55 tasks, each task flip shifts aggregate accuracy by ${\sim}$1.8\% (vs.\ ${\sim}$1.0\% at $n{=}103$), so fewer regressions suffice to produce visible decline; and (2)~structural code edits have a broader blast radius than prompt edits. This parallels the GAIA GPT-5.4 stagnation: both cases motivate the variant-isolation strategy evaluated in Section~\ref{sec:exp-strategy}.
+
+
+\subsection{Evolution Strategy Comparison}
+\label{sec:exp-strategy}
+
+The main experiments (Table~\ref{tab:main-results}) use the Global strategy: a single harness evolved across all tasks. Table~\ref{tab:strategy} compares this default with a variant-isolation strategy on GAIA (103 tasks, GPT-5.4, 15 rounds, AEGIS evolver).
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Evolution strategy comparison (GAIA, GPT-5.4, AEGIS evolver, 15 rounds). Final$-$Peak indicates stability; negative values signal catastrophic forgetting.}
+\label{tab:strategy}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Strategy} & \textbf{Final (\%)} & \textbf{Peak (\%)} & \textbf{Final$-$Peak} & \textbf{Tokens} \\
+\midrule
+Ensemble (up to $K$ variants) & \textbf{87.4} & 87.4 & 0.0  & 107.8M \\
+Global (single harness)            & 49.5 & 73.8 & $-$24.3 & 143.7M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Failure mechanism of Global.} The Global strategy maintains a single harness for all 103 tasks. It peaks early at R4 (73.8\%) before degrading steadily: subsequent edits introduce sub-threshold regressions that are individually undetectable under pass@2's binary signal yet compound into aggregate decline. The peak--final gap ($-$24.3\%) far exceeds the per-round binomial 95\% confidence interval ($\pm$8.5\% at $n{=}103$, $p{\approx}0.74$), ruling out evaluation noise and confirming catastrophic forgetting (Section~\ref{sec:aegis-pathologies}). This explains the $\Delta{=}0.0$ stagnation for GAIA GPT-5.4 in Table~\ref{tab:main-results}: Global cannot sustain improvement on this heterogeneous task set.
+
+\textbf{Why Ensemble prevents cross-variant forgetting.} Ensemble routing maintains up to $K$ harness variants and routes each task to the variant with the highest prior success rate. Edits are proposed and evaluated \textit{per-variant}, so an edit improving one cluster cannot regress another. The comparison confirms three predicted properties: (1)~non-degrading aggregate trajectory (peak = final), (2)~later peak (R14 vs.\ R4), indicating sustained productive exploration, and (3)~lower token consumption (107.8M vs.\ 143.7M), because each edit is evaluated only against its target cluster rather than the full task set, and edits target only their assigned cluster, avoiding the wasted proposals that accumulate when a degrading single harness is evaluated against all tasks.
+
+\textbf{Summary.} Variant isolation resolves the stagnation observed under Global, lifting GAIA GPT-5.4 from $\Delta{=}0.0$ to +13.6\% (87.4\%, non-degrading). Finer-grained strategies (Domain-aware clustering, Task-level tournament) were explored at pilot scale (30--40 tasks, $\leq$8 rounds) but lack sufficient rounds and tasks for statistically meaningful comparison.
+
+
+\subsection{Meta-Agent Effectiveness}
+\label{sec:exp-meta-agent}
+
+To disentangle evolver architecture from infrastructure, we replace the four-stage AEGIS pipeline with a single-agent CC SDK evolver that shares the same model (Opus 4.6), round budget, and infrastructure. Both evolvers run under variant isolation (introduced in Section~\ref{sec:exp-strategy}) to ensure non-degrading trajectories. Table~\ref{tab:meta-agent} reports the comparison on GAIA (103 tasks, GPT-5.4, 15 rounds).
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Meta-agent architecture comparison (GAIA, GPT-5.4, variant isolation, 15 rounds). Both evolvers use Opus 4.6.}
+\label{tab:meta-agent}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Evolver} & \textbf{Accuracy (\%)} & \textbf{Best round} & \textbf{Tokens} \\
+\midrule
+AEGIS   & \textbf{87.4} & R14 & 107.8M \\
+CC SDK  & 86.4 & R12 & 123.1M \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Accuracy is comparable; efficiency differs.} The 1.0\% accuracy gap falls within one standard error (${\sim}$3.3\% at $n{=}103$), indicating that the four-stage decomposition does not improve final accuracy at this meta-agent capability level. However, the single-agent variant consumes ${\sim}$14\% more tokens (123.1M vs.\ 107.8M). We attribute this to the Digester's compression: it reduces ${\sim}$10M raw trace tokens to ${\sim}$10K structured summaries before downstream stages consume them. Without this stage, the single-agent evolver must truncate traces to fit its context window, yielding less-informed edits that are rejected by the gate more frequently, wasting tokens on failed proposals.
+
+\textbf{Implication.} With a capable meta-agent under variant isolation, accuracy gains derive primarily from \ProjectName's infrastructure (typed components enabling isolation, structured traces enabling diagnosis) rather than the evolver's internal architecture. The four-stage decomposition contributes efficiency (${\sim}$12\% fewer tokens) and interpretability (auditable intermediate artifacts) but not measurable accuracy at this scale.
+
+
+\subsection{Co-Evolution}
+\label{sec:exp-coevolution}
+
+This experiment tests whether interleaving harness evolution with model RL (Section~\ref{sec:method-coevolution}) yields gains beyond harness-only evolution. As shown in Figure~\ref{fig:coevolution-curves}, we compare the two regimes on GAIA and WebShop using a Qwen3.5-9B task agent. Both conditions share a fixed-capacity FIFO replay buffer: each round runs the current agent on the adaptation batch, a fixed verifier scores the resulting traces, and both harness evolution (AEGIS) and model training (cross-harness GRPO) update over the same buffer (Section~\ref{sec:coevolution-loop}). Section~\ref{sec:method-coevolution} predicts that each single-optimization route stalls at its own ceiling: harness-only at the \textit{scaffolding ceiling}, model-RL-only at the \textit{training-signal ceiling}. Co-evolution addresses both ceilings by enabling the model to internalize strategies that successive harness versions introduce.
+
+\textbf{Experimental setup.} We run both regimes on the GAIA text-only subset (103 tasks) and a WebShop subset (100 tasks) with a Qwen3.5-9B task agent. GAIA exercises live web tools whose latency and availability fluctuate, so each round is evaluated twice and averaged. Both subsets are small, so we set the optimizer batch to the entire replay buffer and size the buffer as a four-round sliding window: at two rollouts per task this is 824 traces on GAIA ($103\times2\times4$) and 400 on WebShop ($100\times1\times4$), which supplies enough within-group samples for GRPO to estimate advantages stably. Training uses learning rate $1\times10^{-6}$, GRPO clip $\epsilon=0.2$, no KL penalty (coefficient $0$), and 5 training steps per round. The GAIA agent is equipped with web search (Baidu API), web fetch, bash, and file read; WebShop uses its environment's built-in action tools. Rewards are $0.9\times$correctness plus $0.1\times$format on GAIA, and WebShop's native attribute-match reward (a task passes only at reward $=1.0$).
+
+\begin{figure*}[!htbp]
+  \centering
+  \includegraphics[width=0.75\textwidth]{images/coevolution_merged.png}
+  \caption{Co-evolution vs.\ harness-only evolution (AEGIS, model frozen) on GAIA and WebShop. Stars mark each method's peak; the shaded band is the co-evolution gain.}
+  \label{fig:coevolution-curves}
+\end{figure*}
+
+\textbf{Co-evolution exceeds harness-only evolution.} As Figure~\ref{fig:coevolution-curves} shows, interleaving cross-harness GRPO with harness evolution over a shared replay buffer raises peak success on both benchmarks: GAIA 37.4\%~$\to$~41.7\% (+4.3\%) and WebShop 49.0\%~$\to$~54.0\% (+5.0\%), averaging +4.7\% over the model-frozen baseline. The two curves coincide until joint training takes effect (R4), then diverge, with co-evolution at or above harness-only for the remainder of the run. The gap persists to the final round (GAIA 36.4\%~$\to$~39.8\%, WebShop 46.0\%~$\to$~50.0\%) and is wider on WebShop, where more room remains for model-level improvement beyond the harness-only plateau. Co-evolution thus lifts end-of-run accuracy, not merely the peak.
+
+\textbf{Co-evolution breaks the scaffolding ceiling.} Harness-only evolution plateaus at ${\sim}$37\% on GAIA and ${\sim}$49\% on WebShop. Co-evolution clears these plateaus: cross-harness GRPO enables the model to internalize strategies from successive harness versions, so later edits build on learned behavior rather than compensating for a fixed model's intrinsic limitations.
+
+\subsection{Failure Analysis}
+\label{sec:exp-failure}
+
+We present three case studies, one per pathology predicted by the operational mirror (Section~\ref{sec:aegis-pathologies}): reward hacking, catastrophic forgetting, and under-exploration. For each case we document the detection signal that first surfaced the issue, the root cause identified through trace analysis, and the outcome---whether the pipeline self-corrected or required manual intervention. Figure~\ref{fig:failure-cases} provides the full set of confirmed and pending cases organized by pathology type.
+
+\begin{figure}[!t]
+  \centering
+  \includegraphics[width=0.7\textwidth]{images/9_cases.pdf}
+  \caption{Failure cases organized by pathology (rows: reward hacking, catastrophic forgetting, under-exploration).}
+  \label{fig:failure-cases}
+\end{figure}
+
+\paragraph{Reward hacking (GAIA, Sonnet 4.6, R10).}
+At R10, the pipeline shipped a composite edit (tool + prompt + configuration) whose manifest predicted improved retrieval. The edit passed the seesaw constraint and raised accuracy from 74.8\% to 79.6\%. Trace analysis at R11 revealed that the tool genuinely fixed retrieval for most newly passing tasks, but a subset passed by exploiting format regularities in the verifier rather than performing actual retrieval. The Planner flagged this pathway at R12, and the resulting edit introduced a guard restricting the tool to tasks whose output could be cross-checked against a second retrieval path.
+
+\paragraph{Catastrophic forgetting ($\tau^3$-Bench, Sonnet 4.6, Telecom, R7).}
+Evolution on Telecom shipped same-type prompt/processor edits across five consecutive rounds (R2--R6), each appending a ``reminder'' rule. Compliance rose from 89.5\% to 100\% at R4, then regressed to 94.7\% by R6 as later rules conflicted with earlier ones. The R7 Critic flagged the concentration risk (``All 5 prior ships occupy the same bucket: [prompt, processor]'') but still approved the edit for shipping because ship-prediction accuracy remained high (R2--R6: 23/24, 5/6, 4/5, 7/7, 2/3) and no regressions were recorded. The sixth reminder degraded compliance from 94.7\% to 80.7\% ($-$14.0\%) via cross-rule conflicts that destabilized previously passing tasks. This regression evaded the seesaw constraint because pass@2 registers only per-task binary flips, not sub-threshold coupling. The pipeline self-corrected by R9 once the Planner diagnosed the concentration pattern and proposed a structural edit that replaced the conflicting reminder stack.
+
+\paragraph{Under-exploration (ALFWorld, Sonnet 4.6, R4--R7).}
+Between R4 and R7, the pipeline shipped predominantly prompt-level edits, yielding $<$1\% gain per round. Ship-prediction accuracy (the fraction of manifest-predicted task flips that materialize) dropped from 80\% (R3) to 0\% (R7), signaling prompt-space exhaustion. The sole structural edit in this window (a processor-level change at R6) achieved only 14\% ship-prediction accuracy (1/7 predicted flips materialized), suggesting that the Planner lacked sufficient structural-edit history to calibrate hypotheses beyond the prompt neighborhood.
+
+\paragraph{Summary.}
+All three pathologies predicted by the operational mirror appear in practice. The pipeline detected and mitigated reward hacking within two rounds (R10--R12). Decaying ship-prediction accuracy diagnosed under-exploration (R4--R7). The catastrophic-forgetting case exposes a structural limitation of per-edit gating: sub-threshold coupling accumulates undetected until it exceeds the per-task detection threshold (Telecom R7). On $\tau^3$-Bench Telecom, the pipeline self-corrected (R8--R9) because the failure was localized to one domain; on GAIA (GPT-5.4), the same mechanism produces sustained stagnation ($\Delta{=}0.0$) because conflicting edits prevent any net gain. Section~\ref{sec:exp-strategy} shows that variant isolation resolves this by confining edits to task-specific clusters.
+

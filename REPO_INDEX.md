@@ -4,12 +4,12 @@
 
 ## Summary
 
-- 论文目录：78
-- 含 `00README.json`：63
-- 有本地候选 PDF：76
-- 含中文 PDF：68
-- 带源码包：54
-- 含 tracked files 的目录：75
+- 论文目录：79
+- 含 `00README.json`：64
+- 有本地候选 PDF：77
+- 含中文 PDF：69
+- 带源码包：55
+- 含 tracked files 的目录：76
 - 纯本地目录（tracked files = 0）：3
 
 ## Triage
@@ -57,6 +57,7 @@
 | gated-attn | GatedAttn | ✅ | acl_latex.tex | acl_latex.pdf | acl_latex.pdf | — | source.tar.gz | 33 |
 | glm-5 | GLM5 | ✅ | 0_main.tex | 0_main_zh.pdf | 0_main_zh.pdf | ✅ | source.tar.gz | 40 |
 | gui-actor | GUI-Actor | ✅ | neurips_2025.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 38 |
+| harnessx | HarnessX: A Composable, Adaptive, and Evolvable Agent Harness Foundry | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 56 |
 | hyper-parallel | HyperParallel | ✅ | main.tex | main_zh.pdf | main_zh.pdf | ✅ | — | 15 |
 | ICLR_camera_ready_v0 | FlexRL: Scaling VLM RL Training via Efficient Load Balancing | — | — | main.pdf | main.pdf | — | — | 63 |
 | kvcache-cache-in-the-wild | KVCache Cache in the Wild: Characterizing and Optimizing KVCache Cache at a Large Cloud Provider | ✅ | main_zh.tex | main_zh.pdf | main_zh.pdf | ✅ | source.tar | 95 |

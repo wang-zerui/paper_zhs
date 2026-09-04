@@ -1,0 +1,284 @@
+\section{Harness 组合}
+\label{sec:method-foundry}
+
+第~\ref{sec:related-harness-eng} 节指出的缺口，是缺少一个能把 harness 暴露为带类型、可替换实体的基础设施层。原语库把组合留给应用代码，编排器只提供一组固定模式，而产品级 harness 则是不透明的端到端系统。没有组合式底座，每次行为变更或跨团队交接都需要重新实现。\ProjectName 通过一条统一设计原则解决这一问题：harness 是一等值，处理器是带类型的原子组件，组合则通过在带类型的钩子点插入处理器来完成。我们将依次形式化 harness（第~\ref{sec:foundry-object} 节）、其构件处理器（第~\ref{sec:foundry-processor} 节）以及九维处理器分类体系（第~\ref{sec:foundry-taxonomy} 节）。这些定义有意保持简洁：其作用是建立术语，并显露 harness 演化（第~\ref{sec:method-aegis} 节）所操作的编辑表面。
+
+\begin{table}[!htbp]
+\centering
+\small
+\begin{tabular}{p{0.21\linewidth}p{0.26\linewidth}p{0.43\linewidth}}
+\toprule
+钩子 & 事件类型 & 允许的修改 \\
+\midrule
+\texttt{task\_start}    & \texttt{TaskStartEvent}     & 系统提示词 \\
+\texttt{step\_start}    & \texttt{StepStartEvent}     & 对历史记录的结构性编辑 \\
+\texttt{before\_model}  & \texttt{BeforeModelEvent}   & 最后一条用户内容；追加一条用户消息 \\
+\texttt{after\_model}   & \texttt{ModelResponseEvent} & 响应内容、工具调用 \\
+\texttt{before\_tool}   & \texttt{ToolCallEvent}      & 工具输入、批准标志 \\
+\texttt{after\_tool}    & \texttt{ToolResultEvent}    & 工具结果 \\
+\texttt{step\_end}      & \texttt{StepEndEvent}       & 只读 \\
+\texttt{task\_end}      & \texttt{TaskEndEvent}       & 只读 \\
+\bottomrule
+\end{tabular}
+\caption{钩子点及其允许的修改。}
+\label{tab:hook-points}
+\end{table}
+
+\subsection{作为一等对象的 Harness}
+\label{sec:foundry-object}
+
+在 \ProjectName 中，harness 是二元组 $\mathcal{H}=(\mathcal{M},\mathcal{C})$，其中 $\mathcal{M}$ 是模型配置，$\mathcal{C}$ 是 harness 配置。二者处理互不重叠的关注点：$\mathcal{M}$ 记录\textit{哪个}模型承担哪个角色（\texttt{main}、\texttt{judge}、\texttt{evaluator}），以及每个角色的回退策略；$\mathcal{C}$ 则记录与模型身份无关的智能体\textit{行为方式}。二者通过 \texttt{agent = model\_config.agentic(harness\_config)} 组合为可执行智能体：\ProjectName 中的智能体，是绑定到模型的处理器流水线，流水线与模型均可独立替换。
+
+Harness 配置本身可分解为 $\mathcal{C}=(\mathbf{P},\mathbf{S})$。$\mathbf{P}:\mathcal{H}\!\mathit{ook}\to\mathrm{List}[\mathit{Processor}]$ 是以钩子为索引的处理器列表，其中 $\mathcal{H}\!\mathit{ook}$ 是表~\ref{tab:hook-points} 所列八种生命周期事件的集合。$\mathbf{S}$ 是一组固定、相互正交的\textit{槽位资源}：工具注册表、追踪器、工作区、沙箱提供方和插件列表。槽位是单例，由一个配置中的所有处理器共享；处理器状态则属于各实例私有。$\mathbf{P}$ 实现所有逐步行为；$\mathbf{S}$ 容纳处理器所依赖、但并不拥有的共享基础设施。
+
+我们称 $\mathcal{C}$ 为一等对象，是因为它能够独立序列化、比较、哈希和替换。两个智能体若共享 $\mathcal{C}$ 而 $\mathcal{M}$ 不同，就会执行相同的处理器流水线，行为差异只来自模型响应；若共享 $\mathcal{M}$ 而 $\mathcal{C}$ 不同，则二者在行为上不同。这种实体化是程序化演化（第~\ref{sec:method-aegis} 节）的前提。
+
+\subsection{处理器抽象}
+\label{sec:foundry-processor}
+
+\ProjectName 中的每一种逐步行为都由一个\textit{处理器}实现；该对象满足协议 \texttt{async def process(self, event: Event) -> AsyncIterator[Event]}。处理器消费一个事件并产出零个或多个事件，恰好形成五种结果之一：透传（原样产出）、变换（产出修改后的事件）、拆分（产出多个同类型事件，供下游分别处理）、拦截（不产出任何内容，从而阻断传播）或中断（抛出异常并终止循环）。这个受限接口实现了可组合性：同一钩子上的每个处理器都消费并产出相同的事件类型，因此处理器可依次组合，也可插入或移除，而不影响周围流水线的类型正确性。
+
+如表~\ref{tab:hook-points} 所示，处理器附着在运行循环发出的八个钩子点之一。运行循环会在每次调用后验证钩子契约：一旦违反契约（例如修改只读字段），系统立即抛出异常，而不会让损坏的状态悄然传播。每个处理器带有三个控制组合的类级元数据字段：\texttt{\_singleton\_group} 指定一个互斥类，确保每组至多有一个处理器；\texttt{\_order} 是同一钩子内的排序提示（常量为 \texttt{PRE}、\texttt{NORMAL}、\texttt{POST}）；\texttt{\_after} 则列出对其他单例组的软依赖。
+
+这一设计使 harness 演化成为一等操作：AEGIS 可以在特定钩子插入新处理器，可以依据单例组匹配并替换现有处理器，也可以彻底移除处理器——所有操作都无需触碰同一或其他钩子上的其余处理器。由于每个钩子都强制执行类型契约（输入事件类型 $=$ 输出事件类型），任何此类替换都会保持整条流水线的良类型性质。元数据字段进一步约束组合：\texttt{\_singleton\_group} 防止相互冲突的重复项，\texttt{\_order} 则确保新插入处理器以可预测方式同现有处理器交互。这些保证正是变体隔离（第~\ref{sec:aegis-ensemble} 节）的运行机制——每个变体的区别只在于哪些处理器占据哪些钩子，类型系统确保演化期间没有变体会悄然违反流水线契约。
+
+\subsection{九维分类体系}
+\label{sec:foundry-taxonomy}
+
+我们沿九个维度组织行为空间：\textit{模型选择}（D1）决定哪个模型承担哪个角色；\textit{上下文组装}（D2）决定每一步向模型呈现什么；\textit{记忆管理}（D3）控制哪些信息跨步骤和会话保留；\textit{工具生态}（D4）控制智能体可以调用哪些工具；\textit{执行环境}（D5）决定工具引发的副作用在何处发生；\textit{评估与奖励}（D6）规定如何判断结果；\textit{控制与安全}（D7）执行规则，防止智能体循环、超支或偏离意图；\textit{可观测性}（D8）记录每个事件、模型调用和工具调用；\textit{训练桥梁}（D9）把执行轨迹转化为强化学习记录。图~\ref{fig:aegis-loop} 展示了完整分类体系，以及标准配置中有代表性的处理器及其通常附着的钩子。
+
+在实践中，AEGIS 的演化编辑覆盖全部九个维度：D2（上下文组装）和 D4（工具生态）是最常见的编辑目标（第~\ref{sec:exp-main} 节）；D8（可观测性）提供 AEGIS 自身进行推理所依赖的轨迹底座；D9（训练桥梁）则为协同演化（第~\ref{sec:method-coevolution} 节）提供轨迹记录，从而闭合优化回路。
+
+\begin{table}[!htbp]
+\centering
+\small
+\begin{tabular}{p{0.19\linewidth}p{0.28\linewidth}p{0.43\linewidth}}
+\toprule
+\textbf{强化学习概念} & \textbf{符号空间对偶项} & \textbf{AEGIS 实现} \\
+\midrule
+策略 $\pi$ & Harness 更新过程 $\pi_{\mathrm{evo}}$ & 四阶段流水线（第~\ref{sec:aegis-arch} 节） \\
+状态 $s_t$ & $(\mathcal{H}_t,\mathcal{T}_t)$ & Harness 配置 + 轨迹存储 \\
+动作 $a_t$ & 带类型的 harness 编辑 & 构建器操作 + 变更清单 \\
+反馈 & 轨迹 $\tau$ + 验证器得分 $r$ & 可观测性层 \\
+更新 & $\mathcal{H}_{t+1}\leftarrow U(\widetilde{\mathcal{H}}_t,\mathcal{T}_t,r_t)$ & 确定性接受门控 \\
+\bottomrule
+\end{tabular}
+\caption{操作镜像：强化学习概念及其在 AEGIS 符号空间中的对偶项。}
+\label{tab:operational-mirror}
+\end{table}
+
+\section{Harness 适配}
+\label{sec:method-aegis}
+
+组合层（第~\ref{sec:method-foundry} 节）提供带类型、可替换的 harness；如图~\ref{fig:aegis-loop} 所示，AEGIS 则是演化该 harness 的系统。关键洞见是，harness 演化在结构上可映射为符号空间中的强化学习：harness 配置是状态，带类型的编辑是动作，执行轨迹与验证器得分共同构成反馈。这一映射具有预测作用：它指出三个与已知强化学习病态现象相似的失败模式（奖励黑客、灾难性遗忘、探索不足），这些模式促成了 AEGIS 的架构防御，并在第~\ref{sec:exp-failure} 节得到实证确认。
+
+我们首先形式化这种对应关系（第~\ref{sec:aegis-mirror} 节），分析其预测的病态现象（第~\ref{sec:aegis-pathologies} 节），再由此推导作为防御架构的四阶段流水线（第~\ref{sec:aegis-arch} 节），随后介绍适配循环（第~\ref{sec:aegis-loop} 节），并提出用于稳定多变体演化的变体隔离（第~\ref{sec:aegis-ensemble} 节）。
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.82\linewidth]{images/Harness_Evolution.pdf}
+  \caption{AEGIS 演化循环。单个元智能体 $\mathcal{M}$ 驱动四个阶段（Digester、Planner、Evolver、Critic），并依据是否存在足够信号，有选择地调用各阶段。确定性门控决定发布或拒绝候选编辑。}
+  \label{fig:aegis-loop}
+\end{figure}
+
+\subsection{操作镜像}
+\label{sec:aegis-mirror}
+
+我们把 harness 演化形式化为符号产物上的马尔可夫决策过程（MDP）。表~\ref{tab:operational-mirror} 总结了这一映射；下面先给出三个奠定对应关系的定义。
+
+\paragraph{定义 1（Harness 配置）。}
+Harness 配置是一个元组 $\mathcal{H}=(c_1,c_2,\ldots,c_9)$，其中每个 $c_i\in\mathcal{C}_i$ 实例化九个行为维度（第~\ref{sec:foundry-taxonomy} 节）之一：模型选择（$c_1$）、上下文组装（$c_2$）、记忆管理（$c_3$）、工具生态（$c_4$）、执行环境（$c_5$）、评估与奖励（$c_6$）、控制与安全（$c_7$）、可观测性（$c_8$）以及训练桥梁（$c_9$）。每个 $\mathcal{C}_i$ 是第 $i$ 维有效处理器配置的集合，受钩子类型契约和单例组排斥约束（第~\ref{sec:foundry-processor} 节）。
+
+\paragraph{定义 2（Harness 编辑）。}
+Harness 编辑是函数 $e:\mathcal{H}\to\mathcal{H}$，它修改一个或多个维度，同时保持类型契约。动作空间 $\mathcal{E}$ \textit{离散但开放}：每项编辑都是由元智能体大语言模型生成的代码级产物（新的处理器源码、修改后的提示词模板、重新配置的工具注册表或控制流重写），而不是从预先枚举的集合中选择。系统并非通过穷举搜索来控制组合爆炸，而是利用大语言模型的生成能力——Planner 根据轨迹支撑的假设提出编辑——并由类型约束在生成时剪除无效组合。
+
+\paragraph{定义 3（操作镜像）。}
+操作镜像是元组 $(\mathcal{H},\mathcal{E},\mathcal{R},\mathcal{T})$，其中 $\mathcal{H}$ 是 harness 配置空间（状态），$\mathcal{E}$ 是代码级编辑空间（动作），$\mathcal{R}:\mathcal{H}\times\mathcal{E}\to\mathbb{R}$ 把配置--编辑对映射为标量奖励（适配批次上聚合的验证器得分），$\mathcal{T}$ 则是提供超越标量信号之结构化反馈的轨迹存储。该元组在 harness 层形成 MDP：harness 配置是状态，带类型的编辑是动作，执行轨迹与验证器得分构成反馈，而确定性接受门控控制状态转移。
+
+\paragraph{MDP 实例化。}
+令 $\mathcal{H}_t$ 表示第 $t$ 次迭代的 harness 配置（整个演化过程中模型 $\mathcal{M}$ 固定），令 $\mathcal{T}_t$ 表示此前所有执行所累积的轨迹存储。我们把符号状态定义为 $s_t=(\mathcal{H}_t,\mathcal{T}_t)$。Harness 更新策略 $\pi_{\mathrm{evo}}$ 选择动作 $a_t\sim\pi_{\mathrm{evo}}(\cdot\mid s_t)$，其中 $a_t\in\mathcal{E}$ 是从构建器代数中抽取的一项代码级编辑。应用该编辑得到候选 harness $\widetilde{\mathcal{H}}_t=a_t(\mathcal{H}_t)$。使用固定模型 $\mathcal{M}$ 在适配批次上运行候选方案，会产生新轨迹 $\Delta\mathcal{T}_t$ 和逐任务验证器得分 $r_t$。确定性接受算子 $U(\widetilde{\mathcal{H}}_t,\mathcal{T}_t,r_t)$ 随后提交候选方案（$\mathcal{H}_{t+1}=\widetilde{\mathcal{H}}_t$）或拒绝它（$\mathcal{H}_{t+1}=\mathcal{H}_t$），并执行跷跷板约束：候选方案不得使 $\mathcal{T}_t$ 中记录的任何先前已解决任务退化。无论接受还是拒绝，轨迹存储都会增长：$\mathcal{T}_{t+1}=\mathcal{T}_t\cup\Delta\mathcal{T}_t$。
+
+该 MDP 运行在 harness 层：在单项任务内部，$\mathcal{H}_t$ 与固定模型 $\mathcal{M}$ 共同决定智能体行为；跨迭代时，harness 更新策略 $\pi_{\mathrm{evo}}$ 修改 harness。AEGIS 把 $\pi_{\mathrm{evo}}$ 实现为四阶段流水线（Digester、Planner、Evolver、Critic），通过轨迹压缩、适配规划、编辑生成和候选评估，把 $s_t$ 映射为候选编辑。
+
+\subsection{符号空间中的病态现象}
+\label{sec:aegis-pathologies}
+
+操作镜像并非单纯类比；它把强化学习概念转化为设计需求。我们把强化学习中有充分文献记载的三种失败模式——奖励黑客~\cite{guo2025deepseek}、灾难性遗忘~\cite{kirkpatrick2017overcoming} 和探索不足~\cite{ladosz2022exploration}——统称为\textit{强化学习病态现象}。Harness 适配一旦被构造为符号产物上的 MDP，这些病态现象就会以放大的形式重新出现，其形态由符号环境的两个属性决定：（1）语言模型 Evolver 能够构造数值参数扰动无法表达的结构化漏洞利用；（2）对共享组件的编辑会通过 harness 非局部传播。下述每种病态现象都促成了第~\ref{sec:aegis-arch} 节中的一项对应架构防御。
+
+\paragraph{奖励黑客。}
+在标准强化学习中，奖励黑客~\cite{guo2025deepseek} 利用奖励信号中的漏洞，却并未真正完成任务。符号 harness 演化会放大这一风险，因为 Evolver 可以直接针对验证协议：把基准答案嵌入提示词、利用验证器的格式规律，或引入一个重写输出以匹配验证器预期的处理器。
+
+\paragraph{灾难性遗忘。}
+当任务分布某一区域的性能改善却伤害另一区域时，就会发生灾难性遗忘~\cite{kirkpatrick2017overcoming}。在符号 harness 演化中，修复失败模式 $A$ 的编辑可能悄然使模式 $B$ 退化，因为影响会经由共享上下文、工具、记忆策略和控制规则传播。如果没有显式回归检查，只以失败任务轨迹为条件的 Evolver 就无法区分局部增益与全局退化。
+
+\paragraph{探索不足。}
+探索不足~\cite{ladosz2022exploration} 表现为偏向低风险局部编辑：改写提示词、调整工具描述或微调控制流。这些编辑生成成本低，而且经常能通过门控而不使已解决任务退化，从而使后续 Planner 的假设继续偏向相同的编辑邻域。结构性变化（把单个智能体分解为多个智能体、替换控制策略或采用新的记忆架构）需要有意识地形成假设，很少会从以轨迹为条件的局部修复中自然产生。如果没有提出超出眼前失败邻域之编辑的机制，局部编辑耗尽后，系统就会进入平台期。
+
+\paragraph{小结。}
+符号 harness 演化继承了强化学习的结构性风险（奖励黑客、灾难性遗忘和探索不足）；AEGIS 分别用 Critic、确定性门控层和 Planner 应对这三类风险。
+
+\begin{algorithm}[H]
+\small
+\caption{AEGIS Harness 演化循环（选择性调用）}
+\label{alg:aegis-loop}
+\SetAlgoLined
+\LinesNumbered
+\KwInput{初始 harness $\mathcal{H}_0$，元智能体 $\mathcal{M}$，预算 $T$，耐心值 $P$，阈值 $\alpha$}
+\KwOutput{演化后的 harness $\mathcal{H}_{t+1}$，轨迹存储 $\mathcal{T}_{t+1}$}
+$\mathcal{T}_0\leftarrow\emptyset$\; $\mathit{idle}\leftarrow0$\;
+\For{$t=0,1,\ldots,T{-}1$}{
+  采样批次 $B_t$；在 $B_t$ 上运行 $\mathcal{H}_t$，得到轨迹 $\Delta\mathcal{T}_t$；$\mathcal{T}_{t+1}\leftarrow\mathcal{T}_t\cup\Delta\mathcal{T}_t$\;
+  \tcc{Digester（选择性）}
+  $(\mathit{evidence}_t,a_t)\leftarrow\mathcal{M}.\textsc{Digester}(\Delta\mathcal{T}_t,\mathcal{T}_t)$\;
+  \lIf{$a_t<\alpha$}{$\mathcal{H}_{t+1}\leftarrow\mathcal{H}_t$\; $\mathit{idle}{+}{+}$\; \textbf{continue}}
+  \tcc{Planner（选择性）}
+  $\mathit{landscape}_t\leftarrow\mathcal{M}.\textsc{Planner}(\mathit{evidence}_t)$\;
+  \lIf{$\mathit{landscape}_t=\emptyset$}{$\mathcal{H}_{t+1}\leftarrow\mathcal{H}_t$\; $\mathit{idle}{+}{+}$\; \textbf{continue}}
+  \tcc{Evolver（选择性）}
+  $\{(\widetilde{\mathcal{H}}_t^{\,k},\mathrm{manifest}_k)\}_{k=1}^{K_t}\leftarrow\mathcal{M}.\textsc{Evolver}(\mathcal{H}_t,\mathit{landscape}_t)$\;
+  \lIf{$K_t=0$}{$\mathcal{H}_{t+1}\leftarrow\mathcal{H}_t$\; $\mathit{idle}{+}{+}$\; \textbf{continue}}
+  \tcc{Critic 与门控（必选）}
+  $\mathit{ranking}\leftarrow\mathcal{M}.\textsc{Critic}(\{(\widetilde{\mathcal{H}}_t^{\,k},\mathrm{manifest}_k)\},\mathit{evidence}_t)$\;
+  $k^\star\leftarrow\bot$\;
+  \ForEach{$\mathit{ranking}$ 中的 $k$}{
+    \lIf{\textnormal{DeterministicGate}$(\widetilde{\mathcal{H}}_t^{\,k},\mathcal{H}_t,\mathcal{T}_t)$ 通过}{$k^\star\leftarrow k$\; \textbf{break}}
+  }
+  \lIf{$k^\star\neq\bot$}{$\mathcal{H}_{t+1}\leftarrow\widetilde{\mathcal{H}}_t^{\,k^\star}$\; $\mathit{idle}\leftarrow0$}
+  \lElse{$\mathcal{H}_{t+1}\leftarrow\mathcal{H}_t$\; $\mathit{idle}{+}{+}$}
+  \lIf{$\mathit{idle}\geq P$}{\textbf{break}}
+}
+\Return $\mathcal{H}_{t+1},\mathcal{T}_{t+1}$
+\end{algorithm}
+
+\subsection{AEGIS 架构}
+\label{sec:aegis-arch}
+
+AEGIS 是 \ProjectName 的 harness 演化引擎。它由按预定义工作流排列的四个阶段组成——Digester、Planner、Evolver、Critic——并全部由同一个元智能体大语言模型驱动，由该模型\textit{选择性调用}各阶段：没有外部路由器决定是否执行某个阶段，而是元智能体本身在每个阶段判断是否有足够信号继续。Digester、Planner 和 Evolver 各自评估继续条件，并可能令本轮短路（可操作性低于阈值、适配图景为空或没有可行候选方案）；任何到达 Critic 的候选方案则都必须经过 Critic 与确定性门控层。未经 Critic 和门控，任何编辑都不能发布。四阶段分工对应第~\ref{sec:aegis-pathologies} 节的病态现象：Digester 把原始轨迹压缩为结构化的任务级证据；Planner 构建同时覆盖渐进式与结构性变化的适配图景；Evolver 生成带显式变更清单的带类型构建器编辑；Critic 与门控层则拒绝那些所声称改善缺乏轨迹支持，或在接受后会使先前已解决任务退化的编辑。
+
+所有阶段共享同一个信息底座：轨迹存储，即执行事件、经验证器评分的结果、回归信号，以及已发布或被拒编辑的结构化记录。除轨迹存储和当前 harness $\mathcal{H}_t$ 外，任何阶段都不消费其他输入。数据通过带选择性门控的流水线向前流动：Digester 可能判定不存在可操作的失败（所有任务均通过，或信号过于稀疏），并立即终止本轮；Planner 可能根据当前证据与编辑历史找不到可行的适配图景；Evolver 也可能无法产出类型安全的候选方案。在这些情况下，本轮都会以空操作干净退出。只有 Critic 和确定性门控是无条件环节：任何从上游阶段存活下来的候选方案都必须通过二者才能发布。Critic 还可以向 Evolver 发出一次修订请求，再给出最终裁决。
+
+\paragraph{Digester。}
+GAIA 上的一次迭代（103 个任务，pass@2）会产生约 1000 万个原始轨迹 token，包括模型推理步骤、工具调用及其输出和计时元数据。把如此大体量的内容直接交给下游阶段会超出上下文限制，而朴素截断又会丢失诊断信号。Digester 把每个任务的轨迹压缩为结构化的逐任务摘要：二元结果、失败类别（若有）、涉及的组件标识符，以及支持证据片段。它还提供跨迭代连续性：每个任务摘要都链接到其先前结果与已发布编辑的历史，让 Planner 能够区分持续性失败与瞬时噪声。
+
+\paragraph{Planner。}
+Planner 接收 Digester 的输出（带跨迭代历史的任务级摘要），并构建适配图景：哪些任务失败、尝试过哪些编辑、涉及哪些组件，以及哪些编辑类型（提示词、工具、处理器、配置）尚未尝试。该阶段是防御探索不足的主要机制：先构建图景、后生成编辑，能够防止流水线收敛到以轨迹为条件的局部修复，并确保在考虑渐进式提示词编辑的同时，也考虑结构性变化（增加工具、重写处理器、重新设计记忆策略）。
+
+\paragraph{Evolver。}
+给定 Planner 的适配图景，Evolver 生成一个或多个候选 harness $\{\widetilde{\mathcal{H}}_t^{\,k}\}_{k=1}^{K_t}$，每个候选方案都表示为当前 harness $\mathcal{H}_t$ 上的一项带类型构建器操作。每个候选方案均带有\textit{变更清单}：被编辑的组件、预期行为效果，以及预计改善或退化的任务。引入新的处理器代码时，Evolver 还必须提供冒烟测试，确认处理器能够实例化并在合成输入上运行且不抛出异常。构建器代数保证类型安全（每个候选方案都满足钩子类型契约和处理器组合规则），但不保证行为安全；通过类型检查的编辑仍可能产生非局部行为影响，而这些影响只有 Critic 与门控层能够检测。
+
+\paragraph{Critic 与门控。}
+Critic 防御奖励黑客，确定性门控层防御灾难性遗忘。Critic 把每个候选方案的变更清单与轨迹证据进行比较，评估编辑是否会通过共享状态或控制流引发非局部影响。发现缺口时，它会向 Evolver 发出一次修订请求。经过至多一次修订循环后，Critic 返回 \texttt{no\_op} 或有序的 \texttt{ship\_ranking}。确定性门控随后依次执行接受检查：清单完整性、配置规范化（确保候选方案处于规范形式）、构建或冒烟测试（适用时），以及跷跷板约束（对先前已通过任务进行回归检查；第~\ref{sec:aegis-mirror} 节）。第一个失败的检查会中止后续序列；通过的候选方案被提交，失败的候选方案则连同拒绝原因一起归档。这种设计把大语言模型判断与接受决定解耦：不论 Critic 如何建议，最终只有确定性检查能决定是否发布。
+
+\paragraph{设计原则。}
+语言模型子智能体负责探索、提出假设和建议；带类型结构与确定性门控决定哪些内容能够发布。这种分离确保，无论大语言模型子智能体出现何种失败模式，安全属性（无回归、无未经审计的编辑）都能成立。
+
+\subsection{适配循环}
+\label{sec:aegis-loop}
+
+算法~\ref{alg:aegis-loop} 形式化了适配循环（每次迭代对应第~\ref{sec:experiments} 节中的一“轮”）。从初始 harness $\mathcal{H}_0$ 出发，每次迭代都在适配批次上执行当前 harness，并选择性调用四个阶段：Digester、Planner 和 Evolver 分别根据继续条件（足够的可操作性、非空图景和至少一个类型安全候选方案）进行门控，而任何抵达 Critic 与确定性门控的候选方案都必须经过这两者。只有候选方案通过全部接受检查，本轮才会提交新的 harness。
+
+\subsection{通过集成路由实现变体隔离}
+\label{sec:aegis-ensemble}
+
+适配循环（第~\ref{sec:aegis-loop} 节）维护单一 harness $\mathcal{H}_t$。当任务需要相互冲突的行为时，改善一个子集的编辑可能使另一个子集退化；跷跷板约束会拒绝该编辑，从而保护稳定性，却也丢弃了局部有益的变更。\textit{变体隔离}维护至多 $K$ 个 harness 变体 $\{\mathcal{H}_t^{(1)},\ldots,\mathcal{H}_t^{(V_t)}\}$（$V_t\leq K$），并依据此前各轮中各变体在相应任务簇上的估计成功率，把每项任务路由到成功率最高的变体，从而解除这一限制。我们称该机制为\textit{集成路由}。
+
+门控层为每个候选方案区分两种结果：（1）编辑改善部分任务而不使任何任务退化，此时将其应用于目标变体；（2）编辑改善一个子集但使其他任务退化，此时系统不会直接拒绝编辑，而是派生一个新变体（若池已满，则淘汰性能最低的变体）。一旦存在多个变体，跷跷板约束就限定在逐变体范围：针对变体 $k$ 的候选方案只在路由到 $k$ 的任务上测试，因此对一个任务簇的改善不会使另一任务簇退化。该设计预测了三个属性，并在第~\ref{sec:exp-strategy} 节得到验证：（1）聚合轨迹不退化（峰值 $=$ 最终值）；（2）更多轮次中持续探索；（3）总 token 消耗更低。
+
+\section{Harness--模型协同演化}
+\label{sec:method-coevolution}
+
+第~\ref{sec:method-foundry} 节和第~\ref{sec:method-aegis} 节表明，在基础模型保持固定时，仅演化 harness 已能带来显著收益，而且对于更弱、更小的任务智能体，这些收益最大，因为更好的 harness 最容易弥补它们的行为缺口。协同演化并不取代这条路线，而是沿第二个轴扩展它。对于能力受限的小模型，harness 演化最终会触及\textit{脚手架上限}：harness 一旦提供了正确的工具、上下文和控制流，约束因素就变成冻结模型能否真正利用它们；harness 编辑无法提供模型本身所缺乏的推理能力。
+
+对称地，在固定 harness 下训练模型会遇到\textit{训练信号上限}：如果脚手架从未呈现能够激发新能力的上下文、工具或控制流，新获得的能力便得不到运用。模型是智能体的\textit{认知核心}，负责推理和规划；harness 是其\textit{执行装置}，决定模型感知什么、能调用什么，以及执行受到哪些约束。更精良的装置不能弥补薄弱的核心，更强大的核心也无法弥补从不调用它的装置。协同演化正是针对这一瓶颈：在演化 harness 的同一循环内训练模型，让智能体同时沿两个轴改进，从而突破任一单独改进都会留下的上限。共同演化互补能力组件的原则也见于其他场景：K\textsuperscript{2} Agent~\cite{wu2026k} 协同演化“知其然”（陈述性知识）与“知其所以然”（程序性技能），用于分层移动设备控制。
+
+图~\ref{fig:coevolution-loop} 展示了协同演化机制。\ProjectName 并非在彼此独立的 harness 演化阶段和模型训练阶段之间交替，而是在单次迭代中基于共享回放缓冲区同时运行二者。我们将形式化该迭代（第~\ref{sec:coevolution-loop} 节），描述两种优化底座（第~\ref{sec:coevolution-dual-grpo} 节），通过跨 harness GRPO 说明模型训练目标（第~\ref{sec:coevolution-grpo} 节），并刻画共享缓冲区上的离策略训练（第~\ref{sec:coevolution-offpolicy} 节）；正是后一性质让模型强化学习不产生额外的 rollout 成本。
+
+\begin{figure*}[!htbp]
+  \centering
+  \includegraphics[width=\textwidth]{images/co-evo.pdf}
+  \caption{\textbf{Harness--模型协同演化循环。}智能体 $(\mathcal{M}_t,\mathcal{H}_t)$ 在固定验证器和可观测性层下运行任务批次 $B_t$；所得轨迹与奖励 $(\tau,r)$ 进入共享回放缓冲区 $\mathcal{B}$。跨 harness 分组把同一任务在不同 harness 版本下的轨迹汇集起来，并计算组相对优势 $\hat{A}$。同一缓冲区以相同数据驱动两项更新：AEGIS harness 演化（Digester $\to$ Planner $\to$ Evolver $\to$ Critic，产生演化后的 harness $\mathcal{H}_{t+1}$）和\textbf{跨 harness GRPO}（组采样与裁剪 GRPO 目标，产生更新后的模型 $\mathcal{M}_{t+1}$）；二者共同进入下一次迭代。}
+  \label{fig:coevolution-loop}
+\end{figure*}
+
+\subsection{协同演化迭代}
+\label{sec:coevolution-loop}
+
+协同演化作用于二元组 $(\mathcal{M}_t,\mathcal{H}_t)$，其中 $\mathcal{M}_t$ 表示可训练模型参数（放宽第~\ref{sec:method-aegis} 节中的冻结模型假设），$\mathcal{H}_t$ 表示第 $t$ 次迭代的 harness 配置。系统维护采用先进先出淘汰策略、容量固定的回放缓冲区 $\mathcal{B}$。每次迭代按如下步骤进行：
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Rollout。}在适配批次 $B_t$ 上运行 $(\mathcal{M}_t,\mathcal{H}_t)$；可观测性层把每个 episode 记录为完整轨迹 $\tau_i$，涵盖每轮模型输出、每次工具调用和每项工具结果。
+  \item \textbf{验证。}固定验证器把每条轨迹评分为标量奖励 $r_i$。保持验证器不变，可使不同 harness 版本间的奖励保持可比，这是跨 harness 优势（式~\ref{eq:grpo-advantage}）的必要条件。
+  \item \textbf{写入缓冲区。}把每条已评分轨迹连同生成它的 harness 版本追加到共享缓冲区 $\mathcal{B}$，使连续各轮累积而非覆盖；先进先出淘汰确保 $\mathcal{B}$ 仅保留最近若干轮。
+  \item \textbf{Harness 演化}（$\mathcal{H}_{t+1}\leftarrow\text{AEGIS}(\mathcal{H}_t,\mathcal{B})$，非参数，第~\ref{sec:method-aegis} 节）。元智能体读取缓冲轨迹，将其视为脚手架失败位置的证据，提出一项离散结构编辑，并且仅在 Critic 和门控层验证通过后接纳该编辑。
+  \item \textbf{行为对数概率。}对本轮刚加入的轨迹，在其生成模型 $\mathcal{M}_t$ 下执行一次前向传播，得到 token 级对数概率 $\pi_{\theta_{\text{old}}}(\tau_i)$ 并缓存，以用于 GRPO 损失；更早轮次的轨迹复用它们写入时缓存的数值（第~\ref{sec:coevolution-offpolicy} 节）。
+  \item \textbf{GRPO 更新}（$\mathcal{M}_{t+1}\leftarrow\text{GRPO}(\mathcal{M}_t,\mathcal{B})$，参数化，第~\ref{sec:coevolution-grpo} 节）。把轨迹划分为跨 harness 版本的逐任务组，为每条轨迹分配组相对优势，并执行带固定参考模型 KL 锚点的裁剪策略梯度步骤。
+  \item \textbf{推进。}携带演化后的二元组 $(\mathcal{M}_{t+1},\mathcal{H}_{t+1})$ 返回步骤 1。
+\end{enumerate}
+
+每条轨迹同时充当 AEGIS 的诊断证据与 GRPO 的训练信号。Harness 演化（步骤 4）和模型更新（步骤 5--6）读取同一缓冲区，但在同一次迭代内，二者都不以另一方的输出为条件；必须等两者全部完成，下一轮 rollout 才会开始。
+
+\subsection{优化底座}
+\label{sec:coevolution-dual-grpo}
+
+\paragraph{Harness 侧（非参数优化）。}
+Harness 演化遵循第~\ref{sec:method-aegis} 节的方法，并从回放缓冲区 $\mathcal{B}$ 提取轨迹证据。它与独立运行 AEGIS 的主要区别是，$\mathcal{B}$ 包含来自多个模型检查点 $\mathcal{M}_0,\mathcal{M}_1,\ldots,\mathcal{M}_t$ 的轨迹，因此 Digester 所观察的行为变化同时来自模型更新与 harness 编辑。
+
+\paragraph{模型侧（通过 GRPO 进行参数优化）。}
+关键设计选择是\textit{跨 harness 分组准则}（在第~\ref{sec:coevolution-grpo} 节形式化）：共享同一任务标识符的所有轨迹组成一个 GRPO 组，不论它们由哪个 harness 或模型检查点产生，因此组内差异主要反映策略差异，而不只是采样噪声。
+
+\paragraph{互补性。}
+Harness 更新执行参数更新无法表达的离散结构变更（增加工具、替换控制处理器、重构提示词）。模型更新执行依赖高维上下文状态、无法由符号规范刻画的细粒度行为调整（何时调用哪个工具、如何表述查询、何时终止）。Harness 定义粗粒度的策略架构，模型则学习如何利用它。
+
+\subsection{通过跨 Harness GRPO 训练模型}
+\label{sec:coevolution-grpo}
+
+我们采用组相对策略优化（GRPO）~\cite{shao2024deepseekmath}。形式化地，缓冲区中的每条轨迹按如下方式生成：
+\begin{equation}
+  \tau_i\sim\text{Agent}(\mathcal{M}_k,\mathcal{H}_k,x_i),\quad k\in\{0,1,\ldots,t\},
+  \label{eq:trajectory-generation}
+\end{equation}
+其中 $i$ 是缓冲区 $\mathcal{B}$ 中的 $(x,\tau)$ 索引，$\mathcal{M}_k$ 和 $\mathcal{H}_k$ 是把任务 $x_i$ rollout 为轨迹 $\tau_i$ 时使用的模型检查点与 harness。由于先进先出淘汰把缓冲区限制在最近若干次迭代，缓冲轨迹来自与当前策略相近的模型版本。然而，它们的策略（工具选择、提示词结构、控制流逻辑）差异显著，而这种多样性来自连续多个 harness 版本 $\mathcal{H}_0,\ldots,\mathcal{H}_t$。在单策略强化学习中，组内变化仅来自随机采样；这里的变化则主要由 harness 身份决定，因此跨 harness 分组准则（式~\ref{eq:cross-harness-group}）对于有意义的优势估计至关重要。
+
+形式化地，对于任务 $x$，轨迹组会收集 $x$ 的全部轨迹，不论它们由哪个 $(\mathcal{M}_k,\mathcal{H}_k)$ 对产生：
+\begin{equation}
+  \mathcal{G}_x=\{\tau_i\in\mathcal{B}\mid\text{task}(\tau_i)=x\}
+  =\bigcup_k\{\tau\sim\text{Agent}(\mathcal{M}_k,\mathcal{H}_k,x)\}.
+  \label{eq:cross-harness-group}
+\end{equation}
+因此，模型接收的梯度信号来自策略之间的奖励对比，而不是固定策略内部的随机变化，从而能够内化不同 harness 版本中成功的策略。
+
+\paragraph{任务级对齐，而非动作级对齐。}
+跨 harness GRPO 执行\textit{任务级}对齐：来自不同 harness 版本的轨迹按任务身份分组，只依据验证器奖励比较。它不要求动作级对齐，因此动作空间不兼容（工具模式、提示词结构或控制流处理器不同）的 harness 版本可以在同一组中共存而不冲突。计算策略梯度时，每条轨迹 $\tau_i$ 都在生成它的 harness 版本 $\mathcal{H}_k$ 下回放：模型的对数概率 $\pi_\theta(\tau_i\mid x)$ 针对 $\mathcal{H}_k$ 在每一轮本应构造的提示词、工具模式和观察上下文进行评估。因此，GRPO 梯度完全作用于以 harness 专用上下文为条件的模型输出 token，而不作用于 harness 结构动作或环境转移。这种设计把 harness 演化（可以在不同版本间自由修改动作空间）与模型训练（只要求在每条轨迹自己的 harness 上下文中得到 token 级对数概率）解耦。
+
+组相对优势为：
+\begin{equation}
+  \hat{A}(\tau_i)=\frac{r_i-\mu(\mathcal{G}_x)}{\sigma(\mathcal{G}_x)+\epsilon},
+  \label{eq:grpo-advantage}
+\end{equation}
+其中 $r_i$ 是轨迹 $\tau_i$ 的奖励，$\mu(\mathcal{G}_x)$ 和 $\sigma(\mathcal{G}_x)$ 分别是组内奖励均值和标准差。不断演化的 harness 相当于模型强化学习的结构化探索算子：每个新版本都向任务的采样分布注入一种不同的行为模式，式~\ref{eq:grpo-advantage} 中的优势则把模型推向验证器评分最高的模式。因此，单策略采样无法提供的探索广度由不断演化的脚手架自身提供。
+
+需要最大化的策略目标为：
+\begin{equation}
+  \mathcal{J}_{\text{GRPO}}(\theta)=\mathbb{E}_{x,\,\tau_i\sim\mathcal{B}}\!\left[\min\!\left(\rho_i(\theta)\hat{A}(\tau_i),\;\text{clip}\!\left(\rho_i(\theta),1{-}\epsilon_c,1{+}\epsilon_c\right)\hat{A}(\tau_i)\right)\right]-\beta D_{\text{KL}}\!\left(\pi_\theta\,\|\,\pi_{\text{ref}}\right),
+  \label{eq:grpo-objective}
+\end{equation}
+其中
+\begin{equation}
+  \rho_i(\theta)=\frac{\pi_\theta(\tau_i\mid x)}{\pi_{\theta_{\text{old}}}(\tau_i\mid x)},\qquad \pi_{\theta_{\text{old}}}=\mathcal{M}_d,
+  \label{eq:grpo-ratio}
+\end{equation}
+是当前策略 $\mathcal{M}_k$ 与生成 $\tau_i$ 的检查点 $\mathcal{M}_d$（式~\ref{eq:trajectory-generation}）之间的重要性采样比，$\epsilon_c$ 是裁剪阈值，$\beta D_{\text{KL}}(\pi_\theta\|\pi_{\text{ref}})$ 则惩罚与固定参考模型 $\pi_{\text{ref}}$ 的偏离。比率中的行为策略 $\pi_{\theta_{\text{old}}}$ 与 KL 项中的参考策略 $\pi_{\text{ref}}$ 不同：$\pi_{\text{ref}}=\mathcal{M}_0$ 在整个训练过程中固定，而 $\pi_{\theta_{\text{old}}}$ 随轨迹变化，必须从缓冲区恢复（第~\ref{sec:coevolution-offpolicy} 节）。
+
+\subsection{混合策略缓冲区上的离策略训练}
+\label{sec:coevolution-offpolicy}
+
+回放缓冲区在本质上是离策略的：第 $t$ 次迭代时，其中包含模型检查点 $\mathcal{M}_0,\mathcal{M}_1,\ldots,\mathcal{M}_t$ 在 harness $\mathcal{H}_0,\mathcal{H}_1,\ldots,\mathcal{H}_t$ 下生成的轨迹（式~\ref{eq:trajectory-generation}），所以缓冲区分布与正在更新的策略 $\pi_\theta$ 不匹配。为每条缓冲轨迹恢复 $\pi_{\theta_{\text{old}}}$ 是核心离策略难题。
+
+\paragraph{行为策略 $\pi_{\theta_{\text{old}}}$。}
+重要性比率（式~\ref{eq:grpo-ratio}）校正 $\pi_\theta$ 与生成 $\tau_i$ 的检查点 $\mathcal{M}_k$ 之间的差距。由于缓冲区中的 $\mathcal{M}_k$ 各不相同，不能从任何单一模型恢复 $\pi_{\theta_{\text{old}}}(\tau_i)$：我们在写入缓冲区时，于 $\mathcal{M}_k$ 下执行一次前向传播将其物化，把 token 级对数概率缓存在磁盘上，并在每次梯度步骤中复用。这样，缓存的行为对数概率就与每一步重新计算的当前对数概率 $\pi_\theta(\tau_i)$ 解耦。
+
+\paragraph{有界离策略偏差。}
+先进先出淘汰把缓冲区限制为 $C$ 条轨迹；若每轮有 $s$ 个样本，最大模型版本滞后为 $\lfloor C/s\rfloor$ 轮，因此每个缓存的 $\pi_{\theta_{\text{old}}}$ 都来自 $\pi_\theta$ 的一个有界窗口之内，生成轨迹的策略不会与正在更新的策略相差过大。同一窗口也限制了 harness 陈旧度，因此跨 harness 组（式~\ref{eq:cross-harness-group}）只混合近期脚手架版本，模型不会主要针对过时 harness 进行训练。
+
+\paragraph{不增加 rollout 成本的回放复用。}
+智能体强化学习的主要成本是 rollout（让智能体在环境中执行，包括模型解码、工具调用和验证），而不是梯度更新。在协同演化中，单轮探索只产生一组轨迹，却同时服务于两项更新：相同轨迹既驱动 AEGIS harness 更新（第~\ref{sec:method-aegis} 节），也通过共享缓冲区（第~\ref{sec:coevolution-loop} 节）驱动跨 harness GRPO 模型更新。GRPO 通过回放消费这些轨迹，自身不发起 rollout。因此，加入模型更新的边际成本仅限于：（i）每条轨迹执行一次缓存 $\pi_{\theta_{\text{old}}}$ 的前向传播；（ii）梯度步骤本身，二者都不涉及 rollout。没有哪条轨迹是专为训练模型而生成的。因此，联合优化具有经济性：它只付出离线训练计算的代价，就能获得模型改进，而不增加 harness 演化已经执行的 rollout。

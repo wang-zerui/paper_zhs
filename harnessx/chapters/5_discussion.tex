@@ -1,0 +1,85 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why Compositional Structure Matters for Evolution}
+
+As Table~\ref{tab:strategy} shows, the Global strategy (used in all main experiments) peaks early at 73.8\% (R4) on GAIA before collapsing to 49.5\% (peak--final gap: $-$24.3\%). Global uses \ProjectName's typed components but does not leverage them for isolation; every edit is evaluated against all tasks jointly. Under pass@2, a task whose success probability has degraded can still register as ``solved,'' so sub-threshold regressions evade the seesaw constraint. Preventing this collapse requires variant isolation, which composability enables: \ProjectName's compositional structure makes the \emph{intended scope} of each edit explicit, a precondition for variant isolation to confine each edit's evaluation to its target cluster rather than evaluating against the full task set indiscriminately (Section~\ref{sec:exp-strategy}).
+
+The relationship parallels type systems: types do not generate correct programs, but they make incorrect programs \emph{detectable}. Analogously, typed components do not prevent bad edits, but make their scope \emph{explicit}, enabling independent variation. The strategy comparison suggests that variant isolation is necessary for stable evolution (Global, which lacks it, degrades after peaking); without compositional structure, the intended scope of an edit is undefined, making variant isolation ill-posed. Compositional structure does not, however, guarantee bounded behavioral effects: the $\tau^3$-Bench Telecom failure demonstrates that accumulated same-type edits can induce sub-threshold coupling that degrades multiple dialogue patterns simultaneously.
+
+\subsection{The Role of Trace Richness}
+
+\ProjectName's full execution trace $\tau$ provides diagnostic information beyond a scalar reward. The case studies (Section~\ref{sec:exp-failure}) confirm this: detecting reward hacking on GAIA (shipped at R10, detected at R11) required inspecting \emph{how} improvement occurred (format exploitation vs.\ genuine retrieval), and detecting under-exploration on ALFWorld (R4--R7) required tracking edit-type distribution and ship-prediction accuracy. Neither signal is recoverable from per-task binary outcomes alone.
+
+These observations motivate a design principle: \textit{the richness of the feedback signal bounds the sophistication of evolution that can be safely performed}. From scalar reward alone, none of the three pathologies is detectable: a score change cannot distinguish reward hacking from genuine improvement, under-exploration from convergence, or catastrophic forgetting from evaluation noise. Trace structure makes each pathology diagnosable, provided prior-round traces exist for comparison. The $\tau^3$-Bench Telecom failure illustrates the boundary: despite five rounds of prior traces (R2--R6), accumulated regressions evaded the seesaw constraint because no individual edit crossed the detection threshold. Structured trace recording is therefore necessary for detecting pathologies, but not sufficient for preventing them: when coupling accumulates below the per-task detection threshold, traces record the symptoms only after damage has occurred.
+
+
+
+\subsection{Scope and Limits of the Operational Mirror}
+
+The RL--symbolic-space mirror is a design heuristic, not a formal framework. Classical RL convergence guarantees require sufficient exploration of the state--action space, a condition unattainable when states are symbolic harness configurations and actions are open-ended code edits. Under the Global strategy, GAIA (GPT-5.4) stagnates entirely ($\Delta{=}0.0$ over 15 rounds); the variant-isolation ablation (Section~\ref{sec:exp-strategy}) recovers stable improvement (87.4\% final = peak), but nothing guarantees this extends to longer horizons (where variants may over-specialize) or to task distributions whose inter-task dependencies prevent clean variant separation. The mirror also does not predict \textit{which} pathology will dominate: on $\tau^3$-Bench Telecom, catastrophic forgetting surfaced at R7; on ALFWorld, under-exploration dominated R4--R7; on GAIA, reward hacking surfaced only at R10.
+
+We therefore treat the mirror as a design checklist rather than a predictive theory: it identifies failure modes to defend against but does not predict their ordering, timing, or relative severity. The three pathologies are representative, not exhaustive; additional RL phenomena (e.g., distribution shift when the adaptation batch diverges from deployment tasks, reward sparsity on hard benchmarks) may manifest as analogous failure modes in symbolic space.
+
+\subsection{Generalization Across Model Families}
+
+On ALFWorld, the Opus 4.6 meta-agent evolves harnesses for task agents from three model families:
+\begin{itemize}
+  \item Sonnet 4.6 (same family): 83.6\% $\to$ 94.8\% (+11.2\%)
+  \item GPT-5.4 (different family): 76.9\% $\to$ 97.8\% (+20.9\%)
+  \item Qwen3.5-9B (different family, weaker): 53.0\% $\to$ 97.0\% (+44.0\%)
+\end{itemize}
+The inverse-scaling effect (Section~\ref{sec:exp-main}) explains the magnitude ordering: gains track inverse baseline performance (Qwen $>$ GPT $>$ Sonnet) rather than proximity to the meta-agent's model family. All three configurations hold the meta-agent fixed (Opus 4.6) while varying the task agent; we do not evaluate whether a weaker meta-agent can achieve comparable gains.
+
+A complementary ablation (Section~\ref{sec:exp-meta-agent}) finds that a single-agent evolver achieves comparable accuracy to the four-stage AEGIS pipeline (86.4\% vs.\ 87.4\%, within sampling noise at $n{=}103$) when both share the same meta-agent model and infrastructure. This suggests that at this meta-agent capability level, the four-stage decomposition primarily provides efficiency gains (${\sim}$12\% fewer tokens) and auditability rather than measurable accuracy improvement.
+
+\subsection{Cost-Performance Tradeoffs}
+
+As Table~\ref{tab:cost-summary} details, evolution incurs upfront compute that amortizes over subsequent task invocations.
+
+\begin{table}[!htbp]
+\centering
+\small
+\caption{Evolution cost summary. All main experiments use the Global (single-harness) strategy; the variant-isolation row is from the strategy ablation (Section~\ref{sec:exp-strategy}).}
+\label{tab:cost-summary}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Experiment} & \textbf{Rounds} & \textbf{Total Tokens} & \textbf{Gain} \\
+\midrule
+GAIA, GPT-5.4 (Global)             & 15 & 143.7M & 0.0\% (peak $=$ initial) \\
+GAIA, GPT-5.4 (Variant isolation, ablation) & 15 & 107.8M & +13.6\% \\
+ALFWorld, Sonnet 4.6 (Global)       & 7  & 43.4M  & +11.2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+
+The strategy ablation (Section~\ref{sec:exp-strategy}) shows that variant isolation is both more effective (87.4\% vs.\ 49.5\% final) and more efficient (107.8M vs.\ 143.7M tokens) than Global on GAIA. The token reduction has two sources: (1)~structurally, each edit under variant isolation is evaluated only against its target cluster rather than the full task set, reducing per-round evaluation cost; (2)~under Global, the steadily degrading baseline causes more candidates to fail gating, wasting tokens on candidates that never ship. On benchmarks where evolution converges quickly (ALFWorld R4--R7, SWE-bench R2--R3), Global suffices and degradation does not materialize within the run horizon.
+
+The evolved harness also affects \textit{per-task inference cost}. On GAIA, per-task token consumption drops by ${\sim}$25\% (targeted tool selection shortens trajectories); on ALFWorld, it rises by ${\sim}$60\% (task-decomposition prompts lengthen execution).
+
+At deployment, the evolved harness is a static artifact requiring no meta-agent inference; tasks outside the evolution set are routed to the variant with the highest overall success rate on the evolution set. On GAIA, the upfront 107.8M tokens amortize within ${\sim}$1{,}300 invocations (${\sim}$83K tokens saved per invocation). On ALFWorld, per-task cost increases; the return is accuracy (+11.2\%), not cost reduction.
+
+\subsection{Ethical Considerations}
+
+Self-evolving agent systems require explicit oversight. \ProjectName provides three mechanisms:
+\begin{enumerate}
+  \item \textbf{Auditability}: every shipped edit carries a manifest and a rollback target; rejected candidates are archived with rejection reasons.
+  \item \textbf{Deterministic gating}: the seesaw constraint rejects any edit that regresses even a single previously solved task under pass@2.
+  \item \textbf{Human-in-the-loop}: the gating layer supports human approval for edits exceeding a configurable risk threshold (not exercised in our automated experiments).
+\end{enumerate}
+The $\tau^3$-Bench failure (Section~\ref{sec:exp-failure}) illustrates their limits: five consecutive same-type edits (R2--R6) accumulated sub-threshold coupling undetected by the seesaw constraint; the sixth edit (R7) triggered a visible $-$14.0\% regression, yet no individual edit violated the constraint. This is a structural limitation of per-edit gating: sub-threshold regressions accumulate undetected regardless of how many prior rounds have demonstrated apparent stability under the same constraint.
+
+\subsection{Limitations}
+
+Beyond the limitations noted above, five additional constraints bound the generality of our results:
+\begin{itemize}
+  \item \textbf{No held-out evaluation.} All reported gains are measured on the same task set used for evolution. Since we report peak accuracy and evaluate on the adaptation set itself, the numbers carry both selection bias and potential overfitting. Generalization to unseen tasks within the same distribution is plausible but untested.
+  \item \textbf{Discrete action spaces only.} All experiments use agents with discrete, text-based action spaces. We have not tested whether the framework extends to continuous action spaces (e.g., robotic control).
+  \item \textbf{Closed-source meta-agent.} AEGIS requires a meta-agent capable of multi-file code generation, structured trace analysis, and multi-step planning. Open-weight models approaching this capability level (e.g., Qwen3.5-72B, Llama-4-Maverick) remain untested as meta-agents.
+  \item \textbf{Joint control assumption.} Co-evolution requires joint control over both harness evolution and model training. In practice, these concerns are often separated across teams or organizations, making a shared replay buffer (Section~\ref{sec:coevolution-loop}) impractical without cross-team coordination.
+  \item \textbf{Benchmark coverage.} All SWE-bench Verified runs use a 55-task subsample, and $\tau^3$-Bench evaluates only three domains (Retail, Airline, Telecom). Conclusions, particularly the inverse-scaling effect, may not generalize to domains with different task heterogeneity or to larger evaluation sets.
+\end{itemize}
+
